@@ -1,0 +1,95 @@
+# 已知问题 / 待修复清单
+
+记录于 2026-07-09 的一次审查会话。按严重程度排列,附证据与建议修复方向,供换环境后继续处理。
+
+## P0 —— 安全假象(最优先)
+
+### 1. `verifyCommand` 默认空,验证门形同虚设
+
+- **位置**:`extensions/lib.ts` `runVerify()`
+  ```ts
+  const cmd = (s.verifyCommand ?? cfg.build.verifyCommand ?? "").trim();
+  if (!cmd) return { ok: true, output: "(无验证命令)" };
+  ```
+- **问题**:没配置 `/wf verify` 或 `workflow.config.json` 里的 `build.verifyCommand`,任何 reasonix 改动都被判定"验证通过"。整条 BUILD 流水线的质量门控在默认状态下等于不存在。
+- **风险**:deepseek-flash 在真实代码库里拥有无监督写权限(reasonix `autonomous`,只受它自己的 `deny` 规则约束,不受我们的验证门约束),默认配置下没有任何机制挡住有问题的改动被直接 commit。
+- **从未被真实测试覆盖**:所有冒烟测试都没配置 `verifyCommand`,测的是"门永远开着"这条路径。
+- **建议修复**:`cmdBuild` 里检测到没有验证命令时,默认拒绝执行(或强制要求用户显式确认"我知道没有验证命令,继续"),而不是静默通过。
+
+## P1 —— 真实缺陷(有代码/冒烟证据)
+
+### 2. 单进程内存状态单例,无并发/多需求支持,存在数据错位风险
+
+- **位置**:`extensions/workflow.ts` `let wf: WorkflowState | undefined;`
+- **问题**:模块级单例。BUILD 跑到一半时如果调用 `/wf new` 开新需求,`wf` 引用被切换,但旧需求的 `pi.exec` 子进程仍在跑,跑完后 `saveState(wf)` 可能写入错误的 reqId 目录或覆盖错误的对象。
+- **未验证但合理推断**:从未在真实场景里手抖触发过,纯粹是运气好没爆。
+- **建议修复**:BUILD 期间锁定当前需求,`/wf new` 检测到有需求处于 `mode: "build"` 时应拒绝或警告。
+
+### 3. `extractJson` 的容错解析是"猜",猜错不会响亮失败
+
+- **位置**:`extensions/workflow.ts` `extractJson()`
+  ```ts
+  const s = stripped.indexOf("{");
+  const e = stripped.lastIndexOf("}");
+  ```
+- **问题**:如果模型输出在字符串值中间被截断(比如某个 `spec` 字段内容里恰好包含 `}`),这段逻辑可能"成功"解析出语法合法但语义错误/不完整的 JSON,不会抛异常提醒你,会安静生成缺失或错位的子任务规格,直接送进 BUILD 让 reasonix 执行不完整指令。
+- **风险场景**:子任务多、spec 详细时,`splitPrompt` 输出可能撞到 `maxTokens: 8192` 硬顶被截断。未做过"大量子任务"场景的压力测试。
+- **建议修复**:JSON 解析失败或解析出的对象缺少必要字段(如每个 subtask 缺 `spec`)时应该报错重试,而不是接受一个可能不完整的结果。
+
+### 4. `aggregateMetrics` 靠字段名猜测,reasonix 换字段名会静默失效
+
+- **位置**:`extensions/lib.ts` `aggregateMetrics()`——`key.includes("cost")`、`key.includes("cache") && key.includes("hit")` 这类启发式匹配。
+- **问题**:今天恰好对上 reasonix v1.11 的字段名。reasonix 是快速迭代项目(TS→Go 重写、v0.x→v1.0→v2),字段名一旦变化,这段代码不会报错,只会把 `cost`/`cacheHit` 算成 `undefined`,`summary.json` 悄悄失去意义,没有任何提示。
+- **建议修复**:增加字段缺失时的显式警告(而不是静默 `undefined`),或锁定 reasonix 版本号并在 README 标注兼容范围。
+
+### 5. `review.md` 无强制力,BUILD 终点可能被无视
+
+- **位置**:`extensions/workflow.ts` `cmdBuild()` 结尾,review 完成后只是 `ctx.ui.notify(...)`。
+- **问题**:review 是"建议性"(主动设计决定,不改),但系统没有任何机制强制或提醒用户真的打开看——BUILD 完成的 notify 和其它 info 级别通知视觉上没有区别,即使 review 里写了 blocker 也不会有更强的提示。
+- **建议修复**:review 中出现"blocker"关键词时,`notify` 级别提升为 `error`,并在 `state.json` 里记录 `reviewSeverity` 字段供后续查询。
+
+## P2 —— 未验证的合理风险(没有踩过,但值得警惕)
+
+### 6. 跨平台假设:全程只在 macOS 验证过
+
+- `runVerify` 用 `bash -lc`,Windows 上无 bash 会直接失效。
+- `fs.realpathSync` 的符号链接行为、路径分隔符在 Windows 上可能不同。
+- README 没有任何跨平台声明,是隐藏假设。
+
+### 7. `waitTurnComplete` 的 2.5 秒静默期检测是经验值,没做边界测试
+
+- **位置**:`extensions/workflow.ts` `waitTurnComplete()`,600 秒硬顶。
+- 网络抖动、模型输出忽快忽慢场景下可能误判"turn 已结束"(提前判定完成导致截断)。真实边界场景从未触发验证。
+
+### 8. `slug()` 对标题做 `.slice(0, 40)` 硬切,可能切在多字节字符中间
+
+- JS 字符串按 UTF-16 code unit 切,不按字素簇。极端长或非常规 Unicode 标题理论上能生成非法/错位文件名。概率低,无测试覆盖。
+
+### 9. 测试覆盖的是"状态机逻辑正确性",不是"真实故障场景"
+
+- `test/build.test.ts` 全部用假的 `execReasonix`,测的是我们自己 `runBuildPipeline` 的逻辑,完全没测:
+  - reasonix 真实失败(网络断、限流、输出格式异常)时 `pi.exec` 的实际行为
+  - glm/deepseek 长时间不响应时的真实超时表现
+  - 大规模 PRD/子任务(10+ 个)下 prompt 是否会撞 token 上限
+
+### 10. 产品定位问题:小需求过度工程,大需求验证不足
+
+- 极简需求(如加一个函数)走完整 PLAN(讨论+分析+PRD+拆分)+ BUILD(reasonix+review)链路,token/时间成本远超直接用 reasonix 实现。
+- 真正需要这套流程的复杂需求(多子任务、跨模块依赖)从未被真实测试覆盖——所有冒烟测试都是玩具级场景(临时 repo、种子 commit、单函数需求)。
+
+## 已确认不是缺陷、无需处理的结论(避免重复纠结)
+
+- **架构选择本身(pi 编排 + reasonix 执行)是合理的**,已核实:
+  - opencode 的 subagent 机制是"内部模型/prompt 角色切换",无法承载"委托给独立外部进程"这种需求,架构上不支持替换成 reasonix。
+  - opencode 的 plugin hook 体系没有暴露 `before_provider_request` 级别的钩子,无法在插件层修复它的缓存命中率问题;fork 内核改的维护成本远超现有方案。
+  - reasonix 的缓存机制(90%+~99.82%,用户长期实测)是真实有效的,和编排层用什么工具无关——编排层脆弱不会污染执行层的缓存表现,两者物理隔离(`pi.exec` 只是启动子进程等退出码)。
+- 严格串行、无并行 —— 主动设计取舍,避免多进程写冲突。
+- 失败即停、无自动重试 —— 主动设计取舍,人工介入优于自动重试可能导致的连锁错误。
+
+## 建议优先级(下次处理时按此顺序)
+
+1. **P0 #1**(验证门默认拒绝)—— 安全性问题,投入小、价值最高。
+2. **P1 #2**(单例状态竞态防护)—— 加一个"BUILD 中拒绝新 `/wf new`"的简单检查即可大幅降低风险。
+3. **P1 #3、#4**(解析容错改成显式失败)—— 把"静默错误"改成"响亮报错",不需要大改架构。
+4. **P1 #5**(review 严重程度提示)—— 小改动,提升可见性。
+5. P2 系列按实际使用场景触发情况决定是否处理。
