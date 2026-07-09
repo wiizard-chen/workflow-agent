@@ -5,7 +5,7 @@
   "keywords": ["pi-package"],
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"],
+    "extensions": ["./extensions/workflow.ts"],
     "skills": ["./skills"]
   },
   "devDependencies": {
