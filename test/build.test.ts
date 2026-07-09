@@ -136,6 +136,59 @@ async function main() {
   // cleanup
   fs.rmSync(tmp, { recursive: true, force: true });
 
+  // --- resumable build: pre-existing done/no-change subtasks are skipped, not re-run ---
+  console.log("\nresumable build:");
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "wf-resume-"));
+  const repo2 = path.join(tmp2, "repo");
+  fs.mkdirSync(repo2, { recursive: true });
+  sh("git", ["init", "-q"], repo2);
+  sh("git", ["config", "user.email", "t@t.dev"], repo2);
+  sh("git", ["config", "user.name", "test"], repo2);
+  fs.writeFileSync(path.join(repo2, "README.md"), "seed\n");
+  sh("git", ["add", "-A"], repo2);
+  sh("git", ["commit", "-qm", "seed"], repo2);
+  fs.mkdirSync(path.join(repo2, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo2, "src", "01.txt"), "impl 01\n"); // pretend subtask 01 already landed
+  sh("git", ["add", "-A"], repo2);
+  sh("git", ["commit", "-qm", "subtask 01: prior run"], repo2);
+
+  const resumeState: WorkflowState = {
+    reqId: "20260709-resume-demo",
+    name: "resume-demo",
+    repo: repo2,
+    mode: "build",
+    createdAt: new Date().toISOString(),
+    baseline: sh("git", ["rev-parse", "HEAD"], repo2).stdout.trim(),
+    subtasks: [
+      { id: "01", title: "already done", file: "subtasks/01.md", depends_on: [], status: "done", commit: "deadbeef" },
+      { id: "02", title: "already no-change", file: "subtasks/02.md", depends_on: ["01"], status: "no-change" },
+      { id: "03", title: "still pending", file: "subtasks/03.md", depends_on: ["02"], status: "pending" },
+    ],
+  };
+  fs.mkdirSync(path.join(repo2, ".workflow", resumeState.reqId, "results"), { recursive: true });
+
+  let executedIds: string[] = [];
+  const resumeResult = await runBuildPipeline(resumeState, CONFIG, {
+    execReasonix: async (t) => {
+      executedIds.push(t.id);
+      fs.appendFileSync(path.join(repo2, "src", `${t.id}.txt`), `impl ${t.id}\n`);
+      return { code: 0 };
+    },
+    verify: () => ({ ok: true, output: "" }),
+    notify: () => {},
+    save: () => {},
+  });
+
+  check("only pending subtask (03) executed", executedIds.length === 1 && executedIds[0] === "03", JSON.stringify(executedIds));
+  check("01 remains done, untouched", resumeState.subtasks[0].status === "done" && resumeState.subtasks[0].commit === "deadbeef");
+  check("02 remains no-change", resumeState.subtasks[1].status === "no-change");
+  check("03 executed and committed", resumeState.subtasks[2].status === "done" && !!resumeState.subtasks[2].commit);
+  check("resume result counts (2 done total incl. pre-existing + 03, 1 no-change, 0 fail/skip)",
+    resumeResult.ok === 2 && resumeResult.noChange === 1 && resumeResult.fail === 0 && resumeResult.skip === 0 && resumeResult.stopped === false,
+    JSON.stringify(resumeResult));
+
+  fs.rmSync(tmp2, { recursive: true, force: true });
+
   console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }

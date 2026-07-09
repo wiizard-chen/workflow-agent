@@ -226,6 +226,11 @@ export interface BuildResult {
  * Execute the approved plan serially: dependency gate -> reasonix -> verify ->
  * commit; stop on first failure and skip everything downstream. Produces the
  * cumulative diff and the metrics summary. Real git ops run against s.repo.
+ *
+ * Resumable: subtasks whose `status` is already "done" or "no-change" when
+ * this is called are treated as already satisfied (added to the dependency
+ * `done` set) and are NOT re-executed. Callers that want a full fresh rerun
+ * should reset every subtask's status to "pending" before calling this.
  */
 export async function runBuildPipeline(s: WorkflowState, cfg: WorkflowConfig, deps: BuildDeps): Promise<BuildResult> {
   const verify = deps.verify ?? ((st: WorkflowState) => runVerify(cfg, st));
@@ -234,6 +239,12 @@ export async function runBuildPipeline(s: WorkflowState, cfg: WorkflowConfig, de
   let stopped = false;
 
   for (const t of s.subtasks) {
+    if (t.status === "done" || t.status === "no-change") {
+      done.add(t.id);
+      deps.notify(`↷ ${t.id} ${t.title} — 已${t.status === "done" ? "完成" : "无改动"},跳过(断点续跑)。`, "info");
+      continue;
+    }
+
     const blockedBy = t.depends_on.filter((d) => !done.has(d));
     if (stopped || blockedBy.length > 0) {
       t.status = "skipped";

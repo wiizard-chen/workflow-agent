@@ -136,8 +136,15 @@ function lockReadonly(pi: ExtensionAPI): void {
 
 function readMcpServers(): Record<string, unknown> {
   try {
-    const p = path.join(process.cwd(), ".mcp.json");
-    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+    // .mcp.json lives next to workflow.config.json (the framework directory),
+    // not process.cwd() — pi's cwd at launch is whatever directory the user
+    // happened to be in, which is not necessarily where this extension (and
+    // its .mcp.json) lives.
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidates = [path.join(here, "..", ".mcp.json"), path.join(here, ".mcp.json")];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+    }
   } catch (_e) { /* ignore */ }
   return {};
 }
@@ -377,11 +384,23 @@ async function cmdDraft(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
   ctx.ui.notify(`计划已生成:\n- PRD: ${reqPath(wf, "prd.md")}\n- 子任务(${subs.length}):\n${lines.join("\n")}\n\n审阅 prd.md 与 subtasks/。不满意继续讨论后再 /wf draft;满意则 /build。`, "info");
 }
 
-async function cmdBuild(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+async function cmdBuild(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先运行 /wf new。", "warning"); return; }
   if (!wf.subtasks || wf.subtasks.length === 0) { ctx.ui.notify("没有可执行的计划。先在 PLAN 模式 /wf draft。", "warning"); return; }
-  // reset statuses for a fresh build run
-  for (const t of wf.subtasks) { t.status = "pending"; t.commit = undefined; t.note = undefined; }
+
+  const fresh = args.trim() === "--fresh";
+  if (fresh) {
+    // Full rerun: clear every subtask's status so nothing is treated as already done.
+    for (const t of wf.subtasks) { t.status = "pending"; t.commit = undefined; t.note = undefined; }
+  } else {
+    // Resumable (default): subtasks left over from a prior run in "failed" or
+    // "skipped" state are retried; "done"/"no-change" are left alone so
+    // runBuildPipeline skips re-executing them. Only clear stale skip/fail
+    // notes so a subtask that failed last time gets a clean retry attempt.
+    for (const t of wf.subtasks) {
+      if (t.status === "failed" || t.status === "skipped") { t.status = "pending"; t.note = undefined; }
+    }
+  }
   wf.mode = "build";
   wf.baseline = gitHead(wf.repo);
   saveState(wf); setModeStatus(ctx);
@@ -392,7 +411,12 @@ async function cmdBuild(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
     if (!go) { wf.mode = "plan"; saveState(wf); setModeStatus(ctx); return; }
   }
 
-  ctx.ui.notify(`BUILD 开始:${wf.subtasks.length} 个子任务,串行执行(reasonix / ${CONFIG.reasonix.model})。`, "info");
+  const alreadyDone = wf.subtasks.filter((t) => t.status === "done" || t.status === "no-change").length;
+  ctx.ui.notify(
+    `BUILD 开始:${wf.subtasks.length} 个子任务,串行执行(reasonix / ${CONFIG.reasonix.model})。` +
+      (fresh ? "(--fresh:全量重跑)" : alreadyDone > 0 ? `(断点续跑:${alreadyDone} 个已完成将跳过;用 /build --fresh 强制全量重跑)` : ""),
+    "info",
+  );
 
   const result: BuildResult = await runBuildPipeline(wf, CONFIG, {
     execReasonix: async (t: SubtaskState) => {
@@ -495,7 +519,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/plan                            返回 PLAN(与 deepseek-pro 讨论)",
               "/wf analyze [--refresh]          分析目标仓库,生成/刷新跨需求复用的仓库简报",
               "/wf draft                        生成/刷新完整计划(缺仓库简报会先自动分析一次;PRD + 子任务拆分)",
-              "/build                           进入 BUILD:reasonix 串行实现+验证+每子任务一commit,再整体 review",
+              "/build [--fresh]                进入 BUILD:reasonix 串行实现+验证+每子任务一commit,再整体 review。默认断点续跑(跳过已完成子任务),--fresh 强制全量重跑",
               "/wf status                       查看当前需求与子任务状态",
               "/wf verify <cmd>                 设置本需求的验证命令(留空清除)",
             ].join("\n"),
@@ -511,7 +535,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("build", {
-    description: "进入 BUILD 模式并执行已批准的计划(reasonix 实现 + 整体 review)",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => { await cmdBuild(pi, ctx); },
+    description: "进入 BUILD 模式并执行计划(默认断点续跑,跳过已完成子任务;--fresh 强制全量重跑)",
+    handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdBuild(pi, ctx, args); },
   });
 }

@@ -51,7 +51,7 @@ pi -e ~/pi-workflow/extensions/workflow.ts
 2. 自由对话讨论需求。
 3. `/wf draft` — 生成/刷新**完整计划**:若目标 repo 尚无仓库简报会先自动分析一次(见下),再由 glm-5.2 写 `prd.md` → deepseek-pro 拆 `subtasks/*.md` + `subtasks/index.json`(带 `depends_on`/顺序)。可反复 `/wf draft` 迭代。
 4. 审阅 `.workflow/<reqId>/prd.md` 与 `subtasks/`。
-5. `/build` — 进入 **BUILD**:按 index 顺序**串行**,每个子任务 `reasonix run` 实现 → 验证命令 → **只提交代码改动**(每子任务一 commit)。失败即停,下游依赖 skip。全部通过后 glm-5.2 产出 `review.md`,并把 `.workflow/<reqId>/` 工件单独提交一次。
+5. `/build` — 进入 **BUILD**:按 index 顺序**串行**,每个子任务 `reasonix run` 实现 → 验证命令 → **只提交代码改动**(每子任务一 commit)。失败即停,下游依赖 skip。**默认断点续跑**:重新运行 `/build` 会跳过已 `done`/`no-change` 的子任务,只重跑上次失败或被跳过的部分;需要全量重跑则 `/build --fresh`。全部通过后 glm-5.2 产出 `review.md`,并把 `.workflow/<reqId>/` 工件单独提交一次。
 6. 读 `review.md` 决定后续;需修订 `/plan` 回到讨论。
 
 辅助命令:`/wf status`、`/wf analyze [--refresh]`(见下)、`/wf verify <cmd>`(设置本需求的验证命令,如 `go build ./...`、`npm test`、`pytest -q`;留空则只看 reasonix 退出码)、`/plan`。
