@@ -1,6 +1,5 @@
 {
   "packages": [
-    "git:github.com/scaryrawr/pi-mcp",
-    "npm:pi-usage-dashboard"
+    "git:github.com/scaryrawr/pi-mcp"
   ]
 }

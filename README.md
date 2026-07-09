@@ -110,23 +110,6 @@ pi install git:github.com/scaryrawr/pi-mcp -l   # 项目本地安装 MCP 桥接�
 ```
 `.mcp.json` 已跟随仓库提交,换机器 clone 后装好 `pi-mcp` 即可用,无需重配。第一次调用 `npx @playwright/mcp@latest` 会有一次性下载(约 15-20 秒)。
 
-## 实时用量仪表盘
-
-装了第三方扩展 [`pi-usage-dashboard`](https://github.com/Jaraxxxx/pi-usage-dashboard)(替换默认 footer),实时显示 turns/延迟/请求数/token/成本/上下文占用/模型,和我们自己的 `WF:<mode> <reqId>` 状态行共存(各占一行,互不冲突):
-
-```
-[30 tools, 1 skills] (main)  ⏳ 2s  ~/Documents/workflow
-Turns 1 │ Lat 2.7s │ Reqs 1 │ Tokens ↑54 ↓18 │ Cost $0 │ Ctx ░░░░░░░░░░ 6.0k/1.0M (0.6%)   🧠◕ deepseek/deepseek-v4-pro
-WF:plan 20260709-151051-dashtest
-```
-
-命令:`/usage`(全屏详情)、`/budget 5.00`(设预算,超支变红)、`/toggledash`(隐藏/显示)。
-
-首次使用:
-```bash
-pi install npm:pi-usage-dashboard -l --approve
-```
-
 ## 配置
 
 `workflow.config.json`(在扩展上级目录)可调:provider endpoint / 模型 id、各阶段角色、reasonix 二进制名 / 模型 / 超时、默认验证命令、commit 前缀。改完 `/reload` 或重启 pi。
