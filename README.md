@@ -20,28 +20,27 @@ pi 侧的 deepseek / zai(GLM Coding Plan)provider 由扩展启动时用 `$DEEPSE
 - 环境变量 `DEEPSEEK_API_KEY`、`GLM_API_KEY` 已在 shell(如 zshrc)配好。
 - 目标项目是一个 **git 仓库**。
 
-## 加载
+## 安装
+
+仓库已是标准 pi package(公开仓库,匿名 HTTPS 即可安装,无需 SSH key):
 
 ```bash
-pi -e /Users/macadmin/Documents/workflow/extensions/workflow.ts
-```
-或作为 pi package 安装(`pi install -l git:...` / 本地路径)。
+# 全局安装(推荐):任何目录进 pi 都自动带上 /wf、/plan、/build
+pi install git:github.com/wiizard-chen/workflow-agent --approve
 
-## 在新机器上复用
+# 或项目本地安装:只在这个项目里生效
+pi install git:github.com/wiizard-chen/workflow-agent -l --approve
+```
+
+装完直接 `pi`(或 `pi -a` 跳过项目信任提示)进入,无需 `-e` 指定文件路径。`workflow.config.json`、`.mcp.json`、内置 skill 都随包一起装好。
+
+升级到最新版:`pi update --extension git:github.com/wiizard-chen/workflow-agent`。
+
+### 从本地源码加载(开发/调试用)
 
 ```bash
-# 1. 前置:装 pi / reasonix / git,并在 shell 配好 DEEPSEEK_API_KEY、GLM_API_KEY
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-#   reasonix 按其官方方式安装,并 reasonix setup 配好 deepseek-flash
-
-# 2. 克隆本仓库
-git clone <your-repo-url> ~/pi-workflow
-
-# 3. 直接加载扩展(-e 指向克隆目录里的扩展文件)
-pi -e ~/pi-workflow/extensions/workflow.ts
+pi -e /path/to/workflow/extensions/workflow.ts
 ```
-需要的话把上一行做成 shell 别名,或用 `pi install -l git:<your-repo-url>` 作为 pi package 安装。
-`workflow.config.json` 跟着仓库走,换机器无需重配(密钥仍从环境变量读)。想用浏览器 MCP 的话额外跑一次 `pi install git:github.com/scaryrawr/pi-mcp -l`(见下文"浏览器访问"一节)。
 
 ## 用法
 
