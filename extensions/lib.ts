@@ -65,6 +65,13 @@ export function nowStamp(d: Date = new Date()): string {
 export function reqDir(s: WorkflowState): string { return path.join(s.repo, ".workflow", s.reqId); }
 export function reqPath(s: WorkflowState, ...p: string[]): string { return path.join(reqDir(s), ...p); }
 
+/** Repo-level (not per-requirement) steering artifact: shared across all requirements in this repo. */
+export function repoBriefPath(repo: string): string { return path.join(repo, ".workflow", "_repo-brief.md"); }
+export function readRepoBrief(repo: string): string | undefined {
+  const p = repoBriefPath(repo);
+  return fs.existsSync(p) ? fs.readFileSync(p, "utf8") : undefined;
+}
+
 export function saveState(s: WorkflowState): void {
   try {
     fs.mkdirSync(reqDir(s), { recursive: true });

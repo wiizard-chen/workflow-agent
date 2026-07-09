@@ -28,6 +28,8 @@ import {
   isGitRepo,
   gitHead,
   nowStamp,
+  readRepoBrief,
+  repoBriefPath,
   reqPath,
   type RoleRef,
   runBuildPipeline,
@@ -200,26 +202,68 @@ function registerProviders(pi: ExtensionAPI): void {
 // Prompts (stages return content as text; the extension writes the files)
 // ---------------------------------------------------------------------------
 
-function prdPrompt(): string {
+/** Prepend the repo-level steering brief (if present) so the model doesn't
+ *  start from zero knowledge of the target repo. Absent brief => no-op. */
+function withBrief(repo: string, body: string): string {
+  const brief = readRepoBrief(repo);
+  if (!brief) return body;
   return [
-    `你是资深产品经理。基于本会话上文的需求讨论,产出一份专业的 PRD。`,
-    `直接把 PRD 的 Markdown 正文作为你的回答输出(不要使用任何工具,不要用代码块包裹,不要额外解释)。`,
-    `PRD 需包含:背景/目标、范围(含明确的非目标)、功能点/用户故事、可测试的验收标准、技术约束/依赖、风险。`,
+    `以下是对目标仓库的分析简报(供你参考,不要重复分析仓库):`,
+    `--- 仓库简报 开始 ---`,
+    brief.trim(),
+    `--- 仓库简报 结束 ---`,
+    ``,
+    body,
   ].join("\n");
 }
 
-function splitPrompt(reqId: string): string {
+function analyzePrompt(): string {
   return [
+    `你是资深技术负责人,第一次接触这个仓库。用只读工具(read/grep/find/ls)探查这个仓库,产出一份分析简报。`,
+    `直接把简报的 Markdown 正文作为你的回答输出(不要用工具写文件,不要用代码块包裹,不要额外解释)。`,
+    `简报需包含以下几节,每节给具体事实(文件名/路径/命令),不要泛泛而谈:`,
+    `## 技术栈`,
+    `语言、框架、主要依赖(从 package.json / go.mod / requirements.txt / Cargo.toml 等实际文件读出来)。`,
+    `## 目录结构与关键模块`,
+    `顶层目录职责;入口文件;核心业务逻辑在哪;测试在哪。`,
+    `## 代码约定`,
+    `命名风格、测试框架、格式化/lint 工具;如果有 CONTRIBUTING/AGENTS.md/CLAUDE.md 之类的约定文档,摘要其要点。`,
+    `## 相关已有模块`,
+    `扫一眼有没有和"常见新需求"可能重叠或可复用的现有模块(不确定就写"未发现明显相关模块",不要编)。`,
+    `## 建议验证命令`,
+    `从 package.json scripts / Makefile / CI 配置等找到的构建或测试命令,给出一条最合适的(如 \`npm test\`、\`go build ./... && go test ./...\`);找不到就写"未发现,建议留空"。这一行必须以 \`建议命令:\` 开头,后面跟命令本身(找不到则写"未发现")。`,
+  ].join("\n");
+}
+
+/** Parse the "建议命令: <cmd>" line out of the analyze stage's output, if present. */
+function extractSuggestedVerifyCommand(brief: string): string | undefined {
+  const m = brief.match(/建议命令[:：]\s*`?([^\n`]+)`?/);
+  if (!m) return undefined;
+  const cmd = m[1].trim();
+  if (!cmd || /未发现|建议留空|none|n\/a/i.test(cmd)) return undefined;
+  return cmd;
+}
+
+function prdPrompt(repo: string): string {
+  return withBrief(repo, [
+    `你是资深产品经理。基于本会话上文的需求讨论,产出一份专业的 PRD。`,
+    `直接把 PRD 的 Markdown 正文作为你的回答输出(不要使用任何工具,不要用代码块包裹,不要额外解释)。`,
+    `PRD 需包含:背景/目标、范围(含明确的非目标)、功能点/用户故事、可测试的验收标准、技术约束/依赖、风险。`,
+  ].join("\n"));
+}
+
+function splitPrompt(repo: string, reqId: string): string {
+  return withBrief(repo, [
     `你是技术负责人。基于本会话上文的需求与 PRD,把需求拆成一组尽量独立、可单独实现与验证的子任务。`,
     `只输出一个严格 JSON(不要任何解释、不要代码块包裹),格式:`,
     `{"subtasks":[{"id":"01","title":"简短标题","depends_on":[],"spec":"该子任务的完整 Markdown 规格:目标/改动范围与文件/详细实现说明/可验证的验收标准"}]}`,
     `要求:id 从 "01" 递增;depends_on 用其它子任务 id 表示先后依赖;数组顺序即执行顺序(被依赖者在前);粒度适中,每个子任务是一个可独立提交的改动;避免循环依赖。`,
     `(reqId=${reqId};spec 字段是字符串,内部换行用 \\n 转义。)`,
-  ].join("\n");
+  ].join("\n"));
 }
 
 function reviewPrompt(s: WorkflowState): string {
-  return [
+  return withBrief(s.repo, [
     `你是资深代码审查者。对整个需求的实现做一次整体 review。`,
     `请用 read 工具读取以下文件后再评审:`,
     `- PRD:${reqPath(s, "prd.md")}`,
@@ -227,7 +271,7 @@ function reviewPrompt(s: WorkflowState): string {
     `- 全量累积改动 diff:${reqPath(s, "results", "cumulative.diff")}`,
     `然后把 review 报告的 Markdown 正文作为你的回答直接输出(不要用 write/edit,不要代码块包裹)。`,
     `报告包含:1) 总体结论(是否符合 PRD、是否有缺失验收项);2) 问题清单,每条 文件:行 + 严重程度(blocker/major/minor)+ 说明;3) 子任务间集成/一致性问题;4) 建议(仅建议)。`,
-  ].join("\n");
+  ].join("\n"));
 }
 
 // ---------------------------------------------------------------------------
@@ -261,17 +305,35 @@ async function cmdPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<
   ctx.ui.notify(`已进入 PLAN 模式(对代码只读)。讨论需求,或 /wf draft 生成/刷新计划。`, "info");
 }
 
+async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext, opts: { silent?: boolean } = {}): Promise<boolean> {
+  if (!wf) { ctx.ui.notify("没有活动需求。先运行 /wf new。", "warning"); return false; }
+  if (!opts.silent) ctx.ui.notify("分析仓库(deepseek-pro,只读探查)…", "info");
+  const brief = await runStageText(pi, ctx, CONFIG.roles.discuss, analyzePrompt());
+  if (!brief) { ctx.ui.notify("仓库分析失败(模型无输出)。", "error"); return false; }
+  const text = stripFence(brief);
+  fs.writeFileSync(repoBriefPath(wf.repo), text + "\n");
+  const suggested = extractSuggestedVerifyCommand(text);
+  const hint = suggested ? `\n检测到建议验证命令:${suggested}\n可执行 /wf verify ${suggested} 采用。` : "";
+  ctx.ui.notify(`仓库简报已生成:${repoBriefPath(wf.repo)}(后续需求自动复用,除非 /wf analyze --refresh 重新分析)${hint}`, "info");
+  return true;
+}
+
 async function cmdDraft(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先运行 /wf new。", "warning"); return; }
   if (wf.mode !== "plan") { ctx.ui.notify("只能在 PLAN 模式生成计划。先 /plan。", "warning"); return; }
 
+  if (!readRepoBrief(wf.repo)) {
+    ctx.ui.notify("尚无仓库简报,先自动分析一次(仅需一次,后续需求复用)…", "info");
+    if (!(await cmdAnalyze(pi, ctx, { silent: true }))) return;
+  }
+
   ctx.ui.notify("① 生成 PRD(glm-5.2)…", "info");
-  const prd = await runStageText(pi, ctx, CONFIG.roles.prd, prdPrompt());
+  const prd = await runStageText(pi, ctx, CONFIG.roles.prd, prdPrompt(wf.repo));
   if (!prd) { ctx.ui.notify("PRD 生成失败(模型无输出)。", "error"); return; }
   fs.writeFileSync(reqPath(wf, "prd.md"), stripFence(prd) + "\n");
 
   ctx.ui.notify("② 拆分子任务(deepseek-pro)…", "info");
-  const splitText = await runStageText(pi, ctx, CONFIG.roles.split, splitPrompt(wf.reqId));
+  const splitText = await runStageText(pi, ctx, CONFIG.roles.split, splitPrompt(wf.repo, wf.reqId));
   const parsed = splitText ? extractJson(splitText) : undefined;
   const rawSubs = parsed && Array.isArray(parsed.subtasks) ? parsed.subtasks : undefined;
   if (!rawSubs || rawSubs.length === 0) { ctx.ui.notify("子任务拆分失败(未得到有效 JSON)。可再试一次 /wf draft。", "error"); return; }
@@ -379,9 +441,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("wf", {
-    description: "workflow 流水线:new / draft / status / verify / help",
+    description: "workflow 流水线:new / analyze / draft / status / verify / help",
     getArgumentCompletions: (prefix: string) => {
-      const subs = ["new", "draft", "status", "verify", "help"];
+      const subs = ["new", "analyze", "draft", "status", "verify", "help"];
       const f = subs.filter((s) => s.startsWith(prefix));
       return f.length ? f.map((s) => ({ value: s, label: s })) : null;
     },
@@ -391,6 +453,15 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       const rest = trimmed.slice(sub.length).trim();
       switch (sub) {
         case "new": await cmdNew(pi, ctx, rest); break;
+        case "analyze": {
+          if (!wf) { ctx.ui.notify("无活动需求。先 /wf new。", "warning"); break; }
+          if (readRepoBrief(wf.repo) && rest !== "--refresh") {
+            ctx.ui.notify(`仓库简报已存在:${repoBriefPath(wf.repo)}\n如需重新分析,用 /wf analyze --refresh。`, "info");
+            break;
+          }
+          await cmdAnalyze(pi, ctx);
+          break;
+        }
         case "draft": await cmdDraft(pi, ctx); break;
         case "status": cmdStatus(ctx); break;
         case "verify":
@@ -404,7 +475,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "workflow 用法(plan/build 双模式):",
               "/wf new <需求名> [目标repo路径]  开始新需求,进入 PLAN(pi 工具只读)",
               "/plan                            返回 PLAN(与 deepseek-pro 讨论)",
-              "/wf draft                        生成/刷新完整计划(PRD + 子任务拆分)",
+              "/wf analyze [--refresh]          分析目标仓库,生成/刷新跨需求复用的仓库简报",
+              "/wf draft                        生成/刷新完整计划(缺仓库简报会先自动分析一次;PRD + 子任务拆分)",
               "/build                           进入 BUILD:reasonix 串行实现+验证+每子任务一commit,再整体 review",
               "/wf status                       查看当前需求与子任务状态",
               "/wf verify <cmd>                 设置本需求的验证命令(留空清除)",

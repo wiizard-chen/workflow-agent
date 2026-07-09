@@ -49,12 +49,28 @@ pi -e ~/pi-workflow/extensions/workflow.ts
 
 1. `/wf new <需求名> [目标repo路径]` — 新建需求,进入 **PLAN**(对代码只读),默认与 deepseek-pro 讨论。省略路径则用当前目录。
 2. 自由对话讨论需求。
-3. `/wf draft` — 生成/刷新**完整计划**:glm-5.2 写 `prd.md` → deepseek-pro 拆 `subtasks/*.md` + `subtasks/index.json`(带 `depends_on`/顺序)。可反复 `/wf draft` 迭代。
+3. `/wf draft` — 生成/刷新**完整计划**:若目标 repo 尚无仓库简报会先自动分析一次(见下),再由 glm-5.2 写 `prd.md` → deepseek-pro 拆 `subtasks/*.md` + `subtasks/index.json`(带 `depends_on`/顺序)。可反复 `/wf draft` 迭代。
 4. 审阅 `.workflow/<reqId>/prd.md` 与 `subtasks/`。
 5. `/build` — 进入 **BUILD**:按 index 顺序**串行**,每个子任务 `reasonix run` 实现 → 验证命令 → **只提交代码改动**(每子任务一 commit)。失败即停,下游依赖 skip。全部通过后 glm-5.2 产出 `review.md`,并把 `.workflow/<reqId>/` 工件单独提交一次。
 6. 读 `review.md` 决定后续;需修订 `/plan` 回到讨论。
 
-辅助命令:`/wf status`、`/wf verify <cmd>`(设置本需求的验证命令,如 `go build ./...`、`npm test`、`pytest -q`;留空则只看 reasonix 退出码)、`/plan`。
+辅助命令:`/wf status`、`/wf analyze [--refresh]`(见下)、`/wf verify <cmd>`(设置本需求的验证命令,如 `go build ./...`、`npm test`、`pytest -q`;留空则只看 reasonix 退出码)、`/plan`。
+
+## 仓库简报(`/wf analyze`)
+
+第一次接触一个目标 repo 时,`/wf draft` 会自动先跑一次 `deepseek-pro` 的**只读**探查,产出 `.workflow/_repo-brief.md`(注意:不挂在某个 `reqId` 下,是**仓库级**产物,同一个 repo 的所有需求共享复用)。内容包含:
+
+- 技术栈(语言/框架/主要依赖)
+- 目录结构与关键模块职责
+- 代码约定(命名风格、测试框架、格式化/lint)
+- 相关已有模块(避免子任务重复造轮子)
+- 建议验证命令(从 `package.json scripts` / `Makefile` / CI 配置里找到的构建/测试命令;检测到会提示你 `/wf verify` 采用)
+
+简报生成后自动前置拼进 `prd`/`split`/`review` 三个阶段的 prompt,模型不用每次都重新探查仓库。
+
+- 手动触发:`/wf analyze`(简报已存在则提示跳过,不重复分析)
+- 强制刷新:`/wf analyze --refresh`(仓库结构有大改动时用)
+- `/wf draft` 检测到没有简报会自动跑一次,无需你记得手动调用
 
 ## 内置 skill:计划追问法
 
@@ -65,17 +81,19 @@ pi -e ~/pi-workflow/extensions/workflow.ts
 ## 产物布局(在目标 repo 内)
 
 ```
-<repo>/.workflow/<reqId>/
-├── state.json              # 流水线状态(可断点续看)
-├── prd.md                  # PRD(glm-5.2)
-├── subtasks/
-│   ├── 01-*.md ...         # 子任务规格(deepseek-pro)
-│   └── index.json          # 顺序 + depends_on
-├── results/
-│   ├── NN.metrics.json     # 每个 reasonix run 的 token/cache/cost
-│   ├── cumulative.diff     # 全量累积改动(供 review)
-│   └── summary.json        # 成本 + 平均 cache 命中汇总
-└── review.md               # 整体 review(glm-5.2,建议性)
+<repo>/.workflow/
+├── _repo-brief.md           # 仓库级简报(/wf analyze,跨需求复用,不属于任何 reqId)
+└── <reqId>/
+    ├── state.json              # 流水线状态(可断点续看)
+    ├── prd.md                  # PRD(glm-5.2)
+    ├── subtasks/
+    │   ├── 01-*.md ...         # 子任务规格(deepseek-pro)
+    │   └── index.json          # 顺序 + depends_on
+    ├── results/
+    │   ├── NN.metrics.json     # 每个 reasonix run 的 token/cache/cost
+    │   ├── cumulative.diff     # 全量累积改动(供 review)
+    │   └── summary.json        # 成本 + 平均 cache 命中汇总
+    └── review.md               # 整体 review(glm-5.2,建议性)
 ```
 
 代码改动走 git,**每子任务一个 code commit**(`subtask NN: 标题`),`.workflow/` 工件最后单独一个 commit。
