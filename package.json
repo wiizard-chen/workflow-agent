@@ -5,7 +5,8 @@
   "keywords": ["pi-package"],
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.3",

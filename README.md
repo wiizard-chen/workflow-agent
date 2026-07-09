@@ -56,6 +56,12 @@ pi -e ~/pi-workflow/extensions/workflow.ts
 
 辅助命令:`/wf status`、`/wf verify <cmd>`(设置本需求的验证命令,如 `go build ./...`、`npm test`、`pytest -q`;留空则只看 reasonix 退出码)、`/plan`。
 
+## 内置 skill:计划追问法
+
+仓库自带一个 skill `plan-interrogation`(`skills/plan-interrogation/SKILL.md`),扩展加载时会通过 `resources_discover` 自动挂上(`pi -e .../workflow.ts` 即生效,无需额外 `--skill`)。
+
+它的方法论:在 PLAN 阶段逐条走查设计树、一次只问一个问题并给出推荐答案、达成共识后再继续,能查代码就先查不发问。讨论需求/评审计划时 pi 会按描述自动匹配加载;也可 `/skill:plan-interrogation` 强制载入。
+
 ## 产物布局(在目标 repo 内)
 
 ```

@@ -363,6 +363,15 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_e, ctx) => { setModeStatus(ctx as any); });
 
+  // Make the bundled skill(s) discoverable even when loaded via `pi -e workflow.ts`.
+  pi.on("resources_discover", async () => {
+    try {
+      const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
+      if (fs.existsSync(dir)) return { skillPaths: [dir] };
+    } catch (_e) { /* ignore */ }
+    return {};
+  });
+
   // Capture assistant text from completed turns (ignore empty/error turns so a
   // failed attempt that pi auto-retries doesn't clobber the successful text).
   pi.on("agent_end", async (event: any) => {
