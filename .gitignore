@@ -1,0 +1,9 @@
+# deps (only needed for local typecheck; not required to run the extension)
+node_modules/
+
+# os / editor
+.DS_Store
+*.swp
+
+# logs / scratch
+*.log

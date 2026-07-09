@@ -1,0 +1,34 @@
+{
+  "$comment": "workflow 扩展配置。修改后重启 pi 或 /reload 生效。apiKey 用 $ENV 形式,从你的 shell 环境(zshrc)解析。",
+  "providers": {
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "api": "openai-completions",
+      "thinkingFormat": "deepseek"
+    },
+    "zai": {
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "apiKeyEnv": "GLM_API_KEY",
+      "api": "openai-completions",
+      "thinkingFormat": "zai"
+    }
+  },
+  "roles": {
+    "discuss": { "provider": "deepseek", "model": "deepseek-v4-pro" },
+    "prd":     { "provider": "zai",      "model": "glm-5.2" },
+    "split":   { "provider": "deepseek", "model": "deepseek-v4-pro" },
+    "review":  { "provider": "zai",      "model": "glm-5.2" }
+  },
+  "reasonix": {
+    "bin": "reasonix",
+    "model": "deepseek-flash",
+    "maxSteps": 0,
+    "timeoutMs": 1800000
+  },
+  "build": {
+    "verifyCommand": "",
+    "$comment_verify": "每个子任务实现后执行的验证命令(在目标 repo 内,如 'go build ./...' / 'npm test' / 'pytest -q')。留空则只看 reasonix 退出码。可用 /wf verify <cmd> 按需求覆盖。",
+    "commitPrefix": "subtask"
+  }
+}
