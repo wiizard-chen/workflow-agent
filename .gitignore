@@ -1,6 +1,11 @@
 # deps (only needed for local typecheck; not required to run the extension)
 node_modules/
 
+# pi package installs (pulled by `pi install`; .pi/settings.json's "packages"
+# list is what makes them reproducible on a new machine, so that IS tracked)
+.pi/git/
+.pi/npm/
+
 # os / editor
 .DS_Store
 *.swp

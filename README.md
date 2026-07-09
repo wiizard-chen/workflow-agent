@@ -41,7 +41,7 @@ git clone <your-repo-url> ~/pi-workflow
 pi -e ~/pi-workflow/extensions/workflow.ts
 ```
 需要的话把上一行做成 shell 别名,或用 `pi install -l git:<your-repo-url>` 作为 pi package 安装。
-`workflow.config.json` 跟着仓库走,换机器无需重配(密钥仍从环境变量读)。
+`workflow.config.json` 跟着仓库走,换机器无需重配(密钥仍从环境变量读)。想用浏览器 MCP 的话额外跑一次 `pi install git:github.com/scaryrawr/pi-mcp -l`(见下文"浏览器访问"一节)。
 
 ## 用法
 
@@ -97,6 +97,18 @@ pi -e ~/pi-workflow/extensions/workflow.ts
 ```
 
 代码改动走 git,**每子任务一个 code commit**(`subtask NN: 标题`),`.workflow/` 工件最后单独一个 commit。
+
+## 浏览器访问(Playwright MCP)
+
+PLAN 阶段(讨论需求 / `/wf analyze`)有时需要读网页(查文档、API 参考)。这层挂在 **pi 编排层**,通过第三方扩展 [`scaryrawr/pi-mcp`](https://github.com/scaryrawr/pi-mcp) 桥接标准 MCP server——**注意 pi 核心本身不内置 MCP**("It intentionally does not include built-in MCP",官方设计原则),必须靠扩展接入。reasonix(执行层)已有自己等价的浏览器/MCP 能力,这里不重复配置,只服务 pi 侧的讨论/分析阶段。
+
+已接好 [`microsoft/playwright-mcp`](https://github.com/microsoft/playwright-mcp)(`.mcp.json`,项目级),PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*` 工具,同时仍然拦截本地文件写入。
+
+首次使用需要:
+```bash
+pi install git:github.com/scaryrawr/pi-mcp -l   # 项目本地安装 MCP 桥接扩展
+```
+`.mcp.json` 已跟随仓库提交,换机器 clone 后装好 `pi-mcp` 即可用,无需重配。第一次调用 `npx @playwright/mcp@latest` 会有一次性下载(约 15-20 秒)。
 
 ## 配置
 

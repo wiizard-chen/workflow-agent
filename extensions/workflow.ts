@@ -121,7 +121,25 @@ function setModeStatus(ctx: ExtensionCommandContext): void {
 }
 
 function lockReadonly(pi: ExtensionAPI): void {
-  try { pi.setActiveTools(READONLY_TOOLS); } catch (_e) { /* ignore */ }
+  try {
+    // Keep the read-only built-ins, plus any MCP-bridged tools registered by the
+    // pi-mcp extension (server_toolName, e.g. playwright_browser_navigate) so
+    // PLAN-mode discussion/analyze can browse the web without gaining write
+    // access to the target repo's real files. pi-mcp registers one server per
+    // .mcp.json entry; we don't hardcode names, we detect by prefix.
+    const mcpServerNames = Object.keys(readMcpServers());
+    const allNames = pi.getAllTools().map((t) => t.name);
+    const mcpTools = allNames.filter((n) => mcpServerNames.some((s) => n.startsWith(`${s}_`)) || n.startsWith("mcp__"));
+    pi.setActiveTools([...READONLY_TOOLS, ...mcpTools]);
+  } catch (_e) { /* ignore */ }
+}
+
+function readMcpServers(): Record<string, unknown> {
+  try {
+    const p = path.join(process.cwd(), ".mcp.json");
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch (_e) { /* ignore */ }
+  return {};
 }
 
 function extractAssistantText(messages: any[]): string {
