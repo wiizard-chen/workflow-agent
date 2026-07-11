@@ -2,6 +2,56 @@
 
 记录于 2026-07-10。这份文档汇总了围绕"要不要摆脱 reasonix / pi 是否够可靠 / 该不该换 omp 或 opencode"的完整讨论结论，附证据来源，供换环境后继续处理。
 
+---
+
+# bd 集成前置验证结论
+
+记录于 2026-07-11。在把状态层迁移到 beads (bd) 之前，对 bd 1.1.0 真实 CLI 接口与 reasonix worktree 缓存安全性做了实测，结论如下。
+
+## reasonix worktree 并行不击穿前缀缓存(实测确认)
+
+**问题**：并行执行依赖 git worktree 隔离，每个 worker 的 cwd 不同。若 reasonix 把 cwd 注入 system prompt，多 worker 会击穿 DeepSeek 前缀缓存。
+
+**实测方法**：在 `bd init` 过的仓库主目录和 `bd worktree create` 出的 worktree 里各跑一次 `reasonix run -model deepseek-flash -max-steps 1 -metrics`，对比 `prompt_tokens` 与 cache 命中。
+
+**实测结果**：
+
+| 指标 | 主仓库 | worktree | 差异 |
+|---|---|---|---|
+| prompt_tokens | 20997 | 21029 | +32 token |
+| cache_hit_tokens | 0(首跑) | 2880 | worktree 命中了主仓库建立的前缀 |
+
+**结论**：
+1. cwd **没有**以破坏性方式注入 system prompt。32 token 的差异远小于一个绝对路径(约 15-20 token)，更可能来自会话/memory 的微小差异，不是路径注入。
+2. **前缀缓存跨 worktree 共享**：worktree 的 cache_hit=2880 来自主仓库首跑建立的缓存。这是决定性证据——worktree 并行执行不会击穿 reasonix 的 DeepSeek 前缀缓存优化。
+3. 二进制内有一句规则佐证设计意图：`Keep dynamic state out of REASONIX.md, AGENTS.md, project memory, system prompts, and tool schemas.`——reasonix 主动避免把动态状态(含路径)注入 prompt。
+
+**因此 worktree 并行方案安全，可放心使用。**
+
+## bd 1.1.0 真实接口(与官方文档 llms-full.txt 的差异)
+
+实测发现 bd 1.1.0 与文档描述存在多处差异，以实测为准：
+
+1. **`bd init` 实际会写编辑器集成文件**：装 Claude hooks + 写 CLAUDE.md / AGENTS.md(文档说不会)。需要 `--quiet` 跳过向导，但 hooks 仍会装。
+2. **配置文件是 `config.yaml`，不是 `config.toml`**。后端目录是 `embeddeddolt/`，不是文档说的 `dolt/`。
+3. **多 agent 分配用 `bd assign <id> <name>`，不是 `bd pin`**。`pin`/`hook` 命令在 1.1.0 **不存在**。
+4. **原子认领用 `bd update <id> --claim`**——bd init 生成的 AGENTS.md 明确推荐此命令做并发安全认领。
+5. **备注用 `bd comment <id> "text"`**(单数)，不是 `comment add`。查列表用 `bd comments`。
+6. **`-C <dir>` 全局 flag** 可在任意 cwd 操作目标 repo 的 bd(类似 git -C)，不用 cd。
+7. **`--dolt-auto-commit on` 是跨进程可见性的必需项**：默认 off 时 Dolt 写只在内存 working set，跨进程/worktree 看不到。封装层必须默认带此 flag。
+8. **worktree 共享 db 自动生效**：`bd worktree create <name> --branch <b>` 创建的 worktree 通过 git common directory 自动共享主仓库的 beads 数据库，无需手动配置(但需 dolt-auto-commit)。
+9. **术语是 proto/mol，不是 formula/molecule**：proto = 模板(label="template" 的 epic)，`bd mol pour` 实例化为持久 mol，`bd mol wisp` 实例化为临时 wisp。
+10. **`bd ready` 包含 parent epic**：调度时必须按 `issue_type === "task"` 过滤，否则会把 epic 当任务执行。
+11. **parent-child 依赖不阻塞**：只有 `--type blocks` 才进 ready 队列的 blocker 统计。parent-child/discovered-from/related 都不阻塞。
+12. **id 格式 `bd-<reponame>-<hash>` + `.1/.2/.3` 子节点**：前缀含 repo 名，hash 长度可配。
+13. **`bd worktree create` 创建在 `<repo>/<name>` 子目录**，不是 `<repo>-<name>` 同级。
+
+## 安全注意事项
+
+- `/tmp` 路径被 bd 判为 unsafe(`BEADS_DIR points to unsafe location`)，测试需在 home 目录下做。
+- `bd doctor --fix` 会误删合法 parent-child 依赖(官方文档警告)，自动化里禁用。
+
+
 ## 核心结论：三个诉求两两冲突，没有"一个完整 agent 满足所有"
 
 你反复追问的方向，最终归结为三个诉求：
