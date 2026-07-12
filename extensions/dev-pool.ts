@@ -111,7 +111,15 @@ export class DevPool {
    * First task ever → plain `run`. Subsequent → `run --continue` (resume session).
    */
   private reasonixArgs(specPath: string, dev: Dev): string[] {
+    // Prefix the dev's role positioning (see .omp/agents/dev.md) so reasonix
+    // knows its single-responsibility boundary, then the task instruction.
+    // The role block is kept short here; the full dev.md is the source of truth.
+    const rolePrefix =
+      `【角色】你是 pi-workflow 的开发执行者(dev),单一职责:只实现当前分配给你的这一个 task。` +
+      `不拆分需求、不测试整体产出、不越界实现其他 task。先读规格,严守验收标准,过验证门。` +
+      `阻碍建 bd bug(不要写本地 TODO);进度/失败写 bd comment(单数)。bd 操作详见 bd-work skill。\n`;
     const instruction =
+      rolePrefix +
       `实现这个子任务。完整规格在文件:${specPath}(先读它)。` +
       `严格按其中的验收标准实现,只做这一个子任务,不要越界实现其他子任务。`;
     const args = [

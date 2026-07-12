@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pi-workflow · 经理驱动架构总览</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-soft: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --pink: #f778ba;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 48px 24px 80px; }
+
+  header { text-align: center; margin-bottom: 48px; }
+  header h1 {
+    font-size: 2.4em; margin: 0 0 8px; font-weight: 700;
+    background: linear-gradient(90deg, var(--accent), var(--purple));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  header .sub { color: var(--text-dim); font-size: 1.05em; }
+  header .tag {
+    display: inline-block; margin-top: 14px; padding: 4px 14px;
+    background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: 999px; font-size: 0.85em; color: var(--accent);
+  }
+
+  section { margin-bottom: 56px; }
+  h2 {
+    font-size: 1.5em; margin: 0 0 20px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    color: var(--bg); font-size: 0.75em; font-weight: 700;
+  }
+  h3 { font-size: 1.15em; margin: 24px 0 12px; color: var(--purple); }
+
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 20px;
+  }
+  .flow-card { padding: 32px 16px; }
+  .mermaid {
+    display: flex; justify-content: center; background: var(--bg-soft);
+    border-radius: 8px; padding: 20px; min-height: 200px;
+  }
+
+  /* 模型分工表 */
+  table { width: 100%; border-collapse: collapse; font-size: 0.95em; }
+  th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-weight: 600; background: var(--bg-soft); }
+  td code, p code, li code {
+    background: var(--bg-soft); padding: 2px 7px; border-radius: 5px;
+    font-size: 0.88em; color: var(--green); font-family: "SF Mono", Menlo, monospace;
+  }
+
+  /* 命令流程 */
+  .steps { list-style: none; padding: 0; counter-reset: step; }
+  .steps li {
+    counter-increment: step; position: relative; padding: 12px 0 12px 52px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .steps li:last-child { border-bottom: none; }
+  .steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 12px;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--bg-soft); border: 2px solid var(--accent);
+    color: var(--accent); display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.9em;
+  }
+
+  /* 缺陷卡片 */
+  .issue { margin-bottom: 14px; border-left: 4px solid var(--border); padding-left: 18px; }
+  .issue.p0 { border-color: var(--red); }
+  .issue.p1 { border-color: var(--orange); }
+  .issue.p2 { border-color: var(--text-dim); }
+  .issue .badge {
+    display: inline-block; padding: 1px 9px; border-radius: 5px;
+    font-size: 0.75em; font-weight: 700; margin-right: 8px; vertical-align: middle;
+  }
+  .badge.p0 { background: var(--red); color: var(--bg); }
+  .badge.p1 { background: var(--orange); color: var(--bg); }
+  .badge.p2 { background: var(--bg-soft); color: var(--text-dim); border: 1px solid var(--border); }
+  .badge.done { background: var(--green); color: var(--bg); }
+  .badge.open { background: var(--bg-soft); color: var(--orange); border: 1px solid var(--orange); }
+  .issue h4 { margin: 0 0 6px; font-size: 1.02em; }
+  .issue p { margin: 6px 0; color: var(--text-dim); font-size: 0.92em; }
+
+  /* 设计要点 */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .feat {
+    background: var(--bg-soft); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px;
+  }
+  .feat .icon { font-size: 1.5em; margin-bottom: 8px; }
+  .feat h4 { margin: 0 0 6px; color: var(--green); }
+  .feat p { margin: 0; color: var(--text-dim); font-size: 0.9em; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; font-size: 0.85em; color: var(--text-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+  footer { text-align: center; color: var(--text-dim); font-size: 0.85em; margin-top: 40px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>pi-workflow</h1>
+    <div class="sub">需求 → PRD → 拆 task → 分配 dev → 测试 · 经理驱动(v3)架构</div>
+    <div class="tag">分支:feat/manager-driven-execution · commit c4d5626</div>
+  </header>
+
+  <!-- 一句话 -->
+  <section>
+    <div class="card" style="border-left: 4px solid var(--accent);">
+      <p style="margin:0; font-size:1.05em;">
+        一个 <strong>pi/omp coding-agent 扩展</strong>,把"需求 → PRD → 拆 task → 分配 dev → 测试"
+        做成 <strong>PRD / 执行 双模式</strong>流水线。<br>
+        执行模式下,主 omp 启动一个<strong>技术经理</strong>(独立 session),它把 PRD 拆成 task、
+        分配给 <strong>reasonix dev</strong>(持久 session,复用上下文)、最后让 glm-5.2 测试,
+        失败自动建 bd bug。
+      </p>
+    </div>
+  </section>
+
+  <!-- 流程图 -->
+  <section>
+    <h2><span class="num">1</span>整体流程图</h2>
+    <div class="card flow-card">
+      <div class="mermaid">
+flowchart TD
+    Start([👤 用户提出需求]) --> New["<b>/wf new &lt;需求&gt;</b><br/>bd init + bd create epic<br/>进入 <b>PRD 模式</b>(只读)"]
+
+    subgraph PRD ["🟦 PRD 模式 · 主 session · 你和 omp 讨论"]
+        direction TB
+        New --> Analyze["/wf analyze<br/>仓库简报<br/><i>deepseek-pro · 只读探查</i><br/>(首次自动,跨需求复用)"]
+        Analyze --> Discuss["自由讨论需求<br/><i>deepseek-pro</i>"]
+        Discuss --> Prd["<b>/wf prd</b><br/>生成 prd.md<br/><i>glm-5.2</i>"]
+        Prd --> Review{审阅 PRD<br/>满意?}
+        Review -- 不满意 --> Discuss
+    end
+
+    Review -- 批准 --> Execute["<b>/execute</b><br/>主 omp spawn 经理进程<br/>WF_ROLE=manager"]
+
+    subgraph EXEC ["🟧 执行模式 · 经理 omp 进程(独立 session)"]
+        direction TB
+        MgrStart(["经理进程启动<br/>加载 .omp/agents/manager.md"]) --> Split
+
+        subgraph MGRLOOP ["经理工作循环 · 调度=LLM 判断(非代码循环)"]
+            direction TB
+            Split["<b>① split_prd_to_tasks</b><br/>读 PRD → 拆 task<br/><i>deepseek-pro</i><br/>→ bd create tasks + dep add"]
+            Split --> Assign["<b>② assign_dev</b><br/>claim + worktree + reasonix run<br/><i>同步等跑完</i>"]
+            Assign --> DevExec
+            subgraph DevExec [" 💻 dev 池 · 每个 dev = 持久 reasonix session + 固定 worktree "]
+                direction LR
+                D1["dev 1<br/>session + worktree"]
+                D2["dev 2<br/>session + worktree"]
+                D3["dev 3<br/>session + worktree"]
+            end
+            DevExec -. "独立task→散给不同dev<br/>依赖链→给同一dev(--continue复用)" .-> Test
+            Test["<b>③ run_test</b><br/>跑验证 + glm-5.2 review<br/>blocker → bd bug"]
+            Test --> Check{有 bug?}
+        end
+
+        Check -- 有 bug --> Assign
+        Check -- 无 bug --> MgrDone(["所有 task+bug 关闭<br/>经理汇报总结,退出"])
+    end
+
+    MgrDone --> Back(["回到主 session<br/>/wf status 查看 bd 状态"])
+    Back --> End([✅ 完成])
+
+    classDef cmd fill:#1f6feb,stroke:#58a6ff,color:#fff,stroke-width:2px;
+    classDef mgr fill:#bb800923,stroke:#d29922,color:#fff,stroke-width:2px;
+    classDef dev fill:#238636,stroke:#3fb950,color:#fff,stroke-width:1px;
+    classDef decision fill:#1c2128,stroke:#bc8cff,color:#bc8cff;
+    class New,Prd,Execute,Split,Assign,Test cmd;
+    class New cmd;
+    class MgrStart,MgrDone,Back mgr;
+    class D1,D2,D3 dev;
+    class Review,Check decision;
+      </div>
+      <div class="legend">
+        <span><i style="background:#1f6feb"></i>用户命令 / 经理工具</span>
+        <span><i style="background:#238636"></i>reasonix dev(执行层)</span>
+        <span><i style="background:#bb800923;border:1px solid #d29922"></i>经理进程</span>
+        <span><i style="background:#1c2128;border:1px solid #bc8cff"></i>判断节点</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 双模式命令流 -->
+  <section>
+    <h2><span class="num">2</span>两个模式的命令流</h2>
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0;">🟦 PRD 模式(讨论)</h3>
+        <ol class="steps">
+          <li><code>/wf new &lt;需求&gt; [repo路径]</code><br/><span style="color:var(--text-dim);font-size:0.88em">bd init + 创建父 epic,进入只读模式</span></li>
+          <li>自由对话讨论需求<br/><span style="color:var(--text-dim);font-size:0.88em">deepseek-pro · plan-interrogation skill 自动追问</span></li>
+          <li><code>/wf prd</code><br/><span style="color:var(--text-dim);font-size:0.88em">glm-5.2 生成 prd.md(缺简报先自动 analyze)</span></li>
+          <li>审阅 <code>.workflow/&lt;reqId&gt;/prd.md</code></li>
+          <li>不满意 → 继续讨论后再 <code>/wf prd</code></li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0;">🟧 执行模式(/execute)</h3>
+        <ol class="steps">
+          <li><code>/execute</code> 启动经理 omp 进程(独立 session)</li>
+          <li>经理读 PRD → <code>split_prd_to_tasks</code> 拆 task 进 bd</li>
+          <li><code>assign_dev(taskId, devId)</code> 分配给 reasonix dev<br/><span style="color:var(--text-dim);font-size:0.88em">同步等跑完;同 dev 后续 task 自动 --continue</span></li>
+          <li><code>run_test</code> → glm-5.2 测试产出</li>
+          <li>blocker 创建 bd bug → 经理再 <code>assign_dev</code> 修复</li>
+          <li>直到全过 → 经理退出,回主 session</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模型分工 -->
+  <section>
+    <h2><span class="num">3</span>模型分工</h2>
+    <div class="card" style="padding:0; overflow:hidden;">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>执行方</th><th>模型</th><th>角色</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>讨论需求</td><td>主 omp</td><td><code>deepseek-v4-pro</code></td><td>deepseek-pro</td></tr>
+          <tr><td>写 PRD</td><td>主 omp</td><td><code>glm-5.2</code></td><td>prd</td></tr>
+          <tr><td>仓库简报 analyze</td><td>主 omp</td><td><code>deepseek-v4-pro</code></td><td>只读探查</td></tr>
+          <tr style="background:#bb800923;"><td colspan="4" style="color:var(--orange);font-weight:600;">↓ 执行模式:以下在经理进程内</td></tr>
+          <tr><td>技术经理(拆/分配/测试)</td><td><strong>经理 omp 进程</strong></td><td><code>deepseek-v4-pro</code></td><td>split</td></tr>
+          <tr><td>实现每个 task</td><td><strong>reasonix dev</strong>(持久 session)</td><td><code>deepseek-flash</code></td><td>执行层</td></tr>
+          <tr><td>测试产出 review</td><td>经理调 glm-5.2</td><td><code>glm-5.2</code></td><td>review</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 核心设计 -->
+  <section>
+    <h2><span class="num">4</span>核心设计要点</h2>
+    <div class="grid">
+      <div class="feat">
+        <div class="icon">🧠</div>
+        <h4>调度 = LLM 判断,非代码循环</h4>
+        <p>经理用三个工具(split/assign/test)自主决策拆分与分配顺序,不是硬编码的 while 循环。</p>
+      </div>
+      <div class="feat">
+        <div class="icon">♻️</div>
+        <h4>session 复用(--continue)</h4>
+        <p>每个 dev 持有固定 worktree → session 路径稳定 → 同 dev 的后续 task 复用上下文,不用重读项目。</p>
+      </div>
+      <div class="feat">
+        <div class="icon">🌳</div>
+        <h4>依赖链路由策略</h4>
+        <p>独立 task 散给不同 dev;有依赖链的一串(A→B→C)给同一个 dev,最大化上下文复用。</p>
+      </div>
+      <div class="feat">
+        <div class="icon">⚡</div>
+        <h4>DeepSeek 前缀缓存</h4>
+        <p>worktree 并行<strong>不击穿</strong>缓存(实测:cache_hit 2880 跨 worktree 共享)。</p>
+      </div>
+      <div class="feat">
+        <div class="icon">🗄️</div>
+        <h4>bd 为权威状态层</h4>
+        <p>子任务 DAG(依赖/状态/归属)存在 beads Dolt DB;.workflow/ 只放文本产物;代码改动走 git。</p>
+      </div>
+      <div class="feat">
+        <div class="icon">🛡️</div>
+        <h4>分工拿到两边好处</h4>
+        <p>pi/omp 管通用人工审阅流程,reasonix 管 DeepSeek 字节级缓存优化——这是唯一同时满足两者的路径。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 产物布局 -->
+  <section>
+    <h2><span class="num">5</span>产物布局(目标 repo 内)</h2>
+    <div class="card">
+      <pre style="margin:0; color:var(--text-dim); font-size:0.88em; overflow-x:auto;"><code>&lt;repo&gt;/.workflow/
+├── _repo-brief.md           <span style="color:var(--green);"># 仓库级简报(跨需求复用)</span>
+└── &lt;reqId&gt;/
+    ├── state.json              <span style="color:var(--text-dim);"># 流水线状态</span>
+    ├── prd.md                  <span style="color:var(--text-dim);"># PRD (glm-5.2)</span>
+    ├── subtasks/NN-*.md        <span style="color:var(--text-dim);"># 子任务规格;bd notes 指向这里</span>
+    ├── results/
+    │   ├── NN.metrics.json     <span style="color:var(--text-dim);"># 每个 run 的 token/cache/cost</span>
+    │   ├── cumulative.diff     <span style="color:var(--text-dim);"># 全量累积改动</span>
+    │   └── summary.json        <span style="color:var(--text-dim);"># 成本 + cache 命中汇总</span>
+    └── review.md               <span style="color:var(--text-dim);"># 整体 review(建议性)</span>
+
+&lt;repo&gt;/.beads/                <span style="color:var(--orange);"># bd 数据(bd init 创建)</span>
+├── config.yaml                <span style="color:var(--green);"># 进 git</span>
+└── embeddeddolt/              <span style="color:var(--red);"># Dolt DB(不进 git)</span></code></pre>
+    </div>
+  </section>
+
+  <!-- 缺陷与改进 -->
+  <section>
+    <h2><span class="num">6</span>缺陷与改进(来自 KNOWN_ISSUES.md)</h2>
+
+    <h3>🔴 P0 — 安全假象</h3>
+    <div class="issue p0">
+      <h4><span class="badge p0">P0</span><span class="badge done">已修 ✓</span>验证门 verifyCommand 默认空,形同虚设</h4>
+      <p>原问题:没配 <code>/wf verify</code>,任何 reasonix 改动都被判"验证通过",deepseek-flash 无监督写权限直接 commit。</p>
+      <p><strong>改进:</strong><code>/build</code> 现在严格验证——无验证命令默认失败,首次弹出确认让你显式接受"无验证"。</p>
+    </div>
+
+    <h3>🟠 P1 — 真实缺陷</h3>
+    <div class="issue p1">
+      <h4><span class="badge p1">P1</span><span class="badge done">已修 ✓</span>单例状态竞态:BUILD 中开新需求</h4>
+      <p>模块级 <code>let wf</code> 单例,BUILD 跑到一半 <code>/wf new</code> 会切换引用导致写错对象。</p>
+      <p><strong>改进:</strong>BUILD 中拒绝 <code>/wf new</code>(单例锁)。</p>
+    </div>
+    <div class="issue p1">
+      <h4><span class="badge p1">P1</span><span class="badge done">已修 ✓</span>extractJson 容错解析是"猜"</h4>
+      <p>用 indexOf('{')/lastIndexOf('}') 可能解析出语法合法但语义错误的 JSON,静默生成缺失子任务规格。</p>
+      <p><strong>改进:</strong>JSON 解析失败或缺必要字段时严格校验、响亮报错(修了 KNOWN_ISSUES P1 #3)。</p>
+    </div>
+    <div class="issue p1">
+      <h4><span class="badge p1">P1</span><span class="badge open">未修</span>aggregateMetrics 靠字段名猜测</h4>
+      <p><code>key.includes("cost")</code> 这类启发式匹配,reasonix 换字段名会静默算成 <code>undefined</code>,<code>summary.json</code> 悄悄失去意义。</p>
+      <p><strong>建议:</strong>字段缺失时显式警告,或锁定 reasonix 版本并标注兼容范围。</p>
+    </div>
+    <div class="issue p1">
+      <h4><span class="badge p1">P1</span><span class="badge open">未修</span>review.md 无强制力</h4>
+      <p>review 是建议性(设计决定不改),但 BUILD 完成的 notify 和普通 info 视觉无区别,即使有 blocker 也没有更强提示。</p>
+      <p><strong>建议:</strong>review 出现"blocker"时 notify 升级为 error,并在 state.json 记录 reviewSeverity。</p>
+    </div>
+
+    <h3>⚪ P2 — 未验证的合理风险</h3>
+    <div class="issue p2">
+      <h4><span class="badge p2">P2</span>跨平台:全程只在 macOS 验证</h4>
+      <p><code>runVerify</code> 用 <code>bash -lc</code>,Windows 无 bash 会直接失效;路径分隔符、符号链接行为未验证。</p>
+    </div>
+    <div class="issue p2">
+      <h4><span class="badge p2">P2</span>waitTurnComplete 的 2.5s 静默期是经验值</h4>
+      <p>600s 硬顶;网络抖动/模型输出忽快忽慢可能误判 turn 已结束(提前截断)。真实边界场景从未验证。</p>
+    </div>
+    <div class="issue p2">
+      <h4><span class="badge p2">P2</span>slug() 硬切可能切在多字节字符中间</h4>
+      <p><code>.slice(0, 40)</code> 按 UTF-16 code unit 切,非常规 Unicode 标题可能生成非法文件名。</p>
+    </div>
+    <div class="issue p2">
+      <h4><span class="badge p2">P2</span>测试只覆盖状态机逻辑,不覆盖真实故障</h4>
+      <p>test/build.test.ts 全用假 execReasonix,没测:网络断/限流/输出异常、长时间超时、10+ 子任务撞 token 上限。</p>
+    </div>
+    <div class="issue p2">
+      <h4><span class="badge p2">P2</span>产品定位:小需求过度工程,大需求验证不足</h4>
+      <p>极简需求走完整链路成本远超直接 reasonix;真正需要的复杂需求从未被真实测试覆盖(都是玩具级冒烟)。</p>
+    </div>
+
+    <h3 style="color:var(--accent);">⚠️ 当前架构的固有限制(非 bug,设计取舍)</h3>
+    <div class="issue" style="border-color:var(--accent);">
+      <h4>同步模型:maxParallel 是"池大小"不是"并发数"</h4>
+      <p><code>assign_dev</code> 同步等 reasonix 跑完,一次只跑一个 dev。maxParallel=3 只是经理可轮换使用的 dev 数,<strong>真并行(多 dev 同时跑)是后续升级路径</strong>。</p>
+    </div>
+    <div class="issue" style="border-color:var(--accent);">
+      <h4>调度可靠性依赖经理 LLM 的判断</h4>
+      <p>拆分/分配策略的正确性取决于经理(deepseek-pro)的理解,而非确定性代码。复杂依赖图下可能拆分不当或分配次序欠优。</p>
+    </div>
+  </section>
+
+  <footer>
+    生成自 <code>feat/manager-driven-execution</code> 分支 · 详见
+    <a href="https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md">SYNC_CONCEPTS.md</a>
+    · 证据见仓库内 <code>DECISION_LOG.md</code> / <code>KNOWN_ISSUES.md</code>
+  </footer>
+
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#161b22',
+      primaryColor: '#1f6feb',
+      primaryTextColor: '#e6edf3',
+      primaryBorderColor: '#58a6ff',
+      lineColor: '#8b949e',
+      secondaryColor: '#1c2128',
+      tertiaryColor: '#238636',
+      fontFamily: '-apple-system, "PingFang SC", sans-serif',
+      fontSize: '14px',
+    },
+    flowchart: { htmlLabels: true, curve: 'basis', padding: 16 },
+  });
+</script>
+</body>
+</html>

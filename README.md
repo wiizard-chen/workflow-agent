@@ -90,6 +90,42 @@ omp -e /path/to/workflow/extensions/workflow.ts   # 或 pi -e
 
 仓库自带 `plan-interrogation` skill,扩展加载时自动挂上。方法论:在 PRD 阶段逐条走查设计树、一次只问一个问题并给出推荐答案、能查代码就先查不发问。
 
+## beads skill 四件套 + 全局安装
+
+仓库还在 `skills/` 下提供四个针对流水线的 beads skill(omp 和 reasonix 通用):
+
+| skill | 用途 | 主要使用者 |
+|---|---|---|
+| `bd-plan` | 需求 → beads epic + PRD | 主 session omp |
+| `bd-split` | PRD → task + 依赖(经理拆分) | 经理 omp 进程 |
+| `bd-work` | 认领/实现/关闭单个 task | reasonix dev(高频) |
+| `bd-handoff` | 跨 session 交接(进度写 bd 不写本地) | 经理 + dev |
+
+`pi install` 装的是**扩展**(`/wf`、`/execute` 等命令),skill 默认只在项目目录内可用。要让 **omp/reasonix 在任何目录**都加载这些 skill,装到全局 skill 根。
+
+**用 npm script(推荐):**
+
+```bash
+npm run skills:install              # 默认:symlink 装到 ~/.omp/agent/skills/
+npm run skills:uninstall            # 卸载(只删本项目装的,绝不碰别人的)
+npm run skills:list                 # 只看状态,不改动
+
+# 透传额外参数用 --:
+npm run skills:install -- --copy    # 复制安装(默认 symlink)
+npm run skills:install -- --dry-run # 演练,打印不执行
+```
+
+**或直接跑脚本:**
+
+```bash
+node scripts/install-skills.mjs             # 安装(默认 symlink)
+node scripts/install-skills.mjs --copy      # 复制安装
+node scripts/install-skills.mjs --list      # 查看状态
+node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
+```
+
+安装和卸载共享同一份所有权清单(skills-lib.mjs),保证装/卸完全对称。symlink 模式下,改了仓库里的 skill 全局立刻生效,不用重装——适合开发自己的包。脚本只处理本项目拥有的 6 个 skill(`bd-*` 四件套 + `plan-interrogation` + `beads`),对目录里其他 skill 只读保护。
+
 ## dev 池与 session 复用(`maxParallel`)
 
 `workflow.config.json` 的 `execute.maxParallel` 是**经理可用的 dev 池大小**(默认 3)。每个 dev 是一个持久 reasonix session,持有固定 worktree:
