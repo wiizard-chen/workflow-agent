@@ -139,3 +139,40 @@ pi 的扩展系统上已经长出多个严肃项目：
    - P1 #3/#4 解析容错改成显式失败
    - P1 #5 review严重程度提示
 4. 如果不再依赖reasonix，`workflow.config.json`里的`reasonix`执行层配置和`buildReasonixArgs`/`runBuildPipeline`里`execReasonix`那部分需要重新设计成"omp原生subagent(`task`工具)执行子任务"，而不是`pi.exec`调外部二进制——这是一次实质性的架构改动，不是小修补，需要重新走一遍我们之前"计划追问法"的设计确认流程。
+
+---
+
+# omp 侧缓存优化:自写 cache.ts 而非用第三方插件
+
+记录于 2026-07-13（分支 `feat/deepseek-cache-plugin`）。
+
+## 背景
+
+reasonix 执行层自带 DeepSeek 字节级前缀缓存优化（~99.8%），但 **omp 讨论层**（讨论/拆分/PRD/review）没有同等优化。omp 的 system prompt 里有动态 date 字段 `Today is YYYY-MM-DD,`（见 omp 源码 `prompts/system/project-prompt.md:44`，由 `formatLocalCalendarDate()` 生成），每天午夜变一次，击穿 DeepSeek 服务端前缀缓存。omp 源码 `agent-session.ts:6720-6723` 明确注释这是**有意不冻结**的设计（"a session spanning midnight would keep yesterday's date indefinitely"）。
+
+## 尝试过 `@rohaquinlop/pi-deepseek-cache` 失败
+
+该插件面向 vanilla pi 写，import `@earendil-works/pi-coding-agent` 的 `serializeConversation`。但 omp 16.4.6 是 pi 的 fork（包名 `@oh-my-pi/pi-coding-agent`），把这个函数重构进了 `snapcompact` 命名空间（`agent-session.ts:9936/12808`），**shim 没 re-export**。`omp plugin install --force` 也绕不过——验证是硬性 TS 模块解析检查。结论：插件与 omp 版本不兼容，不是配置问题，是 fork 间的 API 分歧。
+
+## 决策:自写 `extensions/cache.ts`（自有缓存扩展）
+
+用 omp 原生 `before_agent_start` hook，零第三方依赖：
+
+- **hook A（before_agent_start）**：对 DeepSeek 模型，regex 把 `Today is YYYY-MM-DD,` 替换成固定常量 `1970-01-01`。返回新 `systemPrompt: string[]`。跨 turn/midnight 前缀字节稳定 → 缓存命中。cwd 不动（worktree 路径在 session 内稳定）。glm/zai 不动（不用 DS 前缀缓存）。
+- **hook B（message_end）**：读 DeepSeek 的 `prompt_cache_hit_tokens`（= `usage.cacheRead`），累计 telemetry，每 5 turn 通知命中率。
+
+调研确认的关键事实（omp 16.4.6 源码验证）：system prompt 是 `string[]`；唯一 per-turn 动态字段是 date；DeepSeek 检测用 `ctx.model?.provider === "deepseek"` 或 `model.id.includes("deepseek")`；cache telemetry 在 `message_end` 的 `usage.cacheRead`（不在 `after_provider_response`，那个没 usage）。
+
+## 边界（不做的）
+
+- **不换执行层**：reasonix 继续 spawn，`--continue` session 复用保留（omp task 工具无 `--continue` 等价物，换会断裂 A→B→C 上下文复用，见上文"后续方案"第 4 点）。
+- **不做异步 /execute**：单独分支做。
+- **不动 payload 其他部分**：date 是唯一 cache-buster，tool schemas 等在同 session 内本就稳定。
+- **不替换 omp 的 append-only context mode**：那是消息日志层，与 system prompt date 无关。
+
+## 后续
+
+- `cache.ts` 是最小可行版（date 冻结 + 基本 telemetry）。若效果验证好，未来可加：`before_provider_request` 做 payload 级二次清洗、prefix guard 断言、cache-friendly compaction。
+- 异步 /execute 单独分支。
+- 若未来要彻底去 reasonix 依赖，需先解决 omp subagent 的 session 续跑问题（当前无 `--continue` 等价物）。
+

@@ -45,6 +45,31 @@ PRD 模式(你和主 omp 讨论):
 - 环境变量 `DEEPSEEK_API_KEY`、`GLM5_2_API_KEY` 已在 shell(如 zshrc)配好。
 - 目标项目是一个 **git 仓库**。
 
+## 一键安装(推荐)
+
+不想手动一个个装?克隆仓库后跑一行,装齐 omp + reasonix + beads、配好 API key、装好 skill:
+
+```bash
+git clone https://github.com/wiizard-chen/workflow-agent.git
+cd workflow-agent
+bash scripts/setup.sh
+```
+
+`setup.sh` 会:**幂等地**(已装的跳过,可反复跑):
+
+1. 装 `omp`(bun 优先,没 bun 回退 npm)、`reasonix`(npm)、`beads`(brew)
+2. 交互式提示输入 `DEEPSEEK_API_KEY` / `GLM5_2_API_KEY`,写入 `~/.zshrc`(已在 zshrc 的跳过;输入不回显)
+3. 把本项目的 skill 装到全局 omp/reasonix skill 根
+
+```bash
+bash scripts/setup.sh --check        # 只检查现状,不改任何东西
+bash scripts/setup.sh --no-tools     # 跳过工具安装,只配 key + skill
+bash scripts/setup.sh --no-keys      # 跳过 key 配置
+bash scripts/setup.sh --no-skills    # 跳过 skill 安装
+```
+
+> key 获取:DEEPSEEK_API_KEY ← https://platform.deepseek.com/;GLM5_2_API_KEY ← https://open.bigmodel.cn/(智谱 GLM)。写完 key 新开终端才生效。
+
 ## 安装
 
 仓库已是标准 pi/omp package(公开仓库,匿名 HTTPS 即可安装,无需 SSH key):
@@ -179,6 +204,17 @@ PLAN 阶段有时需要读网页。这层挂在 pi 编排层,通过第三方扩�
 - 每个子任务是独立的 `reasonix run`(独立 session),命中 DeepSeek **服务端前缀热缓存**(成本大头)。
 - **worktree 并行不击穿缓存**(实测):worktree 的 cwd 差异不注入 reasonix system prompt,前缀缓存跨 worktree 共享。详见 `DECISION_LOG.md`。
 - pi 侧多模型切换(pro/glm)天然会各走各的缓存桶,属于预期,量小无碍。
+
+### omp 侧缓存优化(`extensions/cache.ts`)
+
+omp 的 system prompt 里有动态 date 字段(`Today is YYYY-MM-DD,`),每天午夜变一次,击穿 DeepSeek 前缀缓存。本扩展用 `before_agent_start` hook,**只对 DeepSeek 模型**把 date 冻结成固定常量,让讨论/拆分/PRD/review 阶段的前缀字节稳定:
+
+- **reasonix 执行层**:自带字节级缓存优化(~99.8%),不动。
+- **omp 讨论层**:`cache.ts` 冻结 date → 前缀跨 turn/midnight 稳定 → 缓存命中。
+- **telemetry**:`message_end` hook 累计 DeepSeek 的 `prompt_cache_hit_tokens`,每 5 turn 通知一次命中率。
+- 只对 DeepSeek 生效(glm/zai 不用前缀缓存,冻结无益)。
+
+> 为什么自写不用 `@rohaquinlop/pi-deepseek-cache`:该插件 import `@earendil-works/pi-coding-agent` 的 `serializeConversation`,但 omp 16.4.6 的 shim 没导出它(fork 重构进了 `snapcompact` 命名空间),`omp plugin install` 验证失败。本扩展用 omp 原生 hook,零第三方依赖。详见 `DECISION_LOG.md`。
 
 ## 安全 / 边界
 

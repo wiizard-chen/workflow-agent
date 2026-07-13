@@ -1,0 +1,114 @@
+/**
+ * cache.ts — DeepSeek 前缀缓存优化扩展。
+ *
+ * omp 的 system prompt 里有一行 `Today is YYYY-MM-DD, and the current working
+ * directory is '...''.`。date 每天 local-midnight 变一次,导致 system prompt
+ * 前缀字节不稳定,击穿 DeepSeek 的服务端前缀缓存。
+ *
+ * 本扩展在 before_agent_start hook 里,对 DeepSeek 模型把 date 冻结成一个
+ * 固定常量(1970-01-01),让前缀在跨 turn / 跨 midnight 时字节稳定 → 前缀
+ * 缓存命中。cwd 不动(worktree 路径在 session 内本来就稳定)。
+ *
+ * 这是 reasonix 自带缓存机制的 omp 侧等价物:reasonix 在自己的 agent 里
+ * 保持 prompt 字节稳定;本扩展让 omp 的讨论/拆分/PRD/review 阶段也享受
+ * 同样的优化。执行层(reasonix dev)不受影响,仍用自己的缓存。
+ *
+ * 设计决策:
+ * - 只对 DeepSeek 模型生效(glm/zai 不用 DeepSeek 前缀缓存,冻结无益)。
+ * - 只冻结 date:这是唯一的 per-turn cache-buster(cwd 在 session 内稳定)。
+ * - 不动 payload 其他部分(tool schemas 等在同一 session 内本就稳定)。
+ *
+ * 为什么不用第三方插件 @rohaquinlop/pi-deepseek-cache:
+ *   它 import @earendil-works/pi-coding-agent 的 serializeConversation,
+ *   但 omp 16.4.6 的 shim 没导出这个名字(fork 重构进了 snapcompact 命名空间),
+ *   omp plugin install 验证失败。本扩展用 omp 原生 hook,零第三方依赖。
+ *
+ * Hooks:
+ * - before_agent_start:冻结 system prompt 里的 date 字段(仅 DeepSeek)。
+ * - message_end:读 usage.cacheRead(DS 的 prompt_cache_hit_tokens),累计 telemetry。
+ *
+ * See DECISION_LOG.md for the full rationale (cache-safety, omp vs reasonix split).
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/** 冻结后的 date 常量。用 epoch 日,语义上明确"这不是真实日期"。 */
+const FROZEN_DATE = "1970-01-01";
+
+/** 匹配 system prompt 里的 `Today is YYYY-MM-DD,` 片段。 */
+const DATE_RE = /Today is \d{4}-\d{2}-\d{2},/g;
+
+/** Telemetry 累计(进程内,非持久)。 */
+let cacheStats = { turns: 0, cacheRead: 0, input: 0 };
+
+/** 判断当前 turn 是否用 DeepSeek 模型(前缀缓存只对 DS 有效)。 */
+function isDeepSeekModel(ctx: any): boolean {
+  const model = ctx?.model;
+  if (!model) return false;
+  // model.id 形如 "deepseek-v4-pro" / "deepseek-flash";provider 形如 "deepseek"
+  if (model.provider === "deepseek") return true;
+  const id: string = model.id || model.name || "";
+  return id.toLowerCase().includes("deepseek");
+}
+
+/**
+ * 把 system prompt 数组里每个元素的 date 片段替换成 FROZEN_DATE。
+ * 返回新数组(不 mutate 原数组)。无替换则返回 undefined(让 omp 用原值)。
+ */
+function freezeDateInPrompt(systemPrompt: string[]): string[] | undefined {
+  let changed = false;
+  const out = systemPrompt.map((segment) => {
+    if (typeof segment === "string" && DATE_RE.test(segment)) {
+      changed = true;
+      return segment.replace(DATE_RE, `Today is ${FROZEN_DATE},`);
+    }
+    return segment;
+  });
+  return changed ? out : undefined;
+}
+
+/** 格式化 cache hit rate 百分比。 */
+function pct(hit: number, total: number): string {
+  if (total <= 0) return "—";
+  return `${(hit / total * 100).toFixed(1)}%`;
+}
+
+export default function cacheExtension(pi: ExtensionAPI): void {
+  // ── Hook A: 冻结 system prompt 里的 date(仅 DeepSeek)─────────────────────
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    if (!isDeepSeekModel(ctx)) return;          // glm/zai 等不动
+    const sp: string[] = event?.systemPrompt;
+    if (!Array.isArray(sp)) return;
+    const frozen = freezeDateInPrompt(sp);
+    if (!frozen) return;                         // 没找到 date 行,不改
+    return { systemPrompt: frozen };
+  });
+
+  // ── Hook B: telemetry — 读 DeepSeek 的 cacheRead 累计 ─────────────────────
+  pi.on("message_end", async (event: any, ctx: any) => {
+    if (!isDeepSeekModel(ctx)) return;
+    const usage = event?.message?.usage;
+    if (!usage) return;
+    // DeepSeek: prompt_cache_hit_tokens → usage.cacheRead
+    //          prompt_cache_miss_tokens → usage.cacheWrite (DS 常报 0,miss 折进 input)
+    const cacheRead = Number(usage.cacheRead) || 0;
+    const input = Number(usage.input) || 0;
+    cacheStats.turns += 1;
+    cacheStats.cacheRead += cacheRead;
+    cacheStats.input += input;
+    // 最小版 telemetry:每 5 个 turn 通知一次累计命中率
+    if (cacheStats.turns % 5 === 0 && (cacheStats.cacheRead + cacheStats.input) > 0) {
+      const total = cacheStats.cacheRead + cacheStats.input;
+      ctx?.ui?.notify?.(
+        `[cache] ${cacheStats.turns} turns | hit ${pct(cacheStats.cacheRead, total)} | ` +
+        `read ${cacheStats.cacheRead.toLocaleString()} / ${(total).toLocaleString()} tokens`,
+        "info"
+      );
+    }
+  });
+
+  // ── session_start:重置 telemetry(新 session 重新计数)────────────────────
+  pi.on("session_start", async () => {
+    cacheStats = { turns: 0, cacheRead: 0, input: 0 };
+  });
+}

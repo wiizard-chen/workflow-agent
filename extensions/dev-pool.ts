@@ -117,7 +117,8 @@ export class DevPool {
     const rolePrefix =
       `【角色】你是 pi-workflow 的开发执行者(dev),单一职责:只实现当前分配给你的这一个 task。` +
       `不拆分需求、不测试整体产出、不越界实现其他 task。先读规格,严守验收标准,过验证门。` +
-      `阻碍建 bd bug(不要写本地 TODO);进度/失败写 bd comment(单数)。bd 操作详见 bd-work skill。\n`;
+      `阻碍建 bd bug(不要写本地 TODO);进度/失败写 bd comment(单数)。` +
+      `【skill 白名单】你只能用 bd-work(核心)和 beads(速查);禁止用 bd-split/bd-plan/plan-interrogation——那些不归 dev。\n`;
     const instruction =
       rolePrefix +
       `实现这个子任务。完整规格在文件:${specPath}(先读它)。` +

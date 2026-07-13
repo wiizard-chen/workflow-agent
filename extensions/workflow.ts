@@ -352,8 +352,10 @@ function cmdStatus(ctx: ExtensionCommandContext): void {
 // EXECUTE mode: spawn manager + register dev/test tools
 // ---------------------------------------------------------------------------
 
-/** Load the manager system prompt, injecting run context (reqId/repo/epicId/prd). */
-function loadManagerPrompt(): string {
+/** Load the manager system prompt, injecting run context (reqId/repo/epicId/prd).
+ *  Optional overrides let /execute point the manager at a different PRD + epic
+ *  than the current wf (for /execute <prd-path>). */
+function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): string {
   if (!wf) throw new Error("无活动需求");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -368,13 +370,15 @@ function loadManagerPrompt(): string {
   if (!template) throw new Error("找不到 .omp/agents/manager.md");
   // Strip YAML frontmatter; inject run context after the body.
   const body = template.replace(/^---\n[\s\S]*?\n---\n/, "");
+  const prdFile = prdPathOverride || reqPath(wf, "prd.md");
+  const epicId = epicIdOverride || wf.epicId;
   const context = [
     ``,
     `--- 运行上下文 ---`,
     `需求 ID:${wf.reqId}`,
     `目标仓库:${wf.repo}`,
-    `bd epic:${wf.epicId}`,
-    `PRD 文件:${reqPath(wf, "prd.md")}`,
+    `bd epic:${epicId}`,
+    `PRD 文件:${prdFile}`,
     `dev 数量:${CONFIG.execute?.maxParallel ?? 1}(用 devId 1…N 调 assign_dev)`,
     `------------------`,
     ``,
@@ -383,11 +387,33 @@ function loadManagerPrompt(): string {
   return body + "\n" + context;
 }
 
-/** /execute — spawn a manager omp process and wait for it to finish. */
-async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+/** /execute — spawn a manager omp process and wait for it to finish.
+ *  Optional prdPath arg points the manager at a specific PRD (auto-creates a
+ *  fresh epic for it). Without args, uses the current requirement's prd.md. */
+async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (!wf.epicId) { ctx.ui.notify("缺少 bd epic id。", "error"); return; }
-  if (!fs.existsSync(reqPath(wf, "prd.md"))) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
+
+  // Parse optional PRD path arg. Empty → use current requirement's prd.md.
+  const prdArg = args.trim().replace(/["']/g, "");
+  let prdPath = "";
+  let epicIdOverride = "";
+  if (prdArg) {
+    prdPath = path.resolve(ctx.cwd, prdArg);
+    if (!fs.existsSync(prdPath)) { ctx.ui.notify(`PRD 文件不存在:${prdPath}`, "error"); return; }
+    // External PRD → auto-create a fresh epic (named after the file) so its
+    // tasks/bugs stay isolated from the current requirement's epic.
+    const epicTitle = path.basename(prdPath, ".md");
+    try {
+      epicIdOverride = bd.create(wf.repo, { title: epicTitle, type: "epic" });
+    } catch (e) {
+      ctx.ui.notify(`为外部 PRD 建 epic 失败:${(e as Error).message}`, "error"); return;
+    }
+    ctx.ui.notify(`外部 PRD:${prdPath}\n新建 epic:${epicIdOverride}(${epicTitle})`, "info");
+  } else {
+    prdPath = reqPath(wf, "prd.md");
+    if (!fs.existsSync(prdPath)) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
+  }
 
   wf.mode = "build";
   wf.baseline = gitHead(wf.repo);
@@ -406,13 +432,22 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 
   const extPath = fileURLToPath(import.meta.url);
   const managerModel = CONFIG.roles.split.model;  // manager uses the reasoning model
-  const prompt = loadManagerPrompt();
+  const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined);
 
   ctx.ui.notify(`EXECUTE:启动经理进程(${mgrBin}, model ${managerModel})。它将拆 task、分配 dev、测试。`, "info");
 
   // Spawn the manager as a separate omp session in --print mode (non-interactive).
   // WF_ROLE=manager activates the dev/test tools inside that process.
-  const mgrEnv = { ...process.env, WF_ROLE: "manager", WF_REQID: wf.reqId, BEADS_REPO: wf.repo };
+  // WF_PRD_PATH/WF_EPIC_ID let /execute <prd-path> point the manager at a
+  // specific PRD + auto-created epic (otherwise manager uses wf's defaults).
+  const mgrEnv: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    WF_ROLE: "manager",
+    WF_REQID: wf.reqId,
+    BEADS_REPO: wf.repo,
+  };
+  if (prdPath) mgrEnv.WF_PRD_PATH = prdPath;
+  if (epicIdOverride) mgrEnv.WF_EPIC_ID = epicIdOverride;
   const mgrProc = spawn(mgrBin, [
     "-e", extPath,
     "--print",
@@ -454,7 +489,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       prd_path: Type.Optional(Type.String({ description: "PRD 文件路径(默认用上下文里的)" })),
     }),
     async execute(_id, params) {
-      const prdPath = (params as any).prd_path || reqPath(wf!, "prd.md");
+      const prdPath = (params as any).prd_path || process.env.WF_PRD_PATH || reqPath(wf!, "prd.md");
       if (!fs.existsSync(prdPath)) {
         return { content: [{ type: "text", text: `错误:PRD 文件不存在 ${prdPath}` }], details: {} };
       }
@@ -485,7 +520,8 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
         const file = `subtasks/${logicalId}-${slug(r.title)}.md`;
         fs.writeFileSync(reqPath(wf!, file), `# ${r.title}\n\n${String(r.spec || "").replace(/\r/g, "")}\n`);
         const specAbs = reqPath(wf!, file);
-        const bdId = bd.create(wf!.repo, { title: r.title, type: "task", parent: wf!.epicId, notes: `规格文件:${specAbs}` });
+        const parentEpic = process.env.WF_EPIC_ID || wf!.epicId;
+        const bdId = bd.create(wf!.repo, { title: r.title, type: "task", parent: parentEpic, notes: `规格文件:${specAbs}` });
         idToBd.set(logicalId, bdId);
         created.push({ id: bdId, title: r.title, depends_on: Array.isArray(r.depends_on) ? r.depends_on : [] });
       }
@@ -546,7 +582,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       // glm-5.2 review.
       const reviewPromptText = withBrief(wf!.repo, [
         `你是资深测试工程师。对整个需求的实现做测试评审。`,
-        `请用 read 读取:PRD(${reqPath(wf!, "prd.md")})、累积 diff(${reqPath(wf!, "results", "cumulative.diff")})。`,
+        `请用 read 读取:PRD(${process.env.WF_PRD_PATH || reqPath(wf!, "prd.md")})、累积 diff(${reqPath(wf!, "results", "cumulative.diff")})。`,
         `输出 review 报告:1) 总体结论;2) 问题清单,每条 文件:行 + 严重程度(blocker/major/minor)+ 说明。`,
       ].join("\n"));
       const review = await runStageText(pi, ctx, CONFIG.roles.review, reviewPromptText);
@@ -562,7 +598,8 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
           const desc = m[1].trim().slice(0, 200);
           if (desc) {
             try {
-              const bugId = bd.create(wf!.repo, { title: `bug: ${desc.slice(0, 40)}`, type: "bug", parent: wf!.epicId, description: desc });
+              const bugParent = process.env.WF_EPIC_ID || wf!.epicId;
+              const bugId = bd.create(wf!.repo, { title: `bug: ${desc.slice(0, 40)}`, type: "bug", parent: bugParent, description: desc });
               bugs.push(bugId);
             } catch (_e) { /* ignore */ }
           }
@@ -649,7 +686,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
             await cmdAnalyze(pi, ctx); break;
           }
           case "status": cmdStatus(ctx); break;
-          case "execute": await cmdExecute(pi, ctx); break;
+          case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
             wf.verifyCommand = rest; saveState(wf);
@@ -661,7 +698,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/plan                   回 PRD 模式讨论",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
-              "/execute                启动经理进程:拆 task→分配 dev(reasonix)→测试。失败自动建 bd bug",
+              "/execute [prd路径]      启动经理进程:拆 task→分配 dev(reasonix)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",
               "/wf status              查看 bd 子任务状态",
               "/wf verify <cmd>        设置验证命令",
             ].join("\n"), "info");
@@ -676,7 +713,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
     pi.registerCommand("execute", {
       description: "进入执行模式(启动经理:拆 task→分配 dev→测试)",
-      handler: async (_args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx); },
+      handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx, args); },
     });
   }
 }
