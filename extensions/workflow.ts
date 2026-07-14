@@ -99,6 +99,10 @@ const WF_ROLE = process.env.WF_ROLE || "main";  // "main" (PRD mode) | "manager"
 
 let CONFIG = loadConfig();
 let wf: WorkflowState | undefined;
+// Manager-side tool-call tracking (only meaningful when WF_ROLE === "manager").
+// Used to detect "manager exited without doing any work" (no split, no assign).
+let mgrHasSplit = false;
+let mgrTasksProcessed = 0;
 let lastAssistantText = "";
 let devPool: DevPool | undefined;
 
@@ -124,6 +128,31 @@ async function waitTurnComplete(ctx: ExtensionCommandContext, maxMs = 600000): P
 function setModeStatus(ctx: ExtensionCommandContext): void {
   const label = wf ? `WF:${wf.mode} ${wf.reqId}` : "WF:—";
   try { ctx.ui.setStatus("workflow", label); } catch (_e) { /* ignore */ }
+}
+
+/** Scan `<repo>/.workflow/<reqId>/state.json` files, return all parsed states
+ *  sorted by createdAt descending (newest first). Restore wf in a new session. */
+function listAllStates(repo: string): WorkflowState[] {
+  const wfDir = path.join(repo, ".workflow");
+  if (!fs.existsSync(wfDir)) return [];
+  const states: WorkflowState[] = [];
+  for (const entry of fs.readdirSync(wfDir)) {
+    if (entry.startsWith("_")) continue;   // skip _repo-brief.md etc.
+    const sp = path.join(wfDir, entry, "state.json");
+    if (!fs.existsSync(sp)) continue;
+    try { states.push(JSON.parse(fs.readFileSync(sp, "utf8")) as WorkflowState); }
+    catch (_e) { /* skip corrupt */ }
+  }
+  return states.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+}
+
+/** Restore the most recent requirement's wf from disk. Returns true if restored.
+ *  Used by session_start (main) so a new session picks up the last active req. */
+function restoreLatestWf(ctx: ExtensionCommandContext): boolean {
+  const states = listAllStates(ctx.cwd);
+  if (states.length === 0) return false;
+  wf = states[0];
+  return true;
 }
 
 function lockReadonly(pi: ExtensionAPI): void {
@@ -348,6 +377,28 @@ function cmdStatus(ctx: ExtensionCommandContext): void {
   ctx.ui.notify(`需求 ${wf.reqId}\n模式 ${wf.mode}\nrepo ${wf.repo}\nepic ${wf.epicId}\n${lines.join("\n") || "  (无子任务)"}`, "info");
 }
 
+/** /wf resume <reqId> — switch the active requirement to a previously-created
+ *  one (loaded from its state.json). No arg = list available requirements. */
+function cmdResume(ctx: ExtensionCommandContext, args: string): void {
+  const arg = args.trim().replace(/["']/g, "");
+  const states = listAllStates(ctx.cwd);
+  if (!arg) {
+    if (states.length === 0) { ctx.ui.notify("没有可恢复的需求。/wf new 新建。", "info"); return; }
+    const lines = states.map((s) => {
+      const cur = (wf && s.reqId === wf.reqId) ? " ← 当前" : "";
+      return `  ${s.reqId}  [${s.mode}] ${s.name}${cur}`;
+    });
+    ctx.ui.notify(`可恢复的需求(按创建时间倒序):\n${lines.join("\n")}\n\n用 /wf resume <reqId> 切换。`, "info");
+    return;
+  }
+  const target = states.find((s) => s.reqId === arg || s.reqId.includes(arg));
+  if (!target) { ctx.ui.notify(`找不到需求:${arg}\n/wf resume(无参)看列表。`, "error"); return; }
+  if (wf && wf.mode === "build") { ctx.ui.notify(`需求 ${wf.reqId} 正在执行中,不能切换。`, "error"); return; }
+  wf = target;
+  setModeStatus(ctx);
+  ctx.ui.notify(`已切换到需求 ${wf.reqId}(epic ${wf.epicId})\n模式 ${wf.mode}`, "info");
+}
+
 // ---------------------------------------------------------------------------
 // EXECUTE mode: spawn manager + register dev/test tools
 // ---------------------------------------------------------------------------
@@ -462,7 +513,24 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
 
   // Commit artifacts regardless of manager outcome.
   const art = commitArtifacts(wf);
-  if (exitCode === 0) {
+  // Reload state.json: the manager process may have written managerNoop=true
+  // if it exited without calling split/assign (a silent no-op).
+  try {
+    const sp = reqPath(wf, "state.json");
+    if (fs.existsSync(sp)) wf = { ...wf, ...JSON.parse(fs.readFileSync(sp, "utf8")) };
+  } catch (_e) { /* keep in-memory */ }
+
+  if (exitCode === 0 && wf.managerNoop) {
+    // Manager exited clean but did ZERO work (no split, no assign) — almost
+    // certainly a model/prompt failure. Warn loudly so the user doesn't mistake
+    // this for success.
+    ctx.ui.notify(
+      `⚠ EXECUTE 空跑:经理进程退出码 0,但没有调用任何工具(split_prd_to_tasks / assign_dev 都没触发)。\n` +
+      `可能原因:模型出错、prompt 问题、或经理进程崩溃。\n` +
+      `bd epic ${wf.epicId} 下没有创建任何 task。请检查经理模型(${CONFIG.roles.split.provider}/${CONFIG.roles.split.model})配置后重试 /execute。`,
+      "error"
+    );
+  } else if (exitCode === 0) {
     ctx.ui.notify(`EXECUTE 完成。${art.committed ? `工件已提交 ${art.sha?.slice(0, 8)}` : "(无工件改动)"}\n用 /wf status 查看 bd 状态,或 bd children ${wf.epicId}。`, "info");
   } else {
     ctx.ui.notify(`EXECUTE 经理进程退出码 ${exitCode}。可能部分完成——/wf status 查看,修复后可重新 /execute 继续。`, "warning");
@@ -534,6 +602,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       }
       wf!.subtaskIds = created.map((c) => c.id);
       saveState(wf!);
+      mgrHasSplit = true;   // track that the manager actually did work
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
       return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在用 assign_dev(taskId, devId) 分配。独立的 task 散给不同 dev;有依赖链的给同一个 dev。` }], details: {} };
     },
@@ -553,6 +622,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       const taskId: string = p.task_id;
       const devId: number = p.dev_id;
       if (!devPool) devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec);
+      mgrTasksProcessed++;   // track that the manager actually assigned work
       const allowEmpty = !(wf!.verifyCommand ?? CONFIG.build.verifyCommand ?? "").trim();
       const result = await devPool.runTask(devId, taskId, {
         allowEmptyVerify: !!allowEmpty,
@@ -624,6 +694,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_e, ctx) => {
     setModeStatus(ctx as any);
+    // Main session: restore the most recent requirement so /execute etc. work
+    // across sessions (wf is an in-memory singleton that doesn't survive restart).
+    if (WF_ROLE === "main") {
+      if (!wf && restoreLatestWf(ctx as any)) {
+        ctx.ui.notify?.(`已恢复上次需求 ${wf!.reqId}(epic ${wf!.epicId})。\n/wf resume <reqId> 切换,或 /wf new 新建。`, "info");
+        setModeStatus(ctx as any);
+      }
+    }
     // In manager mode, restore wf from state.json before registering tools.
     if (WF_ROLE === "manager") {
       const reqId = process.env.WF_REQID;
@@ -662,6 +740,16 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event: any) => {
     try { const t = extractAssistantText(event?.messages); if (t) lastAssistantText = t; } catch (_e) { /* ignore */ }
+    // Manager-side: detect "exited without doing any work" so the main session
+    // can warn loudly instead of reporting a false success. Written to state.json
+    // because the manager is a separate process (main reads it on exit).
+    if (WF_ROLE === "manager" && wf) {
+      const noop = !mgrHasSplit && mgrTasksProcessed === 0;
+      if (noop) {
+        wf.managerNoop = true;
+        saveState(wf);
+      }
+    }
   });
 
   // Commands only in main session (not the manager).
@@ -669,7 +757,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     pi.registerCommand("wf", {
       description: "workflow(PRD + 执行双模式):new / prd / analyze / status / verify / execute / help",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -686,6 +774,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
             await cmdAnalyze(pi, ctx); break;
           }
           case "status": cmdStatus(ctx); break;
+          case "resume": cmdResume(ctx, rest); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
@@ -696,6 +785,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "workflow 用法(PRD + 执行双模式):",
               "/wf new <名> [repo]    新建需求(bd epic),进 PRD 模式(只读讨论)",
               "/plan                   回 PRD 模式讨论",
+              "/wf resume [reqId]      切换到已有需求(无参=列列表)。新 session 自动恢复最近需求",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
               "/execute [prd路径]      启动经理进程:拆 task→分配 dev(reasonix)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",

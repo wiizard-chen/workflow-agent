@@ -45,6 +45,9 @@ export interface WorkflowState {
   epicId?: string;
   /** Ordered list of subtask ids (bd issue ids) under the epic, for display & metrics. */
   subtaskIds?: string[];
+  /** Set by the manager process if it exited without calling any tools (split/assign).
+   *  Read by cmdExecute to warn loudly instead of reporting success. */
+  managerNoop?: boolean;
 }
 
 export type Notify = (msg: string, level?: "info" | "warning" | "error") => void;
@@ -176,12 +179,16 @@ export function addWorktree(repo: string, name: string, branch: string, exec?: B
       const wtPath = path.join(repo, name);
       return { path: wtPath, branch, name };
     }
-    // fall through to git on failure
+    // bd failed — log stderr and fall through to git (don't swallow silently).
+    console.error(`[wf] bd worktree create failed (code ${r.code}), 回退到 git: ${r.stderr.trim() || r.stdout.trim()}`);
   }
   // Plain git fallback (e.g. in tests without bd).
   const wtPath = path.join(repo, name);
   const r = sh("git", ["worktree", "add", "-b", branch, wtPath], repo);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr}`);
+  // Verify the worktree actually exists on disk (defensive: git can report
+  // success in edge cases like pre-existing empty dir).
+  if (!fs.existsSync(wtPath)) throw new Error(`worktree 创建后路径不存在:${wtPath}`);
   return { path: wtPath, branch, name };
 }
 
@@ -195,7 +202,7 @@ export function removeWorktree(repo: string, wt: Worktree, exec?: BdExec): void 
     }
     sh("git", ["worktree", "remove", "--force", wt.path], repo);
     sh("git", ["branch", "-D", wt.branch], repo);
-  } catch (_e) { /* best effort */ }
+  } catch (e) { /* best effort, but log so failures are visible */ console.error(`[wf] removeWorktree 失败(${wt.name}): ${(e as Error).message}`); }
 }
 
 /** Merge a worktree's branch back into the current branch of `repo`.

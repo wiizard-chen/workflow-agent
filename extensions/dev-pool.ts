@@ -92,15 +92,25 @@ export class DevPool {
 
   /**
    * Get an existing dev, or create one with a fresh worktree on first use.
-   * Worktree path is deterministic: <repo>/wt-<reqId>-dev<id> — stable for the
-   * dev's lifetime so reasonix's `-dir` never changes and --continue works.
+   * Worktree path is deterministic: <repo>/wt-dev<id> — STABLE ACROSS REQUIREMENTS
+   * so reasonix's `-dir` never changes, --continue works, and the dev's session
+   * context survives across requirements (not just within one). Worktrees are
+   * persistent: created once, reused for every requirement, reset to main on cleanup.
    */
   getOrCreate(devId: number): Dev {
     let dev = this.devs.get(devId);
     if (dev) return dev;
-    const name = `wt-${this.state.reqId}-dev${devId}`;
-    const branch = `bd-${this.state.reqId}-dev${devId}`;
-    const wt = addWorktree(this.state.repo, name, branch, this.bdExec);
+    const name = `wt-dev${devId}`;
+    const branch = `dev${devId}`;
+    // If the worktree already exists (persistent across requirements), reuse it
+    // without re-creating. Only create on first-ever use.
+    const wtPath = path.join(this.state.repo, name);
+    let wt: Worktree;
+    if (fs.existsSync(wtPath) && fs.existsSync(path.join(wtPath, ".git"))) {
+      wt = { path: wtPath, branch, name };
+    } else {
+      wt = addWorktree(this.state.repo, name, branch, this.bdExec);
+    }
     dev = { id: devId, worktree: wt, sessionStarted: false, issueCount: 0, commits: [] };
     this.devs.set(devId, dev);
     return dev;
@@ -151,6 +161,14 @@ export class DevPool {
     const dev = this.getOrCreate(devId);
     const notify = opts.onNotify ?? (() => {});
     const repo = this.state.repo;
+
+    // 0. Verify the worktree exists — if addWorktree failed silently or the
+    // path is stale, reasonix would write to the wrong cwd and we'd lose the
+    // code. Fail loud BEFORE claiming.
+    if (!fs.existsSync(dev.worktree.path)) {
+      notify(`✖ ${taskId} worktree 不存在:${dev.worktree.path}(可能创建失败)。已跳过,不 claim。`, "error");
+      return { ok: false, exitCode: -1, noChange: false, merged: false, output: `worktree 不存在:${dev.worktree.path}` };
+    }
 
     // 1. Resolve the spec path from the issue's notes.
     let specPath = "";
@@ -203,6 +221,16 @@ export class DevPool {
     dev.issueCount++;
 
     if (c.empty) {
+      // reasonix ran (exitCode 0) but no code changes in the worktree. This is
+      // suspicious: reasonix may have written to the wrong dir. Before treating
+      // as pass, check whether the MAIN repo has untracked code (wrong-dir signal).
+      const mainRepoDirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], repo).stdout.trim();
+      if (mainRepoDirty) {
+        this.bdOps.reopen(repo, taskId);
+        this.bdOps.comment(repo, taskId, `worktree 无改动但主仓库有未跟踪文件:\n${mainRepoDirty.slice(0, 500)}\nreasonix 可能写错目录。请检查 worktree 路径。`);
+        notify(`✖ ${taskId} worktree 为空但主仓库有改动——reasonix 可能写错目录,已放回 bd`, "error");
+        return { ok: false, exitCode: 0, noChange: false, merged: false, output: `worktree 空,主仓库有改动:\n${mainRepoDirty.slice(0, 1500)}` };
+      }
       this.bdOps.close(repo, taskId, "无代码改动");
       notify(`⚠ ${taskId} 无代码改动(视为通过)`, "warning");
       return { ok: true, exitCode: 0, noChange: true, merged: false, output: "(无代码改动)" };
@@ -223,6 +251,10 @@ export class DevPool {
       return { ok: false, exitCode: 0, noChange: false, merged: false, output: m.output.slice(-2000) };
     }
 
+    // 7. Close + link the commit sha in bd (so bd show <id> can find the code).
+    if (c.sha) {
+      try { this.bdOps.comment(repo, taskId, `代码提交:${c.sha.slice(0, 8)}(分支 ${dev.worktree.branch})`); } catch (_e) { /* best effort */ }
+    }
     this.bdOps.close(repo, taskId);
     if (c.sha) dev.commits.push(c.sha);
     notify(`✔ dev${devId} 完成 ${taskId} 并合并 ${c.sha?.slice(0, 8)} (第 ${dev.issueCount} 个任务,session ${dev.sessionStarted ? "已续跑" : "首次"})`, "info");
@@ -245,12 +277,23 @@ export class DevPool {
   }
 
   /** Tear down all dev worktrees. Call when the manager finishes. */
+  /** Reset all dev worktrees to the main branch tip (persistent: worktrees
+   *  stay for the next requirement, just synced to latest main). Does NOT
+   *  remove them — that's the point of persistent worktrees. */
   cleanupAll(onNotify?: (m: string) => void): void {
+    const repo = this.state.repo;
+    const mainBranch = sh("git", ["rev-parse", "--abbrev-ref", "HEAD"], repo).stdout.trim() || "main";
     for (const dev of this.devs.values()) {
       try {
-        removeWorktree(this.state.repo, dev.worktree, this.bdExec);
-        onNotify?.(`dev${dev.id} worktree 已清理(处理了 ${dev.issueCount} 个任务,${dev.commits.length} 次提交)`);
-      } catch (_e) { /* best effort */ }
+        // Reset the dev's worktree to main tip so it's clean for the next req.
+        // fetch main into the worktree, then reset --hard.
+        sh("git", ["fetch", "origin", `${mainBranch}:${mainBranch}`], dev.worktree.path);
+        sh("git", ["reset", "--hard", mainBranch], dev.worktree.path);
+        onNotify?.(`dev${dev.id} worktree 已 reset 到 ${mainBranch}(处理了 ${dev.issueCount} 个任务,${dev.commits.length} 次提交)`);
+      } catch (e) {
+        // If reset fails (e.g. mainBranch fetch issue), best-effort clean status.
+        onNotify?.(`dev${dev.id} worktree reset 失败(${(e as Error).message}),保留现状`);
+      }
     }
     this.devs.clear();
   }
