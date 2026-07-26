@@ -361,6 +361,20 @@ async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<v
   ctx.ui.notify(`PRD 已生成:${reqPath(wf, "prd.md")}\n审阅后 /execute 进入执行模式(经理拆 task + 分配 dev + 测试)。`, "info");
 }
 
+/** /wf done — end the current requirement's execute phase.
+ *  Flips mode back to "plan" so /wf new and /wf resume work again. Use this
+ *  when a manager run finished (or you want to abort a stuck build mode):
+ *  it releases the "正在执行中" lock without touching bd task states.
+ *  Does NOT close bd tasks — those are the manager's responsibility. */
+function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  if (!wf) { ctx.ui.notify("无活动需求。", "info"); return; }
+  if (wf.mode !== "build") { ctx.ui.notify(`需求 ${wf.reqId} 不在执行模式(当前:${wf.mode}),无需结束。`, "info"); return; }
+  wf.mode = "plan";
+  saveState(wf);
+  setModeStatus(ctx);
+  ctx.ui.notify(`需求 ${wf.reqId} 已结束执行阶段,切回 PRD 模式。\n现在可以 /wf new 新建,或 /wf resume 切换。bd task 状态不变(用 /wf status 查看)。`, "info");
+}
+
 function cmdStatus(ctx: ExtensionCommandContext): void {
   if (!wf) { ctx.ui.notify("无活动需求。/wf new <名字> [repo] 开始。", "info"); return; }
   let lines: string[] = [];
@@ -909,7 +923,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     pi.registerCommand("wf", {
       description: "workflow(PRD + 执行双模式):new / prd / analyze / status / verify / execute / help",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "done", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -928,6 +942,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           case "status": cmdStatus(ctx); break;
           case "resume": cmdResume(ctx, rest); break;
           case "bug": await cmdBug(pi, ctx, rest); break;
+          case "done": cmdDone(pi, ctx); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
@@ -942,7 +957,8 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
               "/execute [prd路径]      启动经理进程:拆 task→分配 dev(omp subagent)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",
-              "/wf status              查看 bd 子任务状态",
+              "/wf status              查看 bd 子任务状态 + 进度(完成的/进行中/待处理 + 最新动作)",
+              "/wf done                结束当前需求的执行阶段(切回 PRD 模式,释放锁)。manager 跑完后用,或卡在 build 模式时用",
               "/wf bug <描述>          建 bd bug(挂当前需求 epic,跳过 PRD),然后 /execute 修复",
               "/wf verify <cmd>        设置验证命令",
             ].join("\n"), "info");
