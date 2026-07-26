@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# wfpi — 一键启动 pi + workflow-agent 扩展(workflow.ts + cache.ts + pi-subagents)
+#
+# 在任意目录跑 `wfpi` 即可。它会:
+#   1. 定位 workflow-agent 的 extensions 目录(可用 WF_AGENT_HOME 环境变量覆盖)
+#   2. 加载 workflow.ts + cache.ts 扩展
+#   3. 在当前目录启动 pi(操作当前仓库)
+#   4. 透传所有额外参数给 pi(如 wfpi --print --model "..." "prompt")
+#
+# 用法:
+#   wfpi                          # 交互式启动(在当前目录)
+#   wfpi --print "回复 OK"        # 非交互
+#   wfpi --model "deepseek/..."   # 指定 model
+#   WF_AGENT_HOME=/path wfpi      # 自定义 workflow-agent 路径
+#
+# 安装:把下面这行加到 ~/.zshrc(脚本会自动处理):
+#   source /path/to/workflow-agent/scripts/wfpi.aliases
+
+set -euo pipefail
+
+# --- 定位 workflow-agent ---
+# 优先用 WF_AGENT_HOME 环境变量;否则按常见路径查找
+if [[ -n "${WF_AGENT_HOME:-}" ]]; then
+  AGENT_HOME="$WF_AGENT_HOME"
+else
+  # 默认路径:本脚本所在目录的上一级(scripts/.. = workflow-agent 根)
+  AGENT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
+EXT_DIR="$AGENT_HOME/extensions"
+WORKFLOW_TS="$EXT_DIR/workflow.ts"
+CACHE_TS="$EXT_DIR/cache.ts"
+
+# 校验 extension 存在
+if [[ ! -f "$WORKFLOW_TS" ]]; then
+  echo "❌ 找不到 workflow 扩展:$WORKFLOW_TS" >&2
+  echo "   设置 WF_AGENT_HOME 指向 workflow-agent 仓库根目录" >&2
+  exit 1
+fi
+
+# --- 启动 pi ---
+# 透传所有参数 $@。cwd 保持当前目录(让 workflow 操作当前仓库)
+exec pi -e "$WORKFLOW_TS" -e "$CACHE_TS" "$@"

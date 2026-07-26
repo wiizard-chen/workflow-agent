@@ -197,6 +197,25 @@ install_skills() {
   (cd "$PROJECT_ROOT" && node scripts/install-skills.mjs) || warn "skill 安装有报错(见上)"
 }
 
+# 第 4 步:安装 wfpi 命令到 ~/.zshrc(任意目录一键启动 pi + workflow 扩展)
+install_wfpi() {
+  header "第 4 步:安装 wfpi 命令(~/.zshrc)"
+  local zshrc="${HOME}/.zshrc"
+  local marker="# --- workflow-agent:wfpi 命令"
+  if grep -q "$marker" "$zshrc" 2>/dev/null; then
+    skip "wfpi 已在 ~/.zshrc"
+  else
+    info "写入 wfpi 到 ~/.zshrc"
+    cat >> "$zshrc" << EOF
+
+$marker(任意目录一键启动 pi + workflow 扩展) ---
+export WF_AGENT_HOME="$PROJECT_ROOT"
+wfpi() { "\$WF_AGENT_HOME/scripts/wfpi" "\$@"; }
+EOF
+    say "wfpi 已写入 ~/.zshrc(source ~/.zshrc 或重开终端生效)"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
@@ -208,6 +227,8 @@ install_skills() {
 
 [[ $DO_SKILLS == 1 ]] && install_skills || header "第 3 步:安装 skill(--no-skills 跳过)"
 [[ $DO_SKILLS == 0 ]] && echo "  ${C_DIM}已跳过${C_RESET}"
+
+[[ $DO_TOOLS == 1 ]] && install_wfpi
 
 # ---------------------------------------------------------------------------
 # 收尾:验证
