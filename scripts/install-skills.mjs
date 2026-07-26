@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// install-skills.mjs — 把本项目自带的 skill 安装到全局 skill 根,供 omp 和 reasonix 共享加载。
+// install-skills.mjs — 把本项目自带的 skill 安装到全局 skill 根,供 omp 加载。
 //
 // 用法:
 //   node scripts/install-skills.mjs             # 默认:symlink 安装到 ~/.omp/agent/skills/

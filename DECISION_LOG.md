@@ -176,3 +176,26 @@ reasonix 执行层自带 DeepSeek 字节级前缀缓存优化（~99.8%），但 
 - 异步 /execute 单独分支。
 - 若未来要彻底去 reasonix 依赖，需先解决 omp subagent 的 session 续跑问题（当前无 `--continue` 等价物）。
 
+---
+
+## 2026-07-22 迁移记录:抛弃 reasonix,改用 omp 原生 subagent(已实施)
+
+**上文"边界"段的"不换执行层"和"后续"段的"去 reasonix 依赖"两条已作废——迁移已完成。** 记录推翻原假设的关键事实链:
+
+1. **`--continue` 的价值被 neutralize**:cache.ts 96% 命中率(冻结 system prompt date → DeepSeek 服务端前缀跨 task 稳定)已经等价于 `--continue` 的省 token 效果。原假设"omp task 工具无 `--continue` 等价物,换会断裂上下文复用"被推翻。
+2. **omp 17.0.6 的 task 工具是完整生产级系统**(源码验证):并行执行(`task.maxConcurrency` 默认 32)、isolated worktree 隔离、结构化返回(`outputSchema`/`schemaMode`)、detached 后台跑、parked/revive session 复活、嵌套 subagent(`task.maxRecursionDepth` 默认 2,manager→dev 正好够)。
+3. **类型包兼容**:`@oh-my-pi/pi-coding-agent@17.0.7` 有 legacy 兼容 shim,老 pi 扩展几乎零改动运行(唯一破坏点:`getAllTools()` 返回 `string[]` 而非 `ToolInfo[]`)。
+4. **bd 并发安全**:embedded Dolt(ACID)+ noms LOCK 单写序列化 + `--claim` 原子原语,20 并发 dev 各自调 bd 不会损坏。
+5. **经理形态**:保留为常驻 LLM 管控者(动态粒度——默认阶段级放权,异常时细管),不再是独立进程的问题阶段4 处理。
+
+**已完成的阶段**(见 bd epic `workflow-agent-vqu`):
+- 阶段 0:类型包 `@earendil-works`→`@oh-my-pi` + `getAllTools` 修复 ✓
+- 阶段 1:DevPool `spawnReasonix`→`spawnDevSubagent`(omp `--print` 子进程),删 `sessionStarted`/`reasonixArgs`,worktree/验证/commit/merge/bd 逻辑全保留 ✓
+- 阶段 2:`.omp/agents/dev.md`/`manager.md` 升级为正式 omp agent 定义(dev 内部闭环验证 + manager 动态粒度)✓
+- 阶段 6:22 文件 reasonix 引用清理(README/KNOWN_ISSUES/skills/setup.sh/tests 等)✓
+- 阶段 3:DevPool 并发 + merge 串行锁(目标 20 并发)—— 进行中
+- 阶段 5:20 并发分级实测 —— 待阶段 3
+- 阶段 4:经理独立进程 → detached subagent —— 可选,最后做
+
+**关键修正(影响 cache 论证)**:调研发现 cache.ts 迁移前**不覆盖 dev 层**(dev 是独立 reasonix 进程)。迁移后 dev 变 omp 同进程 subagent,cache.ts 的 `before_agent_start` 开始覆盖 dev 层——正好接管 `--continue` 留下的空缺。但 dev subagent 的实际命中率未经实测(其前缀更短更动态),是迁移后头号待验证项。
+

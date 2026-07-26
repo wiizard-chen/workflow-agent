@@ -110,18 +110,18 @@ Use Beads (`bd`) for durable task tracking in repositories that include it. Use 
 
 ### pi-workflow beads skill 四件套(本项目自带)
 
-本项目在 `skills/` 下提供四个针对 pi-workflow 流水线的 beads skill(omp 通过 `resources_discover` 自动发现;reasonix dev 在执行 task 前应加载):
+本项目在 `skills/` 下提供四个针对 pi-workflow 流水线的 beads skill(omp 通过 `resources_discover` 自动发现;omp dev subagent 在执行 task 前应加载):
 
 | skill | 路径 | 用途 | 主要使用者 |
 |---|---|---|---|
 | `bd-plan` | `skills/bd-plan/SKILL.md` | 需求 → beads epic + PRD(PLAN 阶段) | 主 session omp |
 | `bd-split` | `skills/bd-split/SKILL.md` | PRD → task + 依赖(经理拆分) | 经理 omp 进程 |
-| `bd-work` | `skills/bd-work/SKILL.md` | 认领/实现/关闭单个 task(dev 工作循环) | **reasonix dev(高频)** |
+| `bd-work` | `skills/bd-work/SKILL.md` | 认领/实现/关闭单个 task(dev 工作循环) | **omp dev subagent(高频)** |
 | `bd-handoff` | `skills/bd-handoff/SKILL.md` | 跨 session 交接(进度写 bd,不写本地文件) | 经理 + dev |
 
-每个 skill 含一个 `## reasonix 执行层注意` 章节,记录 beads 1.1.0 的真实接口(已在 `extensions/bd.ts` 验证,与官方文档有差异)。reasonix dev 实现 task 前应先读 `bd-work` skill 的这一节,了解 `--dolt-auto-commit on`、`-C`、`bd comment`(单数)、禁用 `bd edit`/`bd doctor --fix` 等约定。
+每个 skill 含一个 `## omp subagent 执行层注意` 章节,记录 beads 1.1.0 的真实接口(已在 `extensions/bd.ts` 验证,与官方文档有差异)。omp dev subagent 实现 task 前应先读 `bd-work` skill 的这一节,了解 `--dolt-auto-commit on`、`-C`、`bd comment`(单数)、禁用 `bd edit`/`bd doctor --fix` 等约定。
 
-各 agent 的前置角色定位见 `.omp/agents/`:`manager.md`(经理)、`dev.md`(reasonix dev 执行者)。
+各 agent 的前置角色定位见 `.omp/agents/`:`manager.md`(经理)、`dev.md`(omp dev subagent 执行者)。
 
 ### Quick Reference
 

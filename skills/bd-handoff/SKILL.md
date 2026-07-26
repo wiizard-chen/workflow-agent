@@ -1,6 +1,6 @@
 ---
 name: bd-handoff
-description: 跨 agent session 交接工作状态,把进度、决策、待办固化进 beads 而非本地文件。用于经理↔dev 交接、reasonix session --continue 复用、经理退出前汇报、多 session 恢复上下文。核心是 beads 是跨 session 权威状态层,交接信息写进 bd comment/issue,不写本地 handoff markdown。触发词:交接、handoff、session 复用、--continue、经理退出、恢复上下文、多 session、进度同步、跨 session。
+description: 跨 agent session 交接工作状态,把进度、决策、待办固化进 beads 而非本地文件。用于经理↔dev 交接、omp dev subagent 跨 task 复用上下文、经理退出前汇报、多 session 恢复上下文。核心是 beads 是跨 session 权威状态层,交接信息写进 bd comment/issue,不写本地 handoff markdown。触发词:交接、handoff、session 复用、跨 task 上下文、经理退出、恢复上下文、多 session、进度同步、跨 session。
 ---
 
 # bd-handoff · 跨 session 交接
@@ -14,7 +14,7 @@ description: 跨 agent session 交接工作状态,把进度、决策、待办固
 - **经理 → dev**:经理把 task 分配给 dev 时,通过 bd issue 的 notes/规格文件传递上下文。
 - **dev → 经理**:dev 完成/失败后,通过 bd issue 的状态 + comment 回报。
 - **经理退出前**:经理进程结束前,把整体进度汇总写进 epic 的 comment。
-- **dev session 复用**:同一 dev 的连续 task 通过 `--continue` 复用 session,交接是隐式的(session 记得前一个 task)。
+- **dev 跨 task 复用**:同一 dev 的连续 task 不再有持久 session——每个 task 是全新的 omp subagent 进程,上下文复用靠 bd comment(显式交接)和 cache.ts 前缀缓存(DeepSeek 系统提示日期冻结,保持前缀缓存命中)。
 
 ## session 模型(理解交接的前提)
 
@@ -24,11 +24,11 @@ pi-workflow 有这些 session:
 |---|---|---|---|
 | 主 omp session | omp | 整个交互(PLAN + 启动执行) | 天然复用(就是当前对话) |
 | 经理 omp 进程 | omp `--print` | 一次 `/execute` 到经理退出 | **不复用**(每次 /execute 新进程) |
-| dev reasonix session | reasonix | dev 池存活期间 | **`--continue` 复用**(同一 dev 的连续 task) |
+| dev omp subagent | omp | 单个 task 的执行 | **不复用**(每 task 新进程,上下文靠 bd + cache.ts) |
 
 **关键**:
 - 经理进程每次 `/execute` 都是全新的——它的上下文来自 PRD + bd 状态 + manager.md,**不依赖上一次 /execute 的内存**。所以经理要做的事必须落 bd,不能留在自己 session 里。
-- dev session 通过固定 worktree 路径定位:`~/.reasonix/projects/<escaped-worktree-path>/sessions/`。worktree 路径不变 → session 路径稳定 → `--continue` 能找到并恢复。
+- dev 不再有持久 session 路径(原 `~/.reasonix/projects/<escaped-worktree-path>/sessions/` 机制已废弃)。每个 task 是全新的 omp subagent 进程(`omp --print --system-prompt dev.md --cwd <worktree>`),无 `--continue`。跨 task 上下文复用靠:**(a) bd comment(显式交接进度/坑/决策)** + **(b) cache.ts 前缀缓存(冻结 DeepSeek 系统提示里的日期,保持 prompt 前缀稳定,命中 DeepSeek prefix cache)**。
 
 ## 交接协议
 
@@ -37,15 +37,15 @@ pi-workflow 有这些 session:
 经理调 `assign_dev(taskId, devId)`。工具内部:
 1. `bd show <taskId>` 读规格文件路径(从 notes)。
 2. `bd update <taskId> --claim --assignee dev<id>-<reqId>`(状态 → in_progress)。
-3. 启动 reasonix,把"实现这个子任务,规格在 <文件>"作为指令传入。
+3. 启动 dev subagent,把"实现这个子任务,规格在 <文件>"作为指令传入(`omp --print --model deepseek-flash --system-prompt <dev.md> --cwd <worktree>`)。
 
 **交接信息载体**:bd issue 的 `notes` 字段(指向规格文件)+ 规格文件内容。dev 读这两样就够了。
 
 ### dev → 经理(完成/失败回报)
 
-dev 跑完后,`assign_dev` 工具根据 reasonix 退出码处理:
+dev 跑完后,`assign_dev` 工具根据 dev subagent 退出码处理:
 - **成功**:`bd close <taskId>` + commit + merge。dev 的产出在 git commit 里,经理看 git log。
-- **失败**:`bd reopen <taskId>` + `bd comment <taskId> "dev<id> reasonix 失败(退出码 N)"`。task 回到队列,经理可重试或换 dev。
+- **失败**:`bd reopen <taskId>` + `bd comment <taskId> "dev<id> dev subagent 失败(退出码 N)"`。task 回到队列,经理可重试或换 dev。
 
 **交接信息载体**:bd issue 的状态(closed/reopened)+ comment(失败原因)+ git commit(产出)。
 
@@ -59,23 +59,26 @@ bd comment <epicId> "执行完成汇总:处理 N 个 task(dev1: x 个, dev2: y �
 
 这样下次 `/execute` 或 `/wf status` 时,经理/用户能从 epic comment 看到上次执行的全貌。
 
-### dev session 复用(--continue,隐式交接)
+### dev 跨 task 上下文复用(cache.ts + bd,显式交接)
 
-同一 dev 的连续 task 通过 `--continue` 复用 session——**不需要显式交接**。dev 的 reasonix session 记得:
-- 前一个 task 做了什么(项目理解已建立)。
-- 代码库结构(不用重新 explore)。
-- 之前踩过的坑。
+同一 dev 的连续 task **不再复用 session**(`--continue` 机制已废弃)。每个 task 是全新 omp subagent 进程,什么都不记得。上下文复用靠两条机制,都需要显式落 bd:
 
-**这是上下文复用的核心收益**:经理把有依赖链的一串 task(A→B→C)给同一个 dev,就是为了让 dev 在 A 建立的上下文上直接做 B、C,不用重新读项目。
+- **cache.ts 前缀缓存**(自动):DeepSeek 系统提示里的日期被冻结,prompt 前缀保持稳定 → DeepSeek prefix cache 命中,跨 task 的系统提示 / dev.md / 项目结构说明等"公共前缀"几乎免费复用。
+- **bd comment 跨 task 上下文**(显式):dev 把"项目理解、之前踩的坑、关键决策"写进 bd comment。下一个 task 的 dev(即使不是同一个)能从 bd 读到。dev 的 omp subagent 记得:
+  - 前一个 task 做了什么(从 bd comment + git log 读)。
+  - 代码库结构(从前缀缓存命中的公共系统提示读)。
+  - 之前踩过的坑(从 bd comment 读)。
+
+**上下文复用的核心收益**(现在更显式):经理把有依赖链的一串 task(A→B→C)给同一个 dev,dev 在每个 task 开始时从 bd + cache 读到 A 建立的上下文,直接做 B、C,不用重新读项目——前提是 A 的 dev 把关键发现写进了 bd comment。
 
 ## 重要约束
 
 - **不创建本地 handoff markdown 作真相源**:交接信息写 bd。本地 `.workflow/` 里的文件是产物(prd.md、规格、diff),不是状态载体——状态在 bd。
-- **进度写 bd comment,不写本地 TODO**:dev 遇到阻碍,`bd comment` + 建 bug;不要写本地 `TODO.md`——别的 session 看不到。
-- **reasonix `-dir` 不能变**:dev 的 worktree 路径固定(在 dev 池创建时锁定),改了会找不到旧 session,`--continue` 失效。dev 池(`extensions/dev-pool.ts`)已保证这点。
+- **进度写 bd comment,不写本地 TODO**:dev 遇到阻碍,`bd comment` + 建 bug;不要写本地 `TODO.md`——别的 session 看不到。没有持久 session 后,这条**更重要**:dev 进程退出即失忆,只有 bd comment 是跨 task 记忆。
+- **dev worktree 路径固定**:dev 的 worktree 路径(在 dev 池创建时锁定)不变——cache.ts 前缀缓存依赖 `--cwd <worktree>` 和 `--system-prompt <dev.md>` 的稳定组合,改路径会破坏前缀缓存命中。dev 池(`extensions/dev-pool.ts`)已保证这点。
 - **经理不自以为是地跳过 bd**:经理每一步都经 bd(claim/close/comment),不依赖内存——因为经理进程随时可能退出。
 
-## reasonix 执行层注意
+## omp subagent 执行层注意
 
 > 交接场景下 bd 操作的接口要点(完整接口表见 bd-work skill):
 

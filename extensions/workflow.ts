@@ -1,10 +1,10 @@
 /**
- * workflow — a pi/omp coding-agent extension implementing a two-mode pipeline:
+ * workflow — an omp coding-agent extension implementing a two-mode pipeline:
  *
  *   PRD mode:      you + omp discuss the requirement → glm-5.2 writes prd.md
  *   EXECUTE mode:  omp spawns a "manager" sub-process (separate omp session)
  *                  that reads prd.md, splits it into bd tasks, assigns them to
- *                  reasonix "devs" (persistent sessions in fixed worktrees),
+ *                  omp native "dev" subagents (each in a fixed worktree),
  *                  and finally has glm-5.2 test the output. Failed tests
  *                  become bd bugs the manager re-assigns.
  *
@@ -12,9 +12,10 @@
  * It controls devs via three extension tools: split_prd_to_tasks, assign_dev,
  * run_test. Scheduling is the manager's LLM judgment, NOT a code loop.
  *
- * Context reuse: each dev (dev1/dev2/dev3) owns ONE fixed worktree → reasonix
- * `-dir` never changes → session path is stable → `--continue` resumes it →
- * the dev carries project understanding + prior issue context forward.
+ * Context reuse: each dev (dev1/dev2/...) owns ONE fixed worktree. A dev
+ * subagent is a fresh omp --print process per task; cross-task context is
+ * carried by bd comments + the DeepSeek prefix cache (cache.ts freezes the
+ * system-prompt date so the prefix stays byte-stable across tasks).
  *
  * WF_ROLE env var distinguishes the main session (PRD mode, commands active)
  * from the manager session (execute mode, tools active).
@@ -27,7 +28,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import {
   commitArtifacts,
   commitSubtask,
@@ -65,7 +66,7 @@ const DEFAULT_CONFIG: WorkflowConfig = {
     split: { provider: "deepseek", model: "deepseek-v4-pro" },
     review: { provider: "zai", model: "glm-5.2" },
   },
-  reasonix: { bin: "reasonix", model: "deepseek-flash", maxSteps: 0, timeoutMs: 1800000 },
+  dev: { provider: "deepseek", model: "deepseek-flash", timeoutMs: 1800000 },
   build: { verifyCommand: "", commitPrefix: "subtask" },
   execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
 };
@@ -84,7 +85,7 @@ function loadConfig(): WorkflowConfig {
         return {
           providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
           roles: { ...DEFAULT_CONFIG.roles, ...(raw.roles || {}) },
-          reasonix: { ...DEFAULT_CONFIG.reasonix, ...(raw.reasonix || {}) },
+          dev: { ...DEFAULT_CONFIG.dev, ...(raw.dev || {}) },
           build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
           execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
         };
@@ -158,7 +159,7 @@ function restoreLatestWf(ctx: ExtensionCommandContext): boolean {
 function lockReadonly(pi: ExtensionAPI): void {
   try {
     const mcpServerNames = Object.keys(readMcpServers());
-    const allNames = pi.getAllTools().map((t) => t.name);
+    const allNames = pi.getAllTools();
     const mcpTools = allNames.filter((n) => mcpServerNames.some((s) => n.startsWith(`${s}_`)) || n.startsWith("mcp__"));
     pi.setActiveTools([...READONLY_TOOLS, ...mcpTools]);
   } catch (_e) { /* ignore */ }
@@ -399,6 +400,85 @@ function cmdResume(ctx: ExtensionCommandContext, args: string): void {
   ctx.ui.notify(`已切换到需求 ${wf.reqId}(epic ${wf.epicId})\n模式 ${wf.mode}`, "info");
 }
 
+/** /wf bug <描述> — 轻量 bug 修复入口。跳过 PRD,直接建 bd bug + 最小规格,
+ *  挂当前需求 epic。如果描述里包含多个独立问题(首先/其次/另外),用 split 模型
+ *  自动拆成多个 bug,每个一个规格。然后 /execute 让经理分配 dev 修复。 */
+async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const desc = args.trim().replace(/["']/g, "");
+  if (!desc) { ctx.ui.notify("用法:/wf bug <描述>(可包含多个问题)", "warning"); return; }
+  if (!wf) { ctx.ui.notify("没有活动需求。先 /wf resume 切到要修 bug 的需求。", "warning"); return; }
+  if (!wf.epicId) { ctx.ui.notify("当前需求缺少 bd epic id。", "error"); return; }
+  fs.mkdirSync(reqPath(wf, "subtasks"), { recursive: true });
+
+  // Use the split model to analyze the description and break out independent bugs.
+  // Single problem → 1 bug; multiple ("首先/其次/另外") → multiple bugs.
+  ctx.ui.notify("分析 bug 描述…", "info");
+  const analyzePrompt = [
+    `你是 bug 分类助手。分析下面这段 bug 描述,把里面独立的、不相关的问题拆开。`,
+    `只输出严格 JSON:{"bugs":[{"title":"短标题(≤20字)","desc":"具体问题描述"}]}`,
+    `要求:每个独立问题一个 bug;相关联的合并成一个;title 简短;desc 包含足够细节让开发者复现。`,
+    `如果只有一个问题,JSON 里就一个 bug。`,
+    ``,
+    `--- bug 描述 ---`,
+    desc,
+  ].join("\n");
+  const analysisText = await runStageText(pi, ctx, CONFIG.roles.split, analyzePrompt);
+
+  // Parse the analysis; fall back to a single bug if model fails.
+  let bugs: { title: string; desc: string }[] = [];
+  if (analysisText) {
+    try {
+      const parsed = extractSubtasksJson(analysisText) as any;
+      const raw = parsed.bugs || parsed.subtasks || [];
+      bugs = raw.map((b: any) => ({ title: String(b.title || "").slice(0, 60), desc: String(b.desc || b.spec || b.title || desc) }));
+    } catch (_e) { /* fall through to single-bug fallback */ }
+  }
+  if (bugs.length === 0) bugs = [{ title: desc.slice(0, 40), desc }];
+
+  // Create each bug with its own spec file.
+  const created: { id: string; title: string }[] = [];
+  for (const b of bugs) {
+    try {
+      const safeName = slug(b.title).slice(0, 30) || "bug";
+      const specPath = reqPath(wf, "subtasks", `bug-${safeName}.md`);
+      const specBody = [
+        `# Bug: ${b.title}`,
+        ``,
+        `## 问题描述`,
+        b.desc,
+        ``,
+        `## 目标`,
+        `修复这个 bug,使行为符合预期。如果是 UI bug,确保各屏幕尺寸正常。`,
+        ``,
+        `## 验收标准`,
+        `- [ ] 上述问题不再复现`,
+        `- [ ] 验证命令通过(或手动验证行为正确)`,
+        `- [ ] 没有引入新的回归`,
+        ``,
+        `> 由 /wf bug 生成。dev 实现时先复现,再修。`,
+      ].join("\n");
+      fs.writeFileSync(specPath, specBody);
+      const bugId = bd.create(wf.repo, {
+        title: `bug: ${b.title}`,
+        type: "bug",
+        parent: wf.epicId,
+        description: b.desc,
+        notes: `规格文件:${specPath}`,
+      });
+      created.push({ id: bugId, title: b.title });
+    } catch (e) {
+      ctx.ui.notify(`建 bug 失败(${b.title}):${(e as Error).message}`, "error");
+    }
+  }
+
+  const lines = created.map((c) => `  ${c.id}: ${c.title}`).join("\n");
+  ctx.ui.notify(
+    `已建 ${created.length} 个 bug(挂 epic ${wf.epicId}):\n${lines}\n\n/execute 修复(经理会检查 epic 下的 open bug)`,
+    "info"
+  );
+}
+
+
 // ---------------------------------------------------------------------------
 // EXECUTE mode: spawn manager + register dev/test tools
 // ---------------------------------------------------------------------------
@@ -519,6 +599,16 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
     const sp = reqPath(wf, "state.json");
     if (fs.existsSync(sp)) wf = { ...wf, ...JSON.parse(fs.readFileSync(sp, "utf8")) };
   } catch (_e) { /* keep in-memory */ }
+  // Recover subtaskIds from bd if the manager's saveState was lost/clobbered.
+  // The manager writes subtaskIds in split_prd_to_tasks, but a later agent_end
+  // saveState (with stale wf) can overwrite it with []. bd is authoritative.
+  if (wf.epicId && (!wf.subtaskIds || wf.subtaskIds.length === 0)) {
+    try {
+      const epic = process.env.WF_EPIC_ID || wf.epicId;
+      const kids = bd.children(wf.repo, epic).filter((i: any) => i.issue_type === "task");
+      if (kids.length > 0) wf.subtaskIds = kids.map((k: any) => k.id);
+    } catch (_e) { /* bd unreachable, leave as-is */ }
+  }
 
   if (exitCode === 0 && wf.managerNoop) {
     // Manager exited clean but did ZERO work (no split, no assign) — almost
@@ -608,11 +698,11 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
     },
   });
 
-  // Tool 2: assign_dev — assign a task to a dev, run reasonix synchronously
+  // Tool 2: assign_dev — assign a task to a dev, run omp subagent synchronously
   pi.registerTool({
     name: "assign_dev",
     label: "分配 task 给 dev",
-    description: "把一个 task 分配给指定 dev(1…N)。同步执行:reasonix 跑完才返回。同一 dev 的后续 task 会复用 session(--continue)。返回成功/失败 + diff 摘要。",
+    description: "把一个 task 分配给指定 dev(1…N)。同步执行:omp dev subagent 跑完才返回。dev 在 worktree 里写代码并内部闭环验证。返回成功/失败 + diff 摘要。",
     parameters: Type.Object({
       task_id: Type.String({ description: "bd issue id(如 xxx.1)" }),
       dev_id: Type.Integer({ description: "dev 编号(1…N)" }),
@@ -621,7 +711,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       const p = params as any;
       const taskId: string = p.task_id;
       const devId: number = p.dev_id;
-      if (!devPool) devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec);
+      if (!devPool) { devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec); devPool.devExtPath = fileURLToPath(import.meta.url); }
       mgrTasksProcessed++;   // track that the manager actually assigned work
       const allowEmpty = !(wf!.verifyCommand ?? CONFIG.build.verifyCommand ?? "").trim();
       const result = await devPool.runTask(devId, taskId, {
@@ -630,6 +720,46 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       });
       const status = result.ok ? (result.noChange ? "无改动(通过)" : `完成并合并 ${result.commit?.slice(0, 8)}`) : "失败(已放回 bd)";
       return { content: [{ type: "text", text: `task ${taskId} → dev${devId}: ${status}\n${result.output.slice(-1500)}` }], details: {} };
+    },
+  });
+
+  // Tool 2b: assign_devs_batch — assign MULTIPLE independent tasks in parallel.
+  // Use this when several tasks have NO mutual dependency (bd ready shows them
+  // all at once). Each task runs on its own dev subagent in an isolated worktree;
+  // execution overlaps in time up to maxParallel, only the merge step serializes.
+  // For a dependency chain (B depends_on A), assign A first, wait, then assign B.
+  pi.registerTool({
+    name: "assign_devs_batch",
+    label: "并行分配多个独立 task",
+    description: "把多个互相独立的 task 并行分配给不同 dev。内部按 maxParallel(默认 3,目标 20)并发跑,合并串行。仅用于互相无依赖的 task;有依赖的用 assign_dev 顺序分配。返回每个 task 的结果。",
+    parameters: Type.Object({
+      assignments: Type.Array(Type.Object({
+        task_id: Type.String({ description: "bd issue id" }),
+        dev_id: Type.Integer({ description: "dev 编号(1…N)" }),
+      })),
+    }),
+    async execute(_id, params) {
+      const p = params as any;
+      const assignments: { task_id: string; dev_id: number }[] = p.assignments || [];
+      if (assignments.length === 0) {
+        return { content: [{ type: "text", text: "没有要分配的 task" }], details: {} };
+      }
+      if (!devPool) { devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec); devPool.devExtPath = fileURLToPath(import.meta.url); }
+      mgrTasksProcessed += assignments.length;
+      const allowEmpty = !(wf!.verifyCommand ?? CONFIG.build.verifyCommand ?? "").trim();
+      const concurrency = CONFIG.execute?.maxParallel ?? 3;
+      const results = await devPool.runTasksParallel(
+        assignments.map((a) => ({ devId: a.dev_id, taskId: a.task_id })),
+        concurrency,
+        { allowEmptyVerify: !!allowEmpty, onNotify: (m) => ctx.ui.notify(m, "info") },
+      );
+      const lines = assignments.map((a, i) => {
+        const r = results[i];
+        const status = r.ok ? (r.noChange ? "无改动(通过)" : `完成并合并 ${r.commit?.slice(0, 8)}`) : "失败(已放回 bd)";
+        return `task ${a.task_id} → dev${a.dev_id}: ${status}`;
+      });
+      const okCount = results.filter((r) => r.ok).length;
+      return { content: [{ type: "text", text: `并行完成 ${okCount}/${assignments.length}(并发 ${concurrency}):\n${lines.join("\n")}` }], details: {} };
     },
   });
 
@@ -681,7 +811,21 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
     },
   });
 
-  ctx.ui.notify(`经理工具已激活:split_prd_to_tasks, assign_dev, run_test`, "info");
+  // HARD CONSTRAINT: lock the tool set so the manager can ONLY use its three
+  // tools + read-only/bash (for bd queries + reading code). Without this, the
+  // manager LLM in --print mode ignores manager.md's "don't write code" advice
+  // and uses built-in write/edit to implement tasks directly in the main repo,
+  // bypassing assign_dev → worktree → dev subagent entirely (no worktree, no
+  // isolation, code lands untracked). setActiveTools is the physical enforcement.
+  try {
+    pi.setActiveTools([
+      "split_prd_to_tasks", "assign_dev", "run_test",   // the only 3 work tools
+      ...READONLY_TOOLS,                                 // read, grep, find, ls
+      "bash",                                            // for bd CLI queries only
+    ]);
+  } catch (_e) { /* if setActiveTools fails, tools remain open (best effort) */ }
+
+  ctx.ui.notify(`经理工具已激活:split_prd_to_tasks, assign_dev, run_test(已锁定:无法自己写代码)`, "info");
 }
 
 // ---------------------------------------------------------------------------
@@ -743,11 +887,28 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     // Manager-side: detect "exited without doing any work" so the main session
     // can warn loudly instead of reporting a false success. Written to state.json
     // because the manager is a separate process (main reads it on exit).
+    //
+    // We use TWO signals: in-memory counters (mgrHasSplit/mgrTasksProcessed)
+    // AND a bd reality check (actual task count under the epic). The bd check is
+    // authoritative — if the tool ran but crashed mid-way (leaving counters
+    // stale), bd still has the tasks it created. Only flag noop when BOTH agree.
     if (WF_ROLE === "manager" && wf) {
-      const noop = !mgrHasSplit && mgrTasksProcessed === 0;
-      if (noop) {
-        wf.managerNoop = true;
-        saveState(wf);
+      const memSaysNoop = !mgrHasSplit && mgrTasksProcessed === 0;
+      if (memSaysNoop) {
+        // Double-check against bd: count actual tasks under the epic.
+        let bdTaskCount = 0;
+        try {
+          if (wf.epicId) {
+            const epic = process.env.WF_EPIC_ID || wf.epicId;
+            bdTaskCount = bd.children(wf.repo, epic).filter((i: any) => i.issue_type === "task").length;
+          }
+        } catch (_e) { /* if bd is unreachable, trust the memory signal */ }
+        // If bd has tasks, the manager DID work (tool ran, just didn't update
+        // counters). Don't flag noop.
+        if (bdTaskCount === 0) {
+          wf.managerNoop = true;
+          saveState(wf);
+        }
       }
     }
   });
@@ -757,7 +918,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     pi.registerCommand("wf", {
       description: "workflow(PRD + 执行双模式):new / prd / analyze / status / verify / execute / help",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -775,6 +936,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           }
           case "status": cmdStatus(ctx); break;
           case "resume": cmdResume(ctx, rest); break;
+          case "bug": await cmdBug(pi, ctx, rest); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
@@ -788,8 +950,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/wf resume [reqId]      切换到已有需求(无参=列列表)。新 session 自动恢复最近需求",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
-              "/execute [prd路径]      启动经理进程:拆 task→分配 dev(reasonix)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",
+              "/execute [prd路径]      启动经理进程:拆 task→分配 dev(omp subagent)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",
               "/wf status              查看 bd 子任务状态",
+              "/wf bug <描述>          建 bd bug(挂当前需求 epic,跳过 PRD),然后 /execute 修复",
               "/wf verify <cmd>        设置验证命令",
             ].join("\n"), "info");
         }

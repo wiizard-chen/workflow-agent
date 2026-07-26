@@ -1,9 +1,12 @@
 /**
- * Integration test for the bd-driven build pipeline — no LLM, no real bd,
- * no real reasonix. Uses a real temp git repo (for worktree/merge) and an
- * in-memory fake bd state machine injected via BuildDeps.
+ * @deprecated 这个测试针对的是已废弃的 runBuildPipelineBd 函数(v1 build pipeline)。
+ * 该函数在 v2 经理驱动架构中已被移除(见 DevPool + manager.md)。此文件保留作历史参考,
+ * 但无法运行(import 的 runBuildPipelineBd/execReasonix 已不存在)。
+ * 当前的 dev 执行层测试见 dev-pool.test.ts(用 fake-omp 桩验证 spawnDevSubagent 路径)。
  *
- * Run:  node --experimental-strip-types test/build.test.ts
+ * 原说明:Integration test for the bd-driven build pipeline — no LLM, no real bd,
+ * no real omp. Uses a real temp git repo (for worktree/merge) and an
+ * in-memory fake bd state machine injected via BuildDeps.
  */
 
 import { spawnSync } from "node:child_process";
@@ -32,7 +35,7 @@ const CONFIG: WorkflowConfig = {
     split: { provider: "deepseek", model: "deepseek-v4-pro" },
     review: { provider: "zai", model: "glm-5.2" },
   },
-  reasonix: { bin: "reasonix", model: "deepseek-flash", maxSteps: 0, timeoutMs: 1000 },
+  dev: { provider: "deepseek", model: "deepseek-flash", timeoutMs: 1000 },
   build: { verifyCommand: "", commitPrefix: "subtask" },
   execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 5 },
 } as any;

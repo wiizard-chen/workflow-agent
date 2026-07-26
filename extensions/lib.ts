@@ -1,14 +1,14 @@
 /**
- * workflow lib — pure, pi-independent helpers (types, git/fs, reasonix/verify,
+ * workflow lib — pure, omp-independent helpers (types, git/fs, dev-subagent/verify,
  * metrics). No scheduling logic lives here anymore — the manager LLM drives
  * execution via tools (see dev-pool.ts + workflow.ts). Kept separate from the
- * pi extension so it can be unit-tested without a live model.
+ * omp extension so it can be unit-tested without a live model.
  */
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { BdExec, IssueStatus } from "./bd.ts";
+import type { BdExec } from "./bd.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,7 +19,8 @@ export interface RoleRef { provider: string; model: string; }
 export interface WorkflowConfig {
   providers: Record<string, { baseUrl: string; apiKeyEnv: string; api: string; thinkingFormat?: string }>;
   roles: { discuss: RoleRef; prd: RoleRef; split: RoleRef; review: RoleRef };
-  reasonix: { bin: string; model: string; maxSteps: number; timeoutMs: number };
+  /** dev execution layer: omp native subagent (replaces former reasonix binary). */
+  dev: { provider: string; model: string; timeoutMs: number };
   build: { verifyCommand: string; commitPrefix: string };
   /** bd-driven execution & parallel scheduling (v2). */
   execute?: {
@@ -99,21 +100,15 @@ export function gitHead(dir: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// reasonix invocation
+// dev subagent invocation
 // ---------------------------------------------------------------------------
 
-/** Build the argv for a headless reasonix subtask run in `cwd`. */
-export function buildReasonixArgs(cfg: WorkflowConfig, s: WorkflowState, specPath: string, cwd: string): string[] {
-  const instruction =
-    `实现这个子任务。完整规格在文件:${specPath}(先读它)。` +
-    `严格按其中的验收标准实现,只做这一个子任务,不要越界实现其他子任务。`;
-  return [
-    "run",
-    "-dir", cwd,
-    "-model", cfg.reasonix.model,
-    "-max-steps", String(cfg.reasonix.maxSteps),
-    instruction,
-  ];
+/** Resolve the omp binary path (falls back to pi). */
+export function resolveOmpBin(): string {
+  const r = sh("which", ["omp"], process.cwd());
+  if (r.code === 0 && r.stdout.trim()) return r.stdout.trim();
+  const p = sh("which", ["pi"], process.cwd());
+  return p.stdout.trim() || "omp";
 }
 
 /** Run the configured/per-requirement verify command in the repo.
@@ -219,49 +214,4 @@ export function mergeWorktree(repo: string, branch: string): { ok: boolean; conf
   // Non-conflict failure: abort to leave the tree clean.
   sh("git", ["merge", "--abort"], repo);
   return { ok: false, conflict: false, output: (r.stdout + r.stderr).slice(-2000) };
-}
-
-// ---------------------------------------------------------------------------
-// metrics aggregation (unchanged from v1 — reads reasonix -metrics JSON)
-// ---------------------------------------------------------------------------
-
-export interface SubtaskMeta { id: string; status: IssueStatus; commit?: string }
-
-/** Best-effort aggregation of reasonix -metrics JSON files (schema-tolerant). */
-export function aggregateMetrics(s: WorkflowState, subtasks: SubtaskMeta[]): any {
-  const resultsDir = reqPath(s, "results");
-  const summary: any = { subtasks: [], totals: { cost: 0, cacheHitRates: [] as number[] }, raw: {} };
-  for (const t of subtasks) {
-    const f = path.join(resultsDir, `${t.id}.metrics.json`);
-    if (!fs.existsSync(f)) continue;
-    let data: any;
-    try { data = JSON.parse(fs.readFileSync(f, "utf8")); } catch (_e) { continue; }
-    summary.raw[t.id] = data;
-    const found = { cost: undefined as number | undefined, cacheHit: undefined as number | undefined,
-                    hitTok: undefined as number | undefined, missTok: undefined as number | undefined };
-    const walk = (o: any, parentKey = "") => {
-      if (!o || typeof o !== "object") return;
-      for (const [k, v] of Object.entries(o)) {
-        const key = k.toLowerCase();
-        if (typeof v === "number") {
-          if (found.cost === undefined && (key === "cost" || key === "total_cost" || key.endsWith("_cost") || key === "usd")) found.cost = v;
-          const cacheCtx = key.includes("cache") || parentKey.includes("cache");
-          if (found.cacheHit === undefined && cacheCtx && (key.includes("rate") || key.includes("ratio"))) found.cacheHit = v;
-          if (found.hitTok === undefined && key.includes("cache") && key.includes("hit") && key.includes("token")) found.hitTok = v;
-          if (found.missTok === undefined && key.includes("cache") && key.includes("miss") && key.includes("token")) found.missTok = v;
-        } else if (v && typeof v === "object") walk(v, key);
-      }
-    };
-    walk(data);
-    if (found.cacheHit === undefined && found.hitTok !== undefined) {
-      const denom = found.hitTok + (found.missTok ?? 0);
-      if (denom > 0) found.cacheHit = found.hitTok / denom;
-    }
-    if (found.cost !== undefined) summary.totals.cost += found.cost;
-    if (found.cacheHit !== undefined) summary.totals.cacheHitRates.push(found.cacheHit);
-    summary.subtasks.push({ id: t.id, status: t.status, commit: t.commit, cost: found.cost, cacheHit: found.cacheHit });
-  }
-  const rates = summary.totals.cacheHitRates;
-  summary.totals.avgCacheHit = rates.length ? rates.reduce((a: number, b: number) => a + b, 0) / rates.length : null;
-  return summary;
 }

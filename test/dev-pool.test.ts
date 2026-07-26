@@ -1,8 +1,8 @@
 /**
- * Test for DevPool: per-dev worktree stability, session reuse (--continue),
- * and the claim→run→commit→merge→close lifecycle. Uses a real temp git repo
- * for worktree/merge, a FakeBd for bd state, and mocks reasonix by injecting
- * a fake spawnReasonix into the pool.
+ * Test for DevPool: per-dev worktree stability and the
+ * claim→run→commit→merge→close lifecycle. Uses a real temp git repo
+ * for worktree/merge, a FakeBd for bd state, and mocks the omp dev subagent
+ * by injecting a fake omp binary (via PATH) that the pool spawns.
  *
  * Run: node --experimental-strip-types test/dev-pool.test.ts
  */
@@ -13,9 +13,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { BdIssue, IssueStatus } from "../extensions/bd.ts";
 
-// We import DevPool but need to override spawnReasonix. Since it's private,
-// we test via runTask with a real-ish config but monkey-patch the reasonix bin
-// to a fake script that just touches a file.
+// We import DevPool and test via runTask. The pool spawns the omp binary
+// (resolved via resolveOmpBin → `which omp`). We put a fake `omp` script on
+// PATH ahead of the real one so the pool spawns our fake, which writes a
+// marker file in the --cwd worktree and exits 1 if the instruction contains FAIL.
 import { DevPool } from "../extensions/dev-pool.ts";
 import type { WorkflowConfig, WorkflowState } from "../extensions/lib.ts";
 
@@ -75,35 +76,37 @@ function fakeBdOps(fake: FakeBd): BdOps {
 }
 
 // ---------------------------------------------------------------------------
-// Fake reasonix: write a shell script that mimics reasonix exit + file write.
+// Fake omp: write a shell script named `omp` that mimics the dev subagent
+// (parse --cwd=<dir> from argv, write a marker file in that worktree, exit 1
+// if the instruction contains FAIL). Installed on PATH ahead of the real omp.
 // ---------------------------------------------------------------------------
 
-function makeFakeReasonix(): string {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fake-rx-"));
-  const script = path.join(tmp, "fake-reasonix");
-  // Fake reasonix: parse -dir + --continue from argv, write a marker file, exit 1 if FAIL.
+function makeFakeOmp(): { bin: string; dir: string } {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fake-omp-"));
+  const script = path.join(tmp, "omp");
+  // Fake omp: parse --cwd=<dir> from argv, write a marker file, exit 1 if FAIL.
+  // The instruction is the last positional arg.
   // NOTE: avoid shell ${...} in this template — Node's TS stripper misreads it.
   const scriptBody = [
     "#!/bin/bash",
     'DIR=""',
     'INSTR=""',
     'PREV=""',
-    'CONTINUE=0',
     'for a in "$@"; do',
-    '  if [ "$PREV" = "-dir" ]; then DIR="$a"; fi',
-    '  if [ "$a" = "--continue" ]; then CONTINUE=1; fi',
+    '  case "$a" in --cwd=*) DIR="${a#--cwd=}";; esac',
+    '  if [ "$PREV" = "--cwd" ]; then DIR="$a"; fi',
     '  PREV="$a"',
     '  INSTR="$a"',
     'done',
     'mkdir -p "$DIR/src" 2>/dev/null',
-    'echo "impl continue=$CONTINUE" >> "$DIR/src/impl.txt"',
+    'echo "impl" >> "$DIR/src/impl.txt"',
     'echo "$INSTR" | grep -q "FAIL" && exit 1',
     "exit 0",
     "",
   ].join("\n");
   fs.writeFileSync(script, scriptBody);
   fs.chmodSync(script, 0o755);
-  return script;
+  return { bin: script, dir: tmp };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,18 +125,20 @@ function makeRepo(): string {
   return tmp;
 }
 
-const FAKE_RX = makeFakeReasonix();
+const FAKE_OMP = makeFakeOmp();
+// Put the fake omp dir FIRST on PATH so resolveOmpBin (`which omp`) finds it.
+process.env.PATH = `${FAKE_OMP.dir}:${process.env.PATH}`;
 const CONFIG: WorkflowConfig = {
   providers: {},
   roles: { discuss:{provider:"",model:""}, prd:{provider:"",model:""}, split:{provider:"",model:""}, review:{provider:"",model:""} },
-  reasonix: { bin: FAKE_RX, model: "fake", maxSteps: 0, timeoutMs: 30000 },
+  dev: { provider: "fake", model: "fake", timeoutMs: 30000 },
   build: { verifyCommand: "", commitPrefix: "subtask" },
   execute: { driver: "bd", maxParallel: 3 },
 };
 
 async function main() {
-  // --- Test 1: per-dev worktree stability + session reuse ---
-  console.log("\nDevPool: per-dev worktree + --continue reuse:");
+  // --- Test 1: per-dev worktree stability + multi-task on same dev ---
+  console.log("\nDevPool: per-dev worktree + multi-task:");
   {
     const repo = makeRepo();
     fs.mkdirSync(path.join(repo, ".workflow", "req1", "results"), { recursive: true });
@@ -149,13 +154,13 @@ async function main() {
     };
     const pool = new DevPool(state, CONFIG, undefined, ops);
 
-    // Assign both tasks to dev1 — second should use --continue (session reuse).
+    // Assign both tasks to dev1 — both should succeed (fresh subagent per task).
     const r1 = await pool.runTask(1, t1, { allowEmptyVerify: true, onNotify: () => {} });
     check("dev1 task1 ok", r1.ok, JSON.stringify(r1));
     check("dev1 task1 closed", fake.issues.get(t1)!.status === "closed");
 
     const r2 = await pool.runTask(1, t2, { allowEmptyVerify: true, onNotify: () => {} });
-    check("dev1 task2 ok (--continue)", r2.ok, JSON.stringify(r2));
+    check("dev1 task2 ok", r2.ok, JSON.stringify(r2));
     check("dev1 task2 closed", fake.issues.get(t2)!.status === "closed");
 
     // dev1's worktree should be stable (same path for both tasks).
@@ -168,9 +173,11 @@ async function main() {
     check("2 commits merged to main", commits.length === 2, JSON.stringify(commits.length));
 
     pool.cleanupAll();
-    // Worktree cleaned up.
+    // Worktrees persist (reset-only cleanup, not removed) — they're reused
+    // across requirements. Verify the worktree still exists but devs map cleared.
     const wts = sh("git", ["worktree", "list"], repo).stdout;
-    check("worktree cleaned", wts.split("\n").filter(Boolean).length === 1, wts);
+    check("worktree persists (reset-only)", wts.includes("wt-dev1"), wts);
+    check("devs map cleared after cleanup", pool.stats().length === 0);
 
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -213,7 +220,7 @@ async function main() {
     fs.mkdirSync(path.join(repo, ".workflow", "req3", "results"), { recursive: true });
     const fake = new FakeBd();
     const ops = fakeBdOps(fake);
-    // Task with FAIL in spec → fake reasonix exits 1.
+    // Task with FAIL in spec → fake omp exits 1.
     const t1 = fake.create("FAIL task", "task", "epic3", "规格文件:/tmp/FAIL.md");
 
     const state: WorkflowState = {
@@ -231,7 +238,46 @@ async function main() {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 
-  fs.rmSync(path.dirname(FAKE_RX), { recursive: true, force: true });
+  // --- Test 4: parallel execution (runTasksParallel + merge serialization) ---
+  console.log("\nDevPool: parallel tasks + merge serialization:");
+  {
+    const repo = makeRepo();
+    fs.mkdirSync(path.join(repo, ".workflow", "req4", "results"), { recursive: true });
+    const fake = new FakeBd();
+    const ops = fakeBdOps(fake);
+    // 4 independent tasks → 4 different devs, run in parallel (concurrency 4).
+    const t1 = fake.create("task A", "task", "epic4", "规格文件:/tmp/p-a.md");
+    const t2 = fake.create("task B", "task", "epic4", "规格文件:/tmp/p-b.md");
+    const t3 = fake.create("task C", "task", "epic4", "规格文件:/tmp/p-c.md");
+    const t4 = fake.create("task D", "task", "epic4", "规格文件:/tmp/p-d.md");
+
+    const state: WorkflowState = {
+      reqId: "req4", name: "demo", repo, mode: "build",
+      createdAt: new Date().toISOString(), epicId: "epic4", subtaskIds: [t1, t2, t3, t4],
+      baseline: sh("git", ["rev-parse", "HEAD"], repo).stdout.trim(),
+    };
+    const pool = new DevPool(state, CONFIG, undefined, ops);
+
+    const tasks = [
+      { devId: 1, taskId: t1 },
+      { devId: 2, taskId: t2 },
+      { devId: 3, taskId: t3 },
+      { devId: 4, taskId: t4 },
+    ];
+    const results = await pool.runTasksParallel(tasks, 4, { allowEmptyVerify: true, onNotify: () => {} });
+    check("parallel: 4 results returned", results.length === 4, JSON.stringify(results.length));
+    check("parallel: all ok", results.every((r) => r.ok), results.map((r) => r.ok).join(","));
+    check("parallel: all closed", [t1, t2, t3, t4].every((id) => fake.issues.get(id)!.status === "closed"));
+    // 4 commits merged into main (merge serialized, no conflicts).
+    const log = sh("git", ["log", "--oneline"], repo).stdout;
+    const commits = log.split("\n").filter((l) => l.includes("subtask "));
+    check("parallel: 4 commits merged to main", commits.length === 4, JSON.stringify(commits.length));
+
+    pool.cleanupAll();
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+
+  fs.rmSync(FAKE_OMP.dir, { recursive: true, force: true });
   console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }

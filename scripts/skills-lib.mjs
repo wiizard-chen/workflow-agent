@@ -1,6 +1,6 @@
 // skills-lib.mjs — install-skills / uninstall-skills 共享的逻辑库。
 //
-// 把项目自带的 skill 安装到 omp 和 reasonix 共享的全局 skill 根
+// 把项目自带的 skill 安装到 omp 全局 skill 根
 // (~/.omp/agent/skills)。两个入口脚本(install / uninstall)各自薄封装,
 // 核心逻辑都在这里,避免重复。
 //
@@ -30,7 +30,7 @@ export const OWNED = [
   { src: ".agents/skills/beads",      name: "beads" },
 ];
 
-/** 默认目标根:当前机器上 omp 和 reasonix 共享的全局 skill 目录。 */
+/** 默认目标根:当前机器上 omp 的全局 skill 目录。 */
 export const DEFAULT_TARGET = path.join(os.homedir(), ".omp", "agent", "skills");
 
 /** 标记文件:uninstall 据此识别"是我们 copy 装的"(symlink 直接读 link 判定)。 */
@@ -168,7 +168,7 @@ export function install({ copy, dryRun, target }) {
   summary(done, skipped, "安装", dryRun);
   if (!dryRun && !copy) {
     log(color("dim", `\n  提示:symlink 模式下,改了项目里的 skill 全局立刻生效,不用重装。`));
-    log(color("dim", `  重开 omp/reasonix 或重新加载即可看到新 skill。`));
+    log(color("dim", `  重开 omp 或重新加载即可看到新 skill。`));
   }
 }
 

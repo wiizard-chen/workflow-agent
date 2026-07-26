@@ -9,9 +9,11 @@
  * 固定常量(1970-01-01),让前缀在跨 turn / 跨 midnight 时字节稳定 → 前缀
  * 缓存命中。cwd 不动(worktree 路径在 session 内本来就稳定)。
  *
- * 这是 reasonix 自带缓存机制的 omp 侧等价物:reasonix 在自己的 agent 里
- * 保持 prompt 字节稳定;本扩展让 omp 的讨论/拆分/PRD/review 阶段也享受
- * 同样的优化。执行层(reasonix dev)不受影响,仍用自己的缓存。
+ * 覆盖范围:本扩展作用于所有加载它的 omp 进程——主 session、经理进程,
+ * 以及迁移后的 dev subagent(每个 dev 是 omp --print 子进程)。dev subagent
+ * 的系统提示(dev.md 角色 + skill 白名单 + bd 接口规范)是静态文本,日期被
+ * 冻结后前缀稳定,DeepSeek 服务端前缀缓存跨 task 命中。这替代了原 reasonix
+ * 的 --continue session 续跑(靠 bd comment + 稳定前缀补偿上下文复用)。
  *
  * 设计决策:
  * - 只对 DeepSeek 模型生效(glm/zai 不用 DeepSeek 前缀缓存,冻结无益)。
@@ -19,7 +21,7 @@
  * - 不动 payload 其他部分(tool schemas 等在同一 session 内本就稳定)。
  *
  * 为什么不用第三方插件 @rohaquinlop/pi-deepseek-cache:
- *   它 import @earendil-works/pi-coding-agent 的 serializeConversation,
+ *   它 import 老版 pi-coding-agent 的 serializeConversation,
  *   但 omp 16.4.6 的 shim 没导出这个名字(fork 重构进了 snapcompact 命名空间),
  *   omp plugin install 验证失败。本扩展用 omp 原生 hook,零第三方依赖。
  *
@@ -27,10 +29,10 @@
  * - before_agent_start:冻结 system prompt 里的 date 字段(仅 DeepSeek)。
  * - message_end:读 usage.cacheRead(DS 的 prompt_cache_hit_tokens),累计 telemetry。
  *
- * See DECISION_LOG.md for the full rationale (cache-safety, omp vs reasonix split).
+ * See DECISION_LOG.md for the full rationale (cache-safety, omp native subagent migration).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 /** 冻结后的 date 常量。用 epoch 日,语义上明确"这不是真实日期"。 */
 const FROZEN_DATE = "1970-01-01";

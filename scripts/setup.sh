@@ -3,10 +3,9 @@
 #
 # 装齐这套流程需要的所有东西:
 #   1. omp      (bun 优先,回退 npm)
-#   2. reasonix (npm 全局)
-#   3. beads/bd (brew)
-#   4. DEEPSEEK_API_KEY / GLM5_2_API_KEY 写入 ~/.zshrc(交互输入,已存在则跳过)
-#   5. 调 install-skills.mjs 把本项目 skill 装到全局
+#   2. beads/bd (brew)
+#   3. DEEPSEEK_API_KEY / GLM5_2_API_KEY 写入 ~/.zshrc(交互输入,已存在则跳过)
+#   4. 调 install-skills.mjs 把本项目 skill 装到全局
 #
 # 幂等:已装的跳过,已配的 key 跳过,可反复跑。
 # 安全:API key 用 read -s 输入(不回显),绝不打印到终端/日志/命令历史。
@@ -73,7 +72,7 @@ fi
 have() { command -v "$1" >/dev/null 2>&1; }
 
 install_tools() {
-  header "第 1 步:安装工具(omp / reasonix / beads)"
+  header "第 1 步:安装工具(omp / beads)"
 
   # --- omp (bun 优先,回退 npm)---
   if have omp; then
@@ -89,16 +88,6 @@ install_tools() {
       die "装 omp 需要 bun 或 npm。请先装 Node.js(brew install node)或 bun。"
     fi
     say "omp 装好 $(omp --version 2>/dev/null || echo '')"
-  fi
-
-  # --- reasonix (npm 全局)---
-  if have reasonix; then
-    skip "reasonix 已装 $(reasonix --version 2>/dev/null || echo '?')"
-  else
-    info "装 reasonix"
-    have npm || die "装 reasonix 需要 npm。请先装 Node.js(brew install node)。"
-    npm install -g reasonix || die "npm install reasonix 失败"
-    say "reasonix 装好"
   fi
 
   # --- beads/bd (brew)---
@@ -194,7 +183,7 @@ configure_keys() {
 # skill 安装
 # ---------------------------------------------------------------------------
 install_skills() {
-  header "第 3 步:安装 skill 到全局 omp/reasonix skill 根"
+  header "第 3 步:安装 skill 到全局 omp skill 根"
   if [[ ! -f "$PROJECT_ROOT/scripts/install-skills.mjs" ]]; then
     warn "找不到 scripts/install-skills.mjs,跳过 skill 安装"
     return
@@ -221,7 +210,6 @@ install_skills() {
 # ---------------------------------------------------------------------------
 header "验证"
 printf "  %-18s" "omp";      have omp      && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(omp --version 2>/dev/null)"      || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
-printf "  %-18s" "reasonix"; have reasonix && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(reasonix --version 2>/dev/null)" || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
 printf "  %-18s" "bd";       have bd       && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(bd --version 2>/dev/null)"       || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
 
 printf "  %-18s" "DEEPSEEK_API_KEY"

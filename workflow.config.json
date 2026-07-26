@@ -7,6 +7,13 @@
       "api": "openai-completions",
       "thinkingFormat": "deepseek"
     },
+    "gbgjxj": {
+      "$comment": "中转站(实为 deepseek-pro 上游,对外暴露为 gpt-5.6-sol)。discuss/split 走这里。",
+      "baseUrl": "https://api.gbgjxj.store/v1",
+      "apiKeyEnv": "GBGJXJ_API_KEY",
+      "api": "openai-completions",
+      "thinkingFormat": "deepseek"
+    },
     "zai": {
       "baseUrl": "https://api.z.ai/api/coding/paas/v4",
       "apiKeyEnv": "GLM5_2_API_KEY",
@@ -15,15 +22,15 @@
     }
   },
   "roles": {
-    "discuss": { "provider": "deepseek", "model": "deepseek-v4-pro" },
-    "prd":     { "provider": "zai",      "model": "glm-5.2" },
-    "split":   { "provider": "deepseek", "model": "deepseek-v4-pro" },
-    "review":  { "provider": "zai",      "model": "glm-5.2" }
+    "discuss": { "provider": "gbgjxj", "model": "gpt-5.6-sol" },
+    "prd":     { "provider": "zai",    "model": "glm-5.2" },
+    "split":   { "provider": "gbgjxj", "model": "gpt-5.6-sol" },
+    "review":  { "provider": "zai",    "model": "glm-5.2" }
   },
-  "reasonix": {
-    "bin": "reasonix",
+  "dev": {
+    "$comment": "dev 执行层:omp 原生 subagent(替代原 reasonix 二进制)。provider/model 指定走哪个 provider。",
+    "provider": "deepseek",
     "model": "deepseek-flash",
-    "maxSteps": 0,
     "timeoutMs": 1800000
   },
   "build": {
@@ -34,8 +41,8 @@
   "execute": {
     "$comment": "执行层配置(v3 经理驱动)。/execute 启动经理 omp 进程,它拆 PRD→分配 dev→测试。",
     "driver": "bd",
-    "maxParallel": 3,
-    "$comment_maxParallel": "dev 池大小(= 经理可用的 reasonix session 数)。每个 dev 一个固定 worktree,同 dev 的连续 task 复用 session(--continue)。注意:同步模型下一次跑一个 dev,这是池大小不是并发数。",
+    "maxParallel": 20,
+    "$comment_maxParallel": "assign_devs_batch 的并发上限。架构支持到 20;实测时若遇 DeepSeek/gbgjxj 限流或 worktree 资源压力,调低此值。串行单 task 用 assign_dev 不受此限。",
     "pollIntervalMs": 2000
   }
 }

@@ -143,7 +143,7 @@
         一个 <strong>pi/omp coding-agent 扩展</strong>,把"需求 → PRD → 拆 task → 分配 dev → 测试"
         做成 <strong>PRD / 执行 双模式</strong>流水线。<br>
         执行模式下,主 omp 启动一个<strong>技术经理</strong>(独立 session),它把 PRD 拆成 task、
-        分配给 <strong>reasonix dev</strong>(持久 session,复用上下文)、最后让 glm-5.2 测试,
+        分配给 <strong>omp dev subagent</strong>(<code>omp --print</code>,由 DevPool spawn)、最后让 glm-5.2 测试,
         失败自动建 bd bug。
       </p>
     </div>
@@ -175,15 +175,15 @@ flowchart TD
         subgraph MGRLOOP ["经理工作循环 · 调度=LLM 判断(非代码循环)"]
             direction TB
             Split["<b>① split_prd_to_tasks</b><br/>读 PRD → 拆 task<br/><i>deepseek-pro</i><br/>→ bd create tasks + dep add"]
-            Split --> Assign["<b>② assign_dev</b><br/>claim + worktree + reasonix run<br/><i>同步等跑完</i>"]
+            Split --> Assign["<b>② assign_dev</b><br/>claim + worktree + spawn omp dev subagent<br/><i>DevPool spawn(omp, [...])</i>"]
             Assign --> DevExec
-            subgraph DevExec [" 💻 dev 池 · 每个 dev = 持久 reasonix session + 固定 worktree "]
+            subgraph DevExec [" 💻 dev 池 · 每个 dev = omp dev subagent + 固定 worktree "]
                 direction LR
-                D1["dev 1<br/>session + worktree"]
-                D2["dev 2<br/>session + worktree"]
-                D3["dev 3<br/>session + worktree"]
+                D1["dev 1<br/>subagent + worktree"]
+                D2["dev 2<br/>subagent + worktree"]
+                D3["dev 3<br/>subagent + worktree"]
             end
-            DevExec -. "独立task→散给不同dev<br/>依赖链→给同一dev(--continue复用)" .-> Test
+            DevExec -. "独立task→并行散给不同dev<br/>跨task上下文:cache.ts冻结date + bd comments" .-> Test
             Test["<b>③ run_test</b><br/>跑验证 + glm-5.2 review<br/>blocker → bd bug"]
             Test --> Check{有 bug?}
         end
@@ -207,7 +207,7 @@ flowchart TD
       </div>
       <div class="legend">
         <span><i style="background:#1f6feb"></i>用户命令 / 经理工具</span>
-        <span><i style="background:#238636"></i>reasonix dev(执行层)</span>
+        <span><i style="background:#238636"></i>omp dev subagent(执行层)</span>
         <span><i style="background:#bb800923;border:1px solid #d29922"></i>经理进程</span>
         <span><i style="background:#1c2128;border:1px solid #bc8cff"></i>判断节点</span>
       </div>
@@ -233,7 +233,7 @@ flowchart TD
         <ol class="steps">
           <li><code>/execute</code> 启动经理 omp 进程(独立 session)</li>
           <li>经理读 PRD → <code>split_prd_to_tasks</code> 拆 task 进 bd</li>
-          <li><code>assign_dev(taskId, devId)</code> 分配给 reasonix dev<br/><span style="color:var(--text-dim);font-size:0.88em">同步等跑完;同 dev 后续 task 自动 --continue</span></li>
+          <li><code>assign_dev(taskId, devId)</code> 分配给 omp dev subagent<br/><span style="color:var(--text-dim);font-size:0.88em">DevPool spawn;独立 task 并行;dev 内部闭环 verify→fix</span></li>
           <li><code>run_test</code> → glm-5.2 测试产出</li>
           <li>blocker 创建 bd bug → 经理再 <code>assign_dev</code> 修复</li>
           <li>直到全过 → 经理退出,回主 session</li>
@@ -256,7 +256,7 @@ flowchart TD
           <tr><td>仓库简报 analyze</td><td>主 omp</td><td><code>deepseek-v4-pro</code></td><td>只读探查</td></tr>
           <tr style="background:#bb800923;"><td colspan="4" style="color:var(--orange);font-weight:600;">↓ 执行模式:以下在经理进程内</td></tr>
           <tr><td>技术经理(拆/分配/测试)</td><td><strong>经理 omp 进程</strong></td><td><code>deepseek-v4-pro</code></td><td>split</td></tr>
-          <tr><td>实现每个 task</td><td><strong>reasonix dev</strong>(持久 session)</td><td><code>deepseek-flash</code></td><td>执行层</td></tr>
+          <tr><td>实现每个 task</td><td><strong>omp dev subagent</strong>(<code>omp --print</code>)</td><td><code>deepseek-flash</code></td><td>执行层</td></tr>
           <tr><td>测试产出 review</td><td>经理调 glm-5.2</td><td><code>glm-5.2</code></td><td>review</td></tr>
         </tbody>
       </table>
@@ -274,18 +274,18 @@ flowchart TD
       </div>
       <div class="feat">
         <div class="icon">♻️</div>
-        <h4>session 复用(--continue)</h4>
-        <p>每个 dev 持有固定 worktree → session 路径稳定 → 同 dev 的后续 task 复用上下文,不用重读项目。</p>
+        <h4>跨 task 上下文(cache.ts + bd)</h4>
+        <p>原 reasonix 的 <code>--continue</code> session 续跑已移除。跨 task 上下文改由 cache.ts 冻结 system-prompt date(前缀缓存跨 task 热)+ bd comments 显式携带状态。</p>
       </div>
       <div class="feat">
         <div class="icon">🌳</div>
-        <h4>依赖链路由策略</h4>
-        <p>独立 task 散给不同 dev;有依赖链的一串(A→B→C)给同一个 dev,最大化上下文复用。</p>
+        <h4>并行派发策略</h4>
+        <p>独立 task 并行散给不同 dev(取代旧的"依赖链给同一 dev 走 --continue"路由);dev 在 subagent 内闭环 verify→fix。</p>
       </div>
       <div class="feat">
         <div class="icon">⚡</div>
         <h4>DeepSeek 前缀缓存</h4>
-        <p>worktree 并行<strong>不击穿</strong>缓存(实测:cache_hit 2880 跨 worktree 共享)。</p>
+        <p>cache.ts 覆盖到 dev subagent 层:system-prompt date 冻结 → 前缀缓存跨 task/跨 dev/跨 worktree 保持热度(实测:cache_hit 2880 跨 worktree 共享)。</p>
       </div>
       <div class="feat">
         <div class="icon">🗄️</div>
@@ -294,8 +294,8 @@ flowchart TD
       </div>
       <div class="feat">
         <div class="icon">🛡️</div>
-        <h4>分工拿到两边好处</h4>
-        <p>pi/omp 管通用人工审阅流程,reasonix 管 DeepSeek 字节级缓存优化——这是唯一同时满足两者的路径。</p>
+        <h4>编排与执行同源</h4>
+        <p>经理 omp 管通用人工审阅与调度,dev omp subagent 跑实现 + 闭环验证,cache.ts 统一管 DeepSeek 前缀缓存——编排与执行同属 omp,无需外部二进制(原 reasonix 执行层已迁移为 omp subagent)。</p>
       </div>
     </div>
   </section>
@@ -329,7 +329,7 @@ flowchart TD
     <h3>🔴 P0 — 安全假象</h3>
     <div class="issue p0">
       <h4><span class="badge p0">P0</span><span class="badge done">已修 ✓</span>验证门 verifyCommand 默认空,形同虚设</h4>
-      <p>原问题:没配 <code>/wf verify</code>,任何 reasonix 改动都被判"验证通过",deepseek-flash 无监督写权限直接 commit。</p>
+      <p>原问题:没配 <code>/wf verify</code>,任何 omp dev subagent 改动都被判"验证通过",deepseek-flash 无监督写权限直接 commit。</p>
       <p><strong>改进:</strong><code>/build</code> 现在严格验证——无验证命令默认失败,首次弹出确认让你显式接受"无验证"。</p>
     </div>
 
@@ -345,9 +345,9 @@ flowchart TD
       <p><strong>改进:</strong>JSON 解析失败或缺必要字段时严格校验、响亮报错(修了 KNOWN_ISSUES P1 #3)。</p>
     </div>
     <div class="issue p1">
-      <h4><span class="badge p1">P1</span><span class="badge open">未修</span>aggregateMetrics 靠字段名猜测</h4>
-      <p><code>key.includes("cost")</code> 这类启发式匹配,reasonix 换字段名会静默算成 <code>undefined</code>,<code>summary.json</code> 悄悄失去意义。</p>
-      <p><strong>建议:</strong>字段缺失时显式警告,或锁定 reasonix 版本并标注兼容范围。</p>
+      <h4><span class="badge p1">P1</span><span class="badge done">已解决 ✓</span>aggregateMetrics 靠字段名猜测(随 reasonix 移除 obsolete)</h4>
+      <p>原问题:<code>key.includes("cost")</code> 这类启发式匹配过去对上 reasonix v1.11 字段名,换字段名会静默算成 <code>undefined</code>。</p>
+      <p><strong>现状:</strong>reasonix 已迁移为 omp dev subagent,不再产出 <code>reasonix -metrics</code> JSON,这段聚合已 obsolete;需随 omp <code>message_end</code> hook 重写或移除。</p>
     </div>
     <div class="issue p1">
       <h4><span class="badge p1">P1</span><span class="badge open">未修</span>review.md 无强制力</h4>
@@ -370,17 +370,17 @@ flowchart TD
     </div>
     <div class="issue p2">
       <h4><span class="badge p2">P2</span>测试只覆盖状态机逻辑,不覆盖真实故障</h4>
-      <p>test/build.test.ts 全用假 execReasonix,没测:网络断/限流/输出异常、长时间超时、10+ 子任务撞 token 上限。</p>
+      <p>test/build.test.ts 全用 fake-omp 桩(原 <code>execReasonix</code>),没测:网络断/限流/<code>omp --print</code> 输出异常、长时间超时、10+ 子任务撞 token 上限。</p>
     </div>
     <div class="issue p2">
       <h4><span class="badge p2">P2</span>产品定位:小需求过度工程,大需求验证不足</h4>
-      <p>极简需求走完整链路成本远超直接 reasonix;真正需要的复杂需求从未被真实测试覆盖(都是玩具级冒烟)。</p>
+      <p>极简需求走完整链路成本远超直接用 omp;真正需要的复杂需求从未被真实测试覆盖(都是玩具级冒烟)。</p>
     </div>
 
     <h3 style="color:var(--accent);">⚠️ 当前架构的固有限制(非 bug,设计取舍)</h3>
     <div class="issue" style="border-color:var(--accent);">
-      <h4>同步模型:maxParallel 是"池大小"不是"并发数"</h4>
-      <p><code>assign_dev</code> 同步等 reasonix 跑完,一次只跑一个 dev。maxParallel=3 只是经理可轮换使用的 dev 数,<strong>真并行(多 dev 同时跑)是后续升级路径</strong>。</p>
+      <h4>并行模型:maxParallel 是并行 dev 上限</h4>
+      <p>独立 task 并行派发给不同 omp dev subagent(取代旧的依赖链同 dev <code>--continue</code> 路由)。maxParallel=3 是经理可并行的 dev 数。经理是驻留 LLM,默认 stage 级委派,异常时细粒度介入。</p>
     </div>
     <div class="issue" style="border-color:var(--accent);">
       <h4>调度可靠性依赖经理 LLM 的判断</h4>
