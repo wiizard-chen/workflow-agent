@@ -278,6 +278,20 @@ export function comment(repo: string, id: string, text: string, exec: BdExec = d
   requireOk(exec(repo, ["comment", id, text]), "comment");
 }
 
+/** Get the latest (most recent) comment body for an issue, or "" if none.
+ *  Used by /wf status to show per-task progress. */
+export function latestComment(repo: string, id: string, exec: BdExec = defaultBdExec): string {
+  try {
+    const r = exec(repo, ["comments", id, "--json"]);
+    const parsed = parseJson<any[]>(r, "comments");
+    if (!Array.isArray(parsed) || parsed.length === 0) return "";
+    // Comments are returned oldest-first; take the last one. Body field varies
+    // by bd version — try common names.
+    const last = parsed[parsed.length - 1];
+    return String(last.body ?? last.text ?? last.comment ?? last.content ?? "").trim();
+  } catch (_e) { return ""; }
+}
+
 /** Show one issue's full detail.
  *  NOTE: `bd show --json` returns an ARRAY (one element per id); we take [0]. */
 export function show(repo: string, id: string, exec: BdExec = defaultBdExec): BdIssue {

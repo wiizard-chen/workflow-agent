@@ -364,13 +364,36 @@ async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<v
 function cmdStatus(ctx: ExtensionCommandContext): void {
   if (!wf) { ctx.ui.notify("无活动需求。/wf new <名字> [repo] 开始。", "info"); return; }
   let lines: string[] = [];
+  let summary = "";
   try {
     if (wf.epicId) {
-      const kids = bd.children(wf.repo, wf.epicId);
-      lines = kids.map((c) => `  ${c.id} [${c.status}] ${c.title}`);
+      const kids = bd.children(wf.repo, wf.epicId).filter((k: any) => k.issue_type === "task" || k.issue_type === "bug");
+      if (kids.length === 0) {
+        lines = ["  (无子任务 — 还没 split,或 manager 还没跑到)"];
+      } else {
+        // Progress summary: count by status.
+        const byStatus: Record<string, number> = {};
+        for (const k of kids) byStatus[k.status] = (byStatus[k.status] || 0) + 1;
+        const closed = byStatus["closed"] || 0;
+        summary = `进度:${closed}/${kids.length} 完成` +
+          (byStatus["in_progress"] ? `, ${byStatus["in_progress"]} 进行中` : "") +
+          (byStatus["open"] ? `, ${byStatus["open"]} 待处理` : "");
+        // Per-task detail with latest comment (progress trail).
+        const icon: Record<string, string> = { open: "○", in_progress: "◐", closed: "✓", blocked: "●" };
+        lines = kids.map((c) => {
+          const i = icon[c.status] || "·";
+          let line = `  ${i} ${c.id} ${c.title}`;
+          // Show latest comment (truncated) for in_progress/open tasks — that's the progress signal.
+          if (c.status !== "closed") {
+            const cmt = bd.latestComment(wf!.repo, c.id);
+            if (cmt) line += `\n      └ ${cmt.slice(0, 100)}`;
+          }
+          return line;
+        });
+      }
     }
   } catch (_e) { lines = ["  (无法读取 bd)"]; }
-  ctx.ui.notify(`需求 ${wf.reqId}\n模式 ${wf.mode}\nrepo ${wf.repo}\nepic ${wf.epicId}\n${lines.join("\n") || "  (无子任务)"}`, "info");
+  ctx.ui.notify(`需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}${summary ? `\n${summary}` : ""}\n${lines.join("\n")}`, "info");
 }
 
 /** /wf resume <reqId> — switch the active requirement to a previously-created
@@ -712,19 +735,26 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       const taskId: string = p.task_id;
       const text: string | undefined = p.text;
       const repo = wf!.repo;
+      // Helper: leave a timestamped progress comment so /wf status can show
+      // what's happening with each task (claim/close/reopen are auto-tracked).
+      const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      const track = (msg: string) => { try { bd.comment(repo, taskId, `[${stamp}] ${msg}`); } catch (_e) { /* best effort */ } };
       try {
         if (action === "claim") {
           const agent = `manager-${wf!.reqId}`;
           const ok = bd.claim(repo, taskId, agent);
+          if (ok) track("▶ 认领,开始派 dev");
           return { content: [{ type: "text", text: ok ? `✓ 已认领 ${taskId}` : `✗ 认领失败(已被占用或状态非 open):${taskId}` }], details: {} };
         }
         if (action === "close") {
           bd.close(repo, taskId, text);
+          track(`✔ 关闭${text ? `:${text.slice(0, 120)}` : ""}`);
           mgrTasksProcessed++;
           return { content: [{ type: "text", text: `✓ 已关闭 ${taskId}${text ? `(${text})` : ""}` }], details: {} };
         }
         if (action === "reopen") {
           bd.reopen(repo, taskId);
+          track(`✗ 放回 ready${text ? `:${text.slice(0, 120)}` : ""}`);
           return { content: [{ type: "text", text: `✓ 已放回 ready ${taskId}` }], details: {} };
         }
         if (action === "comment") {

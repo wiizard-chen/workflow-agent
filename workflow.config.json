@@ -7,13 +7,6 @@
       "api": "openai-completions",
       "thinkingFormat": "deepseek"
     },
-    "gbgjxj": {
-      "$comment": "中转站(实为 deepseek-pro 上游,对外暴露为 gpt-5.6-sol)。discuss/split 走这里。",
-      "baseUrl": "https://api.gbgjxj.store/v1",
-      "apiKeyEnv": "GBGJXJ_API_KEY",
-      "api": "openai-completions",
-      "thinkingFormat": "deepseek"
-    },
     "zai": {
       "baseUrl": "https://api.z.ai/api/coding/paas/v4",
       "apiKeyEnv": "GLM5_2_API_KEY",
@@ -22,9 +15,9 @@
     }
   },
   "roles": {
-    "discuss": { "provider": "gbgjxj", "model": "gpt-5.6-sol" },
+    "discuss": { "provider": "deepseek", "model": "deepseek-v4-pro" },
     "prd":     { "provider": "zai",    "model": "glm-5.2" },
-    "split":   { "provider": "gbgjxj", "model": "gpt-5.6-sol" },
+    "split":   { "provider": "deepseek", "model": "deepseek-v4-pro" },
     "review":  { "provider": "zai",    "model": "glm-5.2" }
   },
   "build": {
