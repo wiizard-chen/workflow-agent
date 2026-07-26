@@ -246,5 +246,6 @@ if has_key_in_zshrc "GLM5_2_API_KEY"; then printf "${C_GREEN}✓ 已在 zshrc${C
 else printf "${C_YELLOW}✗ 未配${C_RESET}\n"; fi
 
 echo ""
-echo "  ${C_BOLD}完成。${C_RESET}新开终端让 key 生效,然后在任意目录跑 pi 就能用 /wf、/execute。"
-echo "  ${C_DIM}第一次在目标 repo 用:cd <repo> && bd init && /wf new <需求>${C_RESET}"
+echo "  ${C_BOLD}完成。${C_RESET}新开终端(或 source ~/.zshrc)让 key + wfpi 命令生效。"
+echo "  ${C_GREEN}用法:${C_RESET}在任意目录跑 ${C_BOLD}wfpi${C_RESET} 启动 pi + workflow 扩展,然后用 /wf new、/execute 等。"
+echo "  ${C_DIM}第一次在目标 repo 用:cd <repo> && bd init && wfpi,然后 /wf new <需求>${C_RESET}"
