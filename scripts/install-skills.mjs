@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// install-skills.mjs — 把本项目自带的 skill 安装到全局 skill 根,供 omp 加载。
+// install-skills.mjs — 把本项目自带的 skill 安装到全局 skill 根,供 pi 加载。
 //
 // 用法:
-//   node scripts/install-skills.mjs             # 默认:symlink 安装到 ~/.omp/agent/skills/
+//   node scripts/install-skills.mjs             # 默认:symlink 安装到 ~/.pi/agent/skills/
 //   node scripts/install-skills.mjs --copy      # 改用复制(默认 symlink)
 //   node scripts/install-skills.mjs --list      # 只查看状态,不改动
 //   node scripts/install-skills.mjs --dry-run   # 演练,打印将要做什么但不执行

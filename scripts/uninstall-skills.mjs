@@ -2,7 +2,7 @@
 // uninstall-skills.mjs — 移除本项目安装到全局 skill 根的 skill。
 //
 // 用法:
-//   node scripts/uninstall-skills.mjs             # 卸载 ~/.omp/agent/skills/ 里本项目拥有的 skill
+//   node scripts/uninstall-skills.mjs             # 卸载 ~/.pi/agent/skills/ 里本项目拥有的 skill
 //   node scripts/uninstall-skills.mjs --dry-run   # 演练,打印将删什么但不执行
 //   node scripts/uninstall-skills.mjs --target ~/some/dir  # 自定义目标根
 //

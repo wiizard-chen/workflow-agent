@@ -1,25 +1,25 @@
 ---
 name: bd-work
-description: 实现单个 beads task 的工作循环:认领 → 读规格 → 实现 → 验证 → 关闭。用于 omp dev subagent 执行 assign_dev 分配的 task、实现子任务、认领工作、关闭完成的 task、报告阻碍。核心是 dev 只做当前 task、不越界、严守验证门、阻碍建 bug。触发词:实现 task、认领、assign_dev、dev 工作、close、done、实现子任务、认领工作、遇到阻碍、blocker。
+description: 实现单个 beads task 的工作循环:认领 → 读规格 → 实现 → 验证 → 关闭。用于 pi dev subagent 执行 delegate(agent="dev") 分配的 task、实现子任务、认领工作、关闭完成的 task、报告阻碍。核心是 dev 只做当前 task、不越界、严守验证门、阻碍建 bug。触发词:实现 task、认领、delegate dev、dev 工作、close、done、实现子任务、认领工作、遇到阻碍、blocker。
 ---
 
 # bd-work · 认领 → 实现 → 关闭(单个 task)
 
-实现**一个** beads task 的标准工作循环。这是 omp dev subagent 在执行阶段最频繁执行的动作——经理每调一次 `assign_dev(taskId, devId)`,dev 就跑一遍这个循环。
+实现**一个** beads task 的标准工作循环。这是 pi dev subagent 在执行阶段最频繁执行的动作——经理(主 session)每调一次 `delegate(agent="dev", ...)`,dev 就跑一遍这个循环。
 
-> **角色定位**:这个 skill 主要给 **omp dev subagent** 用(执行层,deepseek-flash)。dev 是单一职责执行者:**只实现当前分配的 task,不拆分、不测试、不分配、不越界**。经理(assign_dev 工具)负责 claim 和 bd 状态管理,但 dev 要理解整个循环以便正确报告。
+> **角色定位**:这个 skill 主要给 **pi dev subagent** 用(执行层,deepseek-flash)。dev 是单一职责执行者:**只实现当前分配的 task,不拆分、不测试、不分配、不越界**。经理(主 session,用 `bd_task` + `delegate` 工具)负责 claim 和 bd 状态管理,但 dev 要理解整个循环以便正确报告。
 
 ## 何时使用
 
-- 经理调 `assign_dev` 把一个 task 分配给你时。
-- 你是一个 omp dev subagent,收到"实现这个子任务"的指令时(每个 task 是一个全新的 omp subagent 进程,上下文由 bd comment + cache.ts 前缀缓存携带,无 session 复用)。
+- 经理(主 session)调 `delegate(agent="dev")` 把一个 task 分配给你时。
+- 你是一个 pi dev subagent,收到"实现这个子任务"的指令时(每次 `delegate` 都是 fresh spawn,定义在 `.pi/agents/dev.md`,在专属 worktree 里跑;上下文由 bd comment + cache.ts 前缀缓存携带,无 session 复用)。
 - 实现过程中发现需要建阻碍 bug 时。
 
 ## dev 的工作循环
 
-### 1. 认领(由 assign_dev 完成,dev 无需手动 claim)
+### 1. 认领(由 bd_task 完成,dev 无需手动 claim)
 
-`assign_dev` 工具内部已经做了原子认领:
+`bd_task` 工具(经理在 delegate 前调)内部已经做了原子认领:
 
 ```bash
 bd update <taskId> --claim --assignee dev<id>-<reqId>
@@ -62,7 +62,7 @@ bd show <taskId> --json
 
 ### 5. 关闭 task
 
-实现 + 验证通过后,**由 assign_dev 工具内部关闭**(dev 不需要手动 close,工具会处理 commit → merge → bd close)。但如果 dev 手动管理:
+实现 + 验证通过后,**由 bd_task 工具内部关闭**(dev 不需要手动 close,工具会处理 commit → merge → bd close)。但如果 dev 手动管理:
 
 ```bash
 bd close <taskId> --reason="实现完成,<一句话说明>"
@@ -90,16 +90,16 @@ bd comment <taskId> "受阻于 bug <bugId>:<原因>。已建 bug,等修复后重
 
 - **不越界**:只实现当前 task 的验收标准。看到"顺便能做"的其他改动——忍住,那是别的 dev 的 task。
 - **不跳验证**:验证门失败不能假装通过。验证命令没配 → 报告,不要绕过。
-- **不手动 commit 到主分支**:你在 worktree 里,commit 由 assign_dev 工具处理(每个子任务一个 commit,最后 merge)。
+- **不手动 commit 到主分支**:你在 worktree 里,commit 由 bd_task 工具处理(每个子任务一个 commit,最后 merge)。
 - **阻碍用 bd,不用本地文件**:遇到问题建 bd bug,不要写本地 TODO/markdown——bd 才是跨 session 权威,本地文件经理看不到。
 
-## omp subagent 执行层注意
+## pi subagent 执行层注意
 
-> 你(omp dev subagent)频繁调用 bd。以下是本项目验证过的 beads 1.1.0 真实接口(封装在 `extensions/bd.ts`,与官方文档有差异)。**务必遵守**,否则会踩跨 worktree 可见性、交互卡死等坑。
+> 你(pi dev subagent)频繁调用 bd。以下是本项目验证过的 beads 1.1.0 真实接口(封装在 `extensions/bd.ts`,与官方文档有差异)。**务必遵守**,否则会踩跨 worktree 可见性、交互卡死等坑。
 
 ### 必需 flag
 
-- **`--dolt-auto-commit on`**:每次 bd 写操作都要带。不带的话 Dolt 写只在内存 working set,**跨进程/worktree 看不到**(你的 worktree 和经理进程、其他 dev 的 worktree 是不同进程)。本项目的 `defaultBdExec` 已默认带,但你手动调 bd 时必须显式加:
+- **`--dolt-auto-commit on`**:每次 bd 写操作都要带。不带的话 Dolt 写只在内存 working set,**跨进程/worktree 看不到**(你的 worktree 和主 session、其他 dev 的 worktree 是不同进程)。本项目的 `defaultBdExec` 已默认带,但你手动调 bd 时必须显式加:
   ```bash
   bd --dolt-auto-commit on -C <repo> <command>
   ```

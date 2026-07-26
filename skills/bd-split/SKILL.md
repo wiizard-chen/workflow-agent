@@ -5,13 +5,13 @@ description: 把 PRD 拆成尽量独立、可单独实现与验证的 beads task
 
 # bd-split · PRD → beads task + 依赖
 
-把一份 PRD 拆成一组**尽量独立、可单独实现与验证**的子任务,每个 task 创建为 beads issue 并挂在父 epic 下,依赖关系用 `bd dep add` 标注。这是 pi-workflow 经理驱动架构(v3)里经理的第一个动作。
+把一份 PRD 拆成一组**尽量独立、可单独实现与验证**的子任务,每个 task 创建为 beads issue 并挂在父 epic 下,依赖关系用 `bd dep add` 标注。这是 pi-workflow 主 session 即经理架构(build 模式)里经理的第一个动作。
 
-> **角色定位**:这个 skill 主要给**经理 omp 进程**用(执行模式,`WF_ROLE=manager`)。经理调 `split_prd_to_tasks(prd_path)` 工具时,工具内部跑这个拆分逻辑。omp dev subagent 不拆分——dev 只实现分配给它的单个 task。
+> **角色定位**:这个 skill 主要给**主 session(build 模式,即经理)**用。经理调 `split_prd_to_tasks(prd_path)` 工具时,工具内部跑这个拆分逻辑。pi dev subagent 不拆分——dev 只实现 delegate 给它的单个 task。
 
 ## 何时使用
 
-- `/execute` 启动经理进程后,经理读 PRD 的第一步。
+- `/execute` 进入 build 模式后,经理(主 session)读 PRD 的第一步。
 - `split_prd_to_tasks` 工具被调用时。
 - 任何"把 PRD/规格转成可执行任务清单"的场景。
 
@@ -27,8 +27,8 @@ description: 把 PRD 拆成尽量独立、可单独实现与验证的 beads task
 
 拆分的首要目标是**最小化 task 之间的上下文依赖**:
 
-- **独立的 task**(无真实依赖)→ 可以并行分配给不同 dev,让多个 omp dev subagent 同时认知项目(cache.ts 前缀缓存让每个 dev 的公共前缀便宜;并行度取代了 session 复用作为提速手段)。
-- **有真实依赖的一串 task**(比如 B 必须在 A 改动的基础上才能做)→ 标注 `depends_on`,经理会把这一串**给同一个 dev**。dev 不再有持久 session,但 cache.ts 前缀缓存(冻结系统提示日期)让公共前缀几乎免费复用,bd comment 携带跨 task 上下文——所以"同一 dev 连续做依赖链"仍然比"散给不同 dev"更省 token。
+- **独立的 task**(无真实依赖)→ 可以并行 delegate 给不同 dev,让多个 pi dev subagent 同时认知项目(cache.ts 前缀缓存让每个 dev 的公共前缀便宜;并行度取代了 session 复用作为提速手段)。
+- **有真实依赖的一串 task**(比如 B 必须在 A 改动的基础上才能做)→ 标注 `depends_on`,经理会把这一串依次 delegate 给 dev。dev 不再有持久 session,但 cache.ts 前缀缓存(冻结系统提示日期)让公共前缀几乎免费复用,bd comment 携带跨 task 上下文——所以"连续做依赖链"仍然比"散给不同 dev 重头认知"更省 token。
 - **没有真实依赖就不要人为制造依赖**:两个 task 都改同一个文件不代表有依赖——只有"B 的实现必须基于 A 的产出"才是真依赖。
 
 ## 拆分步骤
@@ -85,7 +85,7 @@ bd dep add <dependent_bd_id> <dependency_bd_id> --type=blocks
 
 这些是 `extensions/bd.ts` 已验证的真实行为(与官方文档有差异),拆分时必须遵守:
 
-- **`bd ready` 包含 parent epic**:调度时必须按 `issue_type === "task"` 过滤,否则会把 epic 当任务分配给 dev。本项目的 `readyTasks()` 已封装了这个过滤。
+- **`bd ready` 包含 parent epic**:调度时必须按 `issue_type === "task"` 过滤,否则会把 epic 当任务 delegate 给 dev。本项目的 `readyTasks()` 已封装了这个过滤。
 - **只有 `--type blocks` 会阻塞**:`bd dep add ... --type blocks` 才进 ready 队列的 blocker 统计;`parent-child`、`related`、`discovered-from` 都**不阻塞**。所以要表达真实依赖,必须用 `--type blocks`。
 - **id 格式**:`bd-<reponame>-<hash>` + `.1/.2/.3` 子节点(如 `workflow-agent-73i.1`)。拆分建出来的 task 是 `<epic>.<n>`。
 
@@ -97,9 +97,9 @@ bd dep add <dependent_bd_id> <dependency_bd_id> --type=blocks
 - **人为依赖**:两个 task 改同一文件就标依赖 → 只有"B 必须基于 A 的产出"才是真依赖,同文件改动 git 会合并。
 - **规格太薄**:`spec` 只有标题没有验收标准 → dev 实现时只能猜,验证门无法判定。
 
-## omp subagent 执行层注意
+## pi subagent 执行层注意
 
-> omp dev subagent 通常不调用 split(拆分是经理的职责)。但 dev 实现时会读规格文件,以下 bd 接口在 dev 回查依赖关系时有用:
+> pi dev subagent 通常不调用 split(拆分是经理的职责)。但 dev 实现时会读规格文件,以下 bd 接口在 dev 回查依赖关系时有用:
 
 - **`--dolt-auto-commit on` 必需**:跨进程/worktree 可见性的前提。本项目 `defaultBdExec` 已默认带;手动调要带。
 - **`-C <repo>` 全局 flag**:任意 cwd 操作目标 repo。

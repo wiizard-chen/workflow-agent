@@ -5,9 +5,9 @@ description: 把一个想法或需求变成 beads epic + PRD 的 PLAN 阶段技�
 
 # bd-plan · 需求 → beads epic + PRD
 
-把一个想法或需求,在 beads 里落成一个**父 epic**,并把讨论结果固化成 `prd.md`。这是 pi-workflow 流水线的第一段(PLAN 模式)。
+把一个想法或需求,在 beads 里落成一个**父 epic**,并把讨论结果固化成 `prd.md`。这是 pi-workflow 流水线的第一段(plan 模式)。
 
-> **角色定位**:这个 skill 主要给**主 session omp** 用(PLAN 模式对代码只读)。omp dev subagent 在执行阶段不调用它——dev 只做单个 task,不参与需求讨论。
+> **角色定位**:这个 skill 主要给**主 session pi** 用(plan 模式对代码只读)。pi dev subagent 在执行阶段不调用它——dev 只做单个 task,不参与需求讨论。
 
 ## 何时使用
 
@@ -49,7 +49,7 @@ bd create "<需求名>" --type=epic --description="<一两句话说明这个需�
 讨论收敛后,调 `/wf prd`——它会用 **glm-5.2** 把讨论结果固化成 `.workflow/<reqId>/prd.md`。PRD 落盘,不是留在对话里。
 
 审阅 `prd.md`:
-- 满意 → `/execute` 进入执行模式(经理接管)。
+- 满意 → `/execute` 进入 build 模式(主 session 接管成为经理)。
 - 不满意 → 继续讨论后再 `/wf prd`(覆盖重生成)。
 
 ## PRD 模板(参考)
@@ -82,14 +82,14 @@ bd create "<需求名>" --type=epic --description="<一两句话说明这个需�
 
 ## 重要约束
 
-- **PLAN 模式对代码只读**:扩展会拦截对 `.workflow/` 以外文件的 write/edit。讨论时可以读代码,但不要改代码。
+- **plan 模式对代码只读**:扩展会拦截对 `.workflow/` 以外文件的 write/edit。讨论时可以读代码,但不要改代码。
 - **PRD 是文档,不是 bd issue**:PRD 落到 `.workflow/<reqId>/prd.md`;beads 里只放 epic(需求容器)和后续的 task/bug。不要把整份 PRD 塞进 bd issue 的 description。
 - **需求讨论用 deepseek-pro,PRD 写作用 glm-5.2**:模型分工在 `workflow.config.json` 的 `roles.discuss` / `roles.prd` 配置,不要混用。
 - **不要跳过讨论直接写 PRD**:PRD 的价值来自讨论收敛的不确定性,不是模板填空。
 
-## omp subagent 执行层注意
+## pi subagent 执行层注意
 
-> 此 skill 主要给主 session omp 用,omp dev subagent 通常不直接调用。但如果 dev subagent 在执行 task 时需要回查需求背景,以下是 beads 操作的真实接口(已在 `extensions/bd.ts` 验证,与官方文档有差异):
+> 此 skill 主要给主 session pi 用,pi dev subagent 通常不直接调用。但如果 dev subagent 在执行 task 时需要回查需求背景,以下是 beads 操作的真实接口(已在 `extensions/bd.ts` 验证,与官方文档有差异):
 
 - **`--dolt-auto-commit on` 必需**:bd 默认 off 时 Dolt 写只在内存 working set,跨进程/worktree 看不到。本项目的 `defaultBdExec` 已默认带这个 flag,手动调 bd 时也要带。
 - **`-C <repo>` 全局 flag**:任意 cwd 操作目标 repo(类似 git -C),不用 cd。
