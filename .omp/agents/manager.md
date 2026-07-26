@@ -108,17 +108,17 @@ bd_task(action="claim", task_id=<id>)
 
 **步骤 B — 派 dev 实现**(omp 原生 task 工具):
 ```
-task(agent="dev", task="实现 task <id>。规格文件:<spec 路径>。验证命令:<verify cmd>。严格按验收标准,只做这一个 task,内部闭环验证到过,yield 结构化结果。")
+task(agent="dev", task="实现 task <id>(标题:<title>)。规格文件:<spec 路径>。验证命令:<verify cmd>。严格按验收标准,只做这一个 task,内部闭环验证到过,然后 git add + commit(消息格式:subtask <id>: <title>),最后 yield 结构化结果(含 commitSha)。")
 ```
-- dev 会写代码 + 自己跑验证 + yield `{filesChanged, verifyPassed, verifyOutput, summary}`
-- dev 的改动直接落主仓库 git 历史(不用 isolated worktree,第一版简化)
-- 看 dev 返回的 `verifyPassed`:**false → 跳到步骤 D(reopen)**
+- dev 会写代码 + 自己跑验证 + **自己 git commit** + yield `{filesChanged, verifyPassed, verifyOutput, commitSha, summary}`
+- dev 的改动落主仓库 git 历史(由 dev 自己 commit)
+- 看 dev 返回的 `verifyPassed` 和 `commitSha`:**verifyPassed=false 或 commitSha 为空 → 跳到步骤 D(reopen)**
 
 **步骤 C — 派 reviewer 审查**(omp 原生 task 工具,glm-5.2):
 ```
-task(agent="reviewer", task="审查 task <id> 的实现。baseline=<baseline commit>。验收标准:<spec 路径>。跑 git diff <baseline> HEAD 看改动,yield verdict。")
+task(agent="reviewer", task="审查 task <id> 的实现。dev 的 commit sha=<commitSha>。验收标准:<spec 路径>。跑 git show <commitSha> 或 git diff <commitSha>~1 <commitSha> 看改动,yield verdict。")
 ```
-- reviewer 读 git diff,对照验收标准,yield `{verdict: pass/fail, issues: [...], summary}`
+- reviewer 读 dev 的 commit(用 commitSha 定位),对照验收标准,yield `{verdict: pass/fail, issues: [...], summary}`
 - **verdict=pass → 步骤 D(close)**;**verdict=fail → 步骤 D(reopen,把 issues 写进 comment)**
 
 **步骤 D — bd 状态收尾**:

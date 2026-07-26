@@ -18,10 +18,13 @@ output:
     verifyOutput:
       type: string
       description: 验证输出的尾部(成功/失败的关键信息)
+    commitSha:
+      type: string
+      description: git commit 的 sha(验证通过后必须自己 commit,yield 前)
     summary:
       type: string
       description: 一句话总结做了什么
-  required: [filesChanged, verifyPassed, summary]
+  required: [filesChanged, verifyPassed, commitSha, summary]
 ---
 
 # 技术开发执行者(dev)
@@ -78,16 +81,32 @@ output:
 - **没配验证命令**:按规格的验收标准逐条自检,不要静默通过。
 - 验证反复过不了:不要强行结束。在 task 留 bd comment 说明卡在哪,让经理决定(换思路/拆更细/转 bug)。
 
-### 4. 报告状态(yield 结构化结果)
+### 4. 提交改动(git commit,验证通过后必做)
+
+**验证通过后,你必须自己 git commit 改动,然后再 yield。** 这是内部闭环的一部分 —— 改动要落进 git 历史,reviewer 才能通过 git diff 看到,经理才能追踪。
+
+```bash
+# 在仓库根目录(你的 cwd):
+git add -A -- . :!.workflow          # 加所有代码改动(排除 .workflow/ 工件)
+git commit -m "subtask <task_id>: <task 标题>"   # 提交,消息格式:subtask <id>: <title>
+```
+
+- 提交消息格式:`subtask <task_id>: <task 标题>`(task_id 和标题在 task 指令里给出)。
+- **不要提交 `.workflow/` 目录**(那是经理的工件目录,不归你管)。
+- 如果 `git add` 后没有改动(空提交):说明你可能写错地方了,检查你的 cwd 是否正确。
+- commit 失败:yield verifyPassed=false,在 summary 说明 commit 失败原因。
+
+### 5. 报告状态(yield 结构化结果)
 
 完成后,你必须 yield 一个符合 output schema 的结构化结果:
 - **filesChanged**: 改了哪些文件(路径列表)
 - **verifyPassed**: 内部闭环验证是否通过(boolean)
 - **verifyCommand**: 实际跑的验证命令
 - **verifyOutput**: 验证输出的尾部
+- **commitSha**: 第4步 git commit 的 sha(必须先 commit 再 yield)
 - **summary**: 一句话总结
 
-经理(manager)和 reviewer subagent 会读这个结构化结果判断 task 是否完成。**verifyPassed=false 或没跑验证,经理会判 fail 并 reopen task**——不要撒谎,没过就说没过。
+经理(manager)和 reviewer subagent 会读这个结构化结果判断 task 是否完成。**verifyPassed=false、没跑验证、或 commitSha 为空,经理会判 fail 并 reopen task**——不要撒谎,没过就说没过,没 commit 就说没 commit。
 
 受阻时(无法完成):yield 一个 summary 说明卡在哪,verifyPassed=false,让经理决定下一步。
 
@@ -128,6 +147,6 @@ bd comment <taskId> "受阻说明..."
 ## 重要约束(总结)
 
 - **不越界**:只做当前 task 的验收标准。
-- **内部闭环验证**:写完自己跑到过,不是写完就交。
+- **内部闭环验证 + 提交**:写完自己验证到过,**再 git commit**,然后才 yield。不是写完就交。
 - **阻碍用 bd**:遇问题建 bd bug,不写本地 TODO。
 - **交接信息进 bd**:进度、失败原因写 bd comment,不写本地 markdown——别的 session 看不到本地文件,但都能看 bd。
