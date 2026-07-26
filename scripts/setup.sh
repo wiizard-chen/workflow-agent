@@ -2,10 +2,11 @@
 # setup.sh — pi-workflow 一键安装。
 #
 # 装齐这套流程需要的所有东西:
-#   1. omp      (bun 优先,回退 npm)
-#   2. beads/bd (brew)
-#   3. DEEPSEEK_API_KEY / GLM5_2_API_KEY 写入 ~/.zshrc(交互输入,已存在则跳过)
-#   4. 调 install-skills.mjs 把本项目 skill 装到全局
+#   1. pi       (npm 全局,@earendil-works/pi-coding-agent)
+#   2. pi-subagents (dev/reviewer subagent 插件,pi install)
+#   3. beads/bd (brew)
+#   4. DEEPSEEK_API_KEY / GLM5_2_API_KEY 写入 ~/.zshrc(交互输入,已存在则跳过)
+#   5. 调 install-skills.mjs 把本项目 skill 装到全局
 #
 # 幂等:已装的跳过,已配的 key 跳过,可反复跑。
 # 安全:API key 用 read -s 输入(不回显),绝不打印到终端/日志/命令历史。
@@ -72,22 +73,25 @@ fi
 have() { command -v "$1" >/dev/null 2>&1; }
 
 install_tools() {
-  header "第 1 步:安装工具(omp / beads)"
+  header "第 1 步:安装工具(pi / beads)"
 
-  # --- omp (bun 优先,回退 npm)---
-  if have omp; then
-    skip "omp 已装 $(omp --version 2>/dev/null || echo '?')"
+  # --- pi (npm 全局)---
+  if have pi; then
+    skip "pi 已装 $(pi --version 2>/dev/null || echo '?')"
   else
-    info "装 omp(pi/omp coding-agent)"
-    if have bun; then
-      bun install -g @oh-my-pi/pi-coding-agent || die "bun install omp 失败"
-    elif have npm; then
-      warn "未找到 bun,回退用 npm 装 omp(官方推荐 bun)"
-      npm install -g @oh-my-pi/pi-coding-agent || die "npm install omp 失败"
-    else
-      die "装 omp 需要 bun 或 npm。请先装 Node.js(brew install node)或 bun。"
-    fi
-    say "omp 装好 $(omp --version 2>/dev/null || echo '')"
+    info "装 pi(pi coding-agent)"
+    have npm || die "装 pi 需要 npm。请先装 Node.js(brew install node)。"
+    npm install -g @earendil-works/pi-coding-agent || die "npm install pi 失败"
+    say "pi 装好 $(pi --version 2>/dev/null || echo '')"
+  fi
+
+  # --- pi-subagents (subagent 能力,dev/reviewer 依赖)---
+  if pi list 2>/dev/null | grep -q "pi-subagents"; then
+    skip "pi-subagents 已装"
+  else
+    info "装 pi-subagents(dev/reviewer subagent 插件)"
+    pi install npm:pi-subagents || die "pi install pi-subagents 失败"
+    say "pi-subagents 装好"
   fi
 
   # --- beads/bd (brew)---
@@ -183,7 +187,7 @@ configure_keys() {
 # skill 安装
 # ---------------------------------------------------------------------------
 install_skills() {
-  header "第 3 步:安装 skill 到全局 omp skill 根"
+  header "第 3 步:安装 skill 到全局 pi skill 根"
   if [[ ! -f "$PROJECT_ROOT/scripts/install-skills.mjs" ]]; then
     warn "找不到 scripts/install-skills.mjs,跳过 skill 安装"
     return
@@ -209,7 +213,8 @@ install_skills() {
 # 收尾:验证
 # ---------------------------------------------------------------------------
 header "验证"
-printf "  %-18s" "omp";      have omp      && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(omp --version 2>/dev/null)"      || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
+printf "  %-18s" "pi";      have pi      && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(pi --version 2>/dev/null)"      || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
+printf "  %-18s" "pi-subagents"; pi list 2>/dev/null | grep -q "pi-subagents" && printf "${C_GREEN}✓ 已装${C_RESET}\n" || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
 printf "  %-18s" "bd";       have bd       && printf "${C_GREEN}✓ %s${C_RESET}\n" "$(bd --version 2>/dev/null)"       || printf "${C_YELLOW}✗ 未装${C_RESET}\n"
 
 printf "  %-18s" "DEEPSEEK_API_KEY"
@@ -220,5 +225,5 @@ if has_key_in_zshrc "GLM5_2_API_KEY"; then printf "${C_GREEN}✓ 已在 zshrc${C
 else printf "${C_YELLOW}✗ 未配${C_RESET}\n"; fi
 
 echo ""
-echo "  ${C_BOLD}完成。${C_RESET}新开终端让 key 生效,然后在任意目录跑 omp/pi 就能用 /wf、/execute。"
+echo "  ${C_BOLD}完成。${C_RESET}新开终端让 key 生效,然后在任意目录跑 pi 就能用 /wf、/execute。"
 echo "  ${C_DIM}第一次在目标 repo 用:cd <repo> && bd init && /wf new <需求>${C_RESET}"

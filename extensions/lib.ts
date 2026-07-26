@@ -98,12 +98,11 @@ export function gitHead(dir: string): string | undefined {
 // dev subagent invocation
 // ---------------------------------------------------------------------------
 
-/** Resolve the omp binary path (falls back to pi). */
-export function resolveOmpBin(): string {
-  const r = sh("which", ["omp"], process.cwd());
+/** Resolve the pi binary path (the upstream pi-agent CLI). */
+export function resolvePiBin(): string {
+  const r = sh("which", ["pi"], process.cwd());
   if (r.code === 0 && r.stdout.trim()) return r.stdout.trim();
-  const p = sh("which", ["pi"], process.cwd());
-  return p.stdout.trim() || "omp";
+  return "pi";
 }
 
 /** Run the configured/per-requirement verify command in the repo.

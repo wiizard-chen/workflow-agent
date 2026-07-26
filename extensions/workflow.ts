@@ -1,36 +1,31 @@
 /**
- * workflow — an omp coding-agent extension implementing a two-mode pipeline:
+ * workflow — a pi coding-agent extension implementing a three-mode pipeline:
  *
- *   PRD mode:      you + omp discuss the requirement → glm-5.2 writes prd.md
- *   EXECUTE mode:  omp spawns a "manager" sub-process (separate omp session)
- *                  that reads prd.md, splits it into bd tasks, assigns them to
- *                  omp native "dev" subagents (each in a fixed worktree),
- *                  and finally has glm-5.2 test the output. Failed tests
- *                  become bd bugs the manager re-assigns.
+ *   idle  mode:  pi is a normal coding agent (full toolset) — answer questions,
+ *                write code, debug. Workflow context (wf) retained for /wf status.
+ *   plan  mode:  readonly — you + pi discuss the requirement → glm-5.2 writes prd.md
+ *   build mode:  the main session runs the pipeline itself (interactive, no subprocess):
+ *                reads prd.md, splits into bd tasks, delegates to dev/reviewer
+ *                subagents (via pi-subagents' `delegate` tool), tests the output.
  *
- * The manager is driven by .omp/agents/manager.md (editable, no code change).
- * It uses omp's NATIVE `task` tool to spawn dev/reviewer subagents, plus
- * extension tools (split_prd_to_tasks, bd_task, run_test) for deterministic
- * bd lifecycle and pipeline stages. Scheduling is the manager's LLM judgment.
+ * The main session IS the manager — there's no separate manager process. The
+ * manager prompt (.pi/manager-prompt.md) is injected as a user message on
+ * /execute; the session LLM runs the pipeline, watched by the user.
  *
- * Dev execution: the manager calls `task(agent="dev", ...)` — omp spawns the
- * subagent natively (no manual worktree/spawn in the extension). Dev changes
- * land in the main repo's git history; the reviewer subagent reads them via
- * git diff. Cross-task context is carried by bd comments + the DeepSeek
- * prefix cache (cache.ts freezes the system-prompt date).
+ * Dev/reviewer are pi-subagents subagents (defined in .pi/agents/*.md). The
+ * manager calls `delegate(agent="dev", ...)`; dev writes code + commits + writes
+ * a structured result JSON to an output file; reviewer reads git diff + writes
+ * a verdict JSON. The manager reads these files to decide bd close/reopen.
  *
- * WF_ROLE env var distinguishes the main session (PRD mode, commands active)
- * from the manager session (execute mode, tools active).
- *
- * Load:  omp -e ./workflow/extensions/workflow.ts   (or pi -e ...)
+ * Load:  pi -e ./extensions/workflow.ts -e ./extensions/cache.ts
+ *        (requires the pi-subagents package: pi install npm:pi-subagents)
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   commitArtifacts,
   gitHead,
@@ -92,12 +87,11 @@ function loadConfig(): WorkflowConfig {
 }
 
 const READONLY_TOOLS = ["read", "grep", "find", "ls"];
-const WF_ROLE = process.env.WF_ROLE || "main";  // "main" (PRD mode) | "manager" (execute mode)
 
 let CONFIG = loadConfig();
 let wf: WorkflowState | undefined;
-// Manager-side tool-call tracking (only meaningful when WF_ROLE === "manager").
-// Used to detect "manager exited without doing any work" (no split, no assign).
+// Tool-call tracking: detect "session did zero work" (no split, no bd_task) so we
+// can warn instead of reporting a false success.
 let mgrHasSplit = false;
 let mgrTasksProcessed = 0;
 let lastAssistantText = "";
@@ -124,6 +118,29 @@ async function waitTurnComplete(ctx: ExtensionCommandContext, maxMs = 600000): P
 function setModeStatus(ctx: ExtensionCommandContext): void {
   const label = wf ? `WF:${wf.mode} ${wf.reqId}` : "WF:—";
   try { ctx.ui.setStatus("workflow", label); } catch (_e) { /* ignore */ }
+}
+
+/** Apply the tool set for the current mode.
+ *  - idle:  full toolset (pi default) — pi is a normal coding agent, workflow context retained.
+ *  - plan:  readonly (read/grep/find/ls + mcp) — discuss requirements, no code mutation.
+ *  - build: executor set (split/bd_task/run_test/delegate + readonly + bash) — run the pipeline.
+ *  Called on session_start and whenever mode changes. */
+function applyModeTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  if (!wf) return;
+  try {
+    if (wf.mode === "plan") {
+      lockReadonly(pi);   // readonly for requirement discussion
+    } else if (wf.mode === "build") {
+      pi.setActiveTools([
+        "split_prd_to_tasks", "bd_task", "run_test",
+        "delegate",               // pi-subagents: spawn dev/reviewer subagents
+        ...READONLY_TOOLS,
+        "bash",
+      ]);
+      ctx.ui.notify?.(`build 模式:工具集已锁定(split/bd_task/run_test/delegate + 只读 + bash)`, "info");
+    }
+    // idle: do nothing — leave the full default toolset active
+  } catch (_e) { /* best effort */ }
 }
 
 /** Scan `<repo>/.workflow/<reqId>/state.json` files, return all parsed states
@@ -154,7 +171,7 @@ function restoreLatestWf(ctx: ExtensionCommandContext): boolean {
 function lockReadonly(pi: ExtensionAPI): void {
   try {
     const mcpServerNames = Object.keys(readMcpServers());
-    const allNames = pi.getAllTools();
+    const allNames = pi.getAllTools().map((t) => t.name);
     const mcpTools = allNames.filter((n) => mcpServerNames.some((s) => n.startsWith(`${s}_`)) || n.startsWith("mcp__"));
     pi.setActiveTools([...READONLY_TOOLS, ...mcpTools]);
   } catch (_e) { /* ignore */ }
@@ -240,11 +257,21 @@ function registerProviders(pi: ExtensionAPI): void {
     if (!byProvider.has(role.provider)) byProvider.set(role.provider, new Set());
     byProvider.get(role.provider)!.add(role.model);
   }
+  // Also register models used by agent definitions (.pi/agents/*.md) that may
+  // not appear in any role — e.g. the dev subagent uses deepseek-v4-flash.
+  // These are fixed workflow companions; roles only cover discuss/prd/split/review.
+  const agentModels: Record<string, string[]> = {
+    deepseek: ["deepseek-v4-flash"],
+  };
+  for (const [prov, ids] of Object.entries(agentModels)) {
+    if (!byProvider.has(prov)) byProvider.set(prov, new Set());
+    for (const id of ids) byProvider.get(prov)!.add(id);
+  }
   for (const [provName, modelIds] of byProvider) {
     const p = CONFIG.providers[provName];
     if (!p) continue;
-    const apiKey = process.env[p.apiKeyEnv];
-    if (!apiKey) console.error(`[workflow] provider ${provName}: env ${p.apiKeyEnv} not set.`);
+    // pi resolves "$ENV_VAR" / "${ENV_VAR}" from the environment itself;
+    // omp accepted the raw value. Use the $-form so it works on both.
     const models = [...modelIds].map((id) => ({
       id, name: id, reasoning: true,
       input: ["text"] as ("text" | "image")[],
@@ -253,7 +280,7 @@ function registerProviders(pi: ExtensionAPI): void {
       maxTokens: 8192,
       compat: p.thinkingFormat ? ({ thinkingFormat: p.thinkingFormat } as any) : undefined,
     }));
-    pi.registerProvider(provName, { baseUrl: p.baseUrl, apiKey: apiKey ?? "", api: p.api as any, models });
+    pi.registerProvider(provName, { baseUrl: p.baseUrl, apiKey: `$${p.apiKeyEnv}`, api: p.api as any, models });
   }
 }
 
@@ -320,14 +347,14 @@ async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
   fs.mkdirSync(reqPath(wf, "results"), { recursive: true });
   saveState(wf);
   setModeStatus(ctx);
-  lockReadonly(pi);
+  applyModeTools(pi, ctx);
   await useRole(pi, ctx, CONFIG.roles.discuss);
   ctx.ui.notify(`新需求 ${reqId}\n目标 repo: ${repo}\nbd epic: ${epicId}\n已进入 PRD 模式(${CONFIG.roles.discuss.model},只读)。讨论需求,满意后 /wf prd 生成 PRD,再 /execute 执行。`, "info");
 }
 
 async function cmdPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
-  wf.mode = "plan"; saveState(wf); setModeStatus(ctx); lockReadonly(pi);
+  wf.mode = "plan"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx);
   await useRole(pi, ctx, CONFIG.roles.discuss);
   ctx.ui.notify(`已进入 PRD 模式(只读)。讨论需求,或 /wf prd 生成 PRD。`, "info");
 }
@@ -362,17 +389,30 @@ async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<v
 }
 
 /** /wf done — end the current requirement's execute phase.
- *  Flips mode back to "plan" so /wf new and /wf resume work again. Use this
- *  when a manager run finished (or you want to abort a stuck build mode):
- *  it releases the "正在执行中" lock without touching bd task states.
- *  Does NOT close bd tasks — those are the manager's responsibility. */
+ *  Flips mode to "idle" (general coding mode, full toolset, wf retained).
+ *  Use when a pipeline run finished, or you want to abort a stuck build mode.
+ *  Releases the build lock without touching bd task states. */
 function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   if (!wf) { ctx.ui.notify("无活动需求。", "info"); return; }
   if (wf.mode !== "build") { ctx.ui.notify(`需求 ${wf.reqId} 不在执行模式(当前:${wf.mode}),无需结束。`, "info"); return; }
-  wf.mode = "plan";
+  wf.mode = "idle";
   saveState(wf);
   setModeStatus(ctx);
-  ctx.ui.notify(`需求 ${wf.reqId} 已结束执行阶段,切回 PRD 模式。\n现在可以 /wf new 新建,或 /wf resume 切换。bd task 状态不变(用 /wf status 查看)。`, "info");
+  applyModeTools(pi, ctx);
+  ctx.ui.notify(`需求 ${wf.reqId} 已结束执行,切回通用模式(idle)。\n工具集已恢复全开。/wf status 仍可查 bd 进度。`, "info");
+}
+
+/** /wf idle — switch to general coding mode (full toolset, wf retained).
+ *  pi becomes a normal coding agent — answer questions, write code, debug.
+ *  Workflow context (wf) is kept so /wf status still works. */
+function cmdIdle(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  if (!wf) { ctx.ui.notify("无活动需求(/wf new 创建)。当前已是通用模式。", "info"); return; }
+  if (wf.mode === "idle") { ctx.ui.notify("已在通用模式。", "info"); return; }
+  wf.mode = "idle";
+  saveState(wf);
+  setModeStatus(ctx);
+  applyModeTools(pi, ctx);
+  ctx.ui.notify(`已切到通用模式(idle)。工具集全开,自由写代码/问问题。\n需求 ${wf.reqId} 保留,/wf status 可查进度,/execute 重回执行。`, "info");
 }
 
 function cmdStatus(ctx: ExtensionCommandContext): void {
@@ -518,21 +558,22 @@ async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
 /** Load the manager system prompt, injecting run context (reqId/repo/epicId/prd).
  *  Optional overrides let /execute point the manager at a different PRD + epic
  *  than the current wf (for /execute <prd-path>). */
+/** Load the manager prompt (.pi/manager-prompt.md) + inject run context.
+ *  The manager prompt guides the main session through the pipeline in build mode.
+ *  It's NOT an agent definition — the main session IS the manager. */
 function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): string {
   if (!wf) throw new Error("无活动需求");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    path.join(here, "..", ".omp", "agents", "manager.md"),
-    path.join(here, ".omp", "agents", "manager.md"),
-    path.join(process.cwd(), ".omp", "agents", "manager.md"),
+    path.join(here, "..", ".pi", "manager-prompt.md"),
+    path.join(here, ".pi", "manager-prompt.md"),
+    path.join(process.cwd(), ".pi", "manager-prompt.md"),
   ];
   let template = "";
   for (const c of candidates) {
     if (fs.existsSync(c)) { template = fs.readFileSync(c, "utf8"); break; }
   }
-  if (!template) throw new Error("找不到 .omp/agents/manager.md");
-  // Strip YAML frontmatter; inject run context after the body.
-  const body = template.replace(/^---\n[\s\S]*?\n---\n/, "");
+  if (!template) throw new Error("找不到 .pi/manager-prompt.md");
   const prdFile = prdPathOverride || reqPath(wf, "prd.md");
   const epicId = epicIdOverride || wf.epicId;
   const context = [
@@ -542,17 +583,19 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): s
     `目标仓库:${wf.repo}`,
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
-    `dev 并发上限:${CONFIG.execute?.maxParallel ?? 20}(用原生 task 工具调 dev/reviewer subagent,可并行)`,
+    `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
     `------------------`,
     ``,
     `现在开始:先读 PRD 文件,然后调 split_prd_to_tasks。`,
+    `一口气跑完整条流水线,异常(dev 反复失败/reviewer 多次 fail)才停下问用户。`,
   ].join("\n");
-  return body + "\n" + context;
+  return template + "\n" + context;
 }
 
-/** /execute — spawn a manager omp process and wait for it to finish.
- *  Optional prdPath arg points the manager at a specific PRD (auto-creates a
- *  fresh epic for it). Without args, uses the current requirement's prd.md. */
+/** /execute — switch the main session to build mode and trigger the pipeline.
+ *  No more spawn of a manager subprocess — the main session runs the pipeline
+ *  itself (interactive, user can watch + intervene via /wf status).
+ *  Optional prdPath arg points at a specific PRD (auto-creates a fresh epic). */
 async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (!wf.epicId) { ctx.ui.notify("缺少 bd epic id。", "error"); return; }
@@ -564,8 +607,7 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
   if (prdArg) {
     prdPath = path.resolve(ctx.cwd, prdArg);
     if (!fs.existsSync(prdPath)) { ctx.ui.notify(`PRD 文件不存在:${prdPath}`, "error"); return; }
-    // External PRD → auto-create a fresh epic (named after the file) so its
-    // tasks/bugs stay isolated from the current requirement's epic.
+    // External PRD → auto-create a fresh epic (named after the file).
     const epicTitle = path.basename(prdPath, ".md");
     try {
       epicIdOverride = bd.create(wf.repo, { title: epicTitle, type: "epic" });
@@ -578,88 +620,31 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
     if (!fs.existsSync(prdPath)) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
   }
 
+  // Switch to build mode + lock the executor toolset.
   wf.mode = "build";
   wf.baseline = gitHead(wf.repo);
+  wf.managerNoop = false;
+  mgrHasSplit = false;
+  mgrTasksProcessed = 0;
   saveState(wf);
   setModeStatus(ctx);
+  applyModeTools(pi, ctx);
 
   const dirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
   if (dirty) {
     const go = await ctx.ui.confirm("工作树不干净", "目标 repo 有未提交改动,建议先提交。仍要继续?");
-    if (!go) { wf.mode = "plan"; saveState(wf); setModeStatus(ctx); return; }
+    if (!go) { wf.mode = "idle"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx); return; }
   }
 
-  // Resolve the omp binary (fall back to pi).
-  const mgrBin = sh("which", ["omp"], wf.repo).stdout.trim() || sh("which", ["pi"], wf.repo).stdout.trim();
-  if (!mgrBin) { ctx.ui.notify("找不到 omp 或 pi 二进制", "error"); return; }
-
-  const extPath = fileURLToPath(import.meta.url);
-  const managerModel = CONFIG.roles.split.model;  // manager uses the reasoning model
+  // Switch to the split/reasoning model for orchestration, then inject the
+  // manager prompt as a user message — the main session LLM picks it up and
+  // starts running the pipeline (split → delegate(dev) → delegate(reviewer) → ...).
+  await useRole(pi, ctx, CONFIG.roles.split);
   const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined);
-
-  ctx.ui.notify(`EXECUTE:启动经理进程(${mgrBin}, model ${managerModel})。它将拆 task、分配 dev、测试。`, "info");
-
-  // Spawn the manager as a separate omp session in --print mode (non-interactive).
-  // WF_ROLE=manager activates the dev/test tools inside that process.
-  // WF_PRD_PATH/WF_EPIC_ID let /execute <prd-path> point the manager at a
-  // specific PRD + auto-created epic (otherwise manager uses wf's defaults).
-  const mgrEnv: Record<string, string> = {
-    ...process.env as Record<string, string>,
-    WF_ROLE: "manager",
-    WF_REQID: wf.reqId,
-    BEADS_REPO: wf.repo,
-  };
-  if (prdPath) mgrEnv.WF_PRD_PATH = prdPath;
-  if (epicIdOverride) mgrEnv.WF_EPIC_ID = epicIdOverride;
-  const mgrProc = spawn(mgrBin, [
-    "-e", extPath,
-    "--print",
-    "--model", `${CONFIG.roles.split.provider}/${managerModel}`,
-    prompt,
-  ], { cwd: wf.repo, env: mgrEnv, stdio: ["ignore", "inherit", "inherit"] });
-
-  const exitCode: number = await new Promise((resolve) => {
-    mgrProc.on("exit", (code) => resolve(code ?? -1));
-    mgrProc.on("error", () => resolve(-1));
-  });
-
-  // Commit artifacts regardless of manager outcome.
-  const art = commitArtifacts(wf);
-  // Reload state.json: the manager process may have written managerNoop=true
-  // if it exited without calling split/assign (a silent no-op).
-  try {
-    const sp = reqPath(wf, "state.json");
-    if (fs.existsSync(sp)) wf = { ...wf, ...JSON.parse(fs.readFileSync(sp, "utf8")) };
-  } catch (_e) { /* keep in-memory */ }
-  // Recover subtaskIds from bd if the manager's saveState was lost/clobbered.
-  // The manager writes subtaskIds in split_prd_to_tasks, but a later agent_end
-  // saveState (with stale wf) can overwrite it with []. bd is authoritative.
-  if (wf.epicId && (!wf.subtaskIds || wf.subtaskIds.length === 0)) {
-    try {
-      const epic = process.env.WF_EPIC_ID || wf.epicId;
-      const kids = bd.children(wf.repo, epic).filter((i: any) => i.issue_type === "task");
-      if (kids.length > 0) wf.subtaskIds = kids.map((k: any) => k.id);
-    } catch (_e) { /* bd unreachable, leave as-is */ }
-  }
-
-  if (exitCode === 0 && wf.managerNoop) {
-    // Manager exited clean but did ZERO work (no split, no bd_task) — almost
-    // certainly a model/prompt failure. Warn loudly so the user doesn't mistake
-    // this for success.
-    ctx.ui.notify(
-      `⚠ EXECUTE 空跑:经理进程退出码 0,但没有调用任何工具(split_prd_to_tasks / bd_task / task 都没触发)。\n` +
-      `可能原因:模型出错、prompt 问题、或经理进程崩溃。\n` +
-      `bd epic ${wf.epicId} 下没有创建任何 task。请检查经理模型(${CONFIG.roles.split.provider}/${CONFIG.roles.split.model})配置后重试 /execute。`,
-      "error"
-    );
-  } else if (exitCode === 0) {
-    ctx.ui.notify(`EXECUTE 完成。${art.committed ? `工件已提交 ${art.sha?.slice(0, 8)}` : "(无工件改动)"}\n用 /wf status 查看 bd 状态,或 bd children ${wf.epicId}。`, "info");
-  } else {
-    ctx.ui.notify(`EXECUTE 经理进程退出码 ${exitCode}。可能部分完成——/wf status 查看,修复后可重新 /execute 继续。`, "warning");
-  }
-  wf.mode = "plan";
-  saveState(wf);
-  setModeStatus(ctx);
+  ctx.ui.notify(`EXECUTE:主 session 进入 build 模式,开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式。`, "info");
+  pi.sendUserMessage(prompt);
+  // cmdExecute returns here — the pipeline runs asynchronously in the main session.
+  // The user can watch it unfold and intervene; /wf done ends it.
 }
 
 // ---------------------------------------------------------------------------
@@ -667,8 +652,7 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
 // ---------------------------------------------------------------------------
 
 function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
-  if (WF_ROLE !== "manager") return;
-  if (!wf) return;
+  if (!wf) return;   // no active requirement → no executor tools
 
   // Tool 1: split_prd_to_tasks — read PRD, create bd tasks with deps
   pi.registerTool({
@@ -784,7 +768,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
   });
 
   // Tool 3: run_test — write cumulative diff + run the verify gate.
-  // NOTE: per-task review is now done by the manager calling task(agent="reviewer")
+  // NOTE: per-task review is done by the manager calling delegate(agent="reviewer")
   // during the dispatch loop. run_test is the FINAL whole-requirement gate:
   // it writes the cumulative diff (for the manager to feed a final reviewer
   // subagent if desired) and runs the P0 verify command. Bug creation from
@@ -792,7 +776,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
   pi.registerTool({
     name: "run_test",
     label: "测试产出",
-    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 task(agent='reviewer') 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
+    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 delegate(agent='reviewer') 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
     parameters: Type.Object({}),
     async execute() {
       // Write cumulative diff.
@@ -809,28 +793,14 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       return {
         content: [{ type: "text", text:
           `${verifyPart}\n累积 diff 已写入:${diffPath}\n` +
-          `下一步建议:调 task(agent="reviewer", task="审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>")。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→task(dev)→task(reviewer) 循环修复。`
+          `下一步建议:调 delegate(agent="reviewer", task="审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>")。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→delegate(dev)→delegate(reviewer) 循环修复。`
         }],
         details: {},
       };
     },
   });
-
-  // HARD CONSTRAINT: lock the tool set so the manager delegates rather than
-  // hand-writing code. The manager uses native `task` to spawn dev/reviewer
-  // subagents, and the bd_task tool for deterministic bd lifecycle. Without
-  // this lock, the manager LLM in --print mode would use built-in write/edit
-  // to implement tasks directly, bypassing the dev subagent pipeline.
-  try {
-    pi.setActiveTools([
-      "split_prd_to_tasks", "bd_task", "run_test",   // workflow tools (bd lifecycle + pipeline)
-      "task",                                         // NATIVE omp: spawn dev/reviewer subagents
-      ...READONLY_TOOLS,                             // read, grep, find, ls
-      "bash",                                        // for bd CLI queries + reading code/diffs
-    ]);
-  } catch (_e) { /* if setActiveTools fails, tools remain open (best effort) */ }
-
-  ctx.ui.notify(`经理工具已激活:split_prd_to_tasks, bd_task, run_test, task(原生 subagent)(已锁定:无法自己写代码)`, "info");
+  // NOTE: tool-set locking by mode is now handled centrally by applyModeTools(),
+  // called on session_start and whenever mode changes. No WF_ROLE gating.
 }
 
 // ---------------------------------------------------------------------------
@@ -843,40 +813,18 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_e, ctx) => {
     setModeStatus(ctx as any);
-    // Main session: restore the most recent requirement so /execute etc. work
-    // across sessions (wf is an in-memory singleton that doesn't survive restart).
-    if (WF_ROLE === "main") {
-      if (!wf && restoreLatestWf(ctx as any)) {
-        ctx.ui.notify?.(`已恢复上次需求 ${wf!.reqId}(epic ${wf!.epicId})。\n/wf resume <reqId> 切换,或 /wf new 新建。`, "info");
-        setModeStatus(ctx as any);
-      }
+    // Restore the most recent requirement so /execute etc. work across sessions
+    // (wf is an in-memory singleton that doesn't survive restart).
+    if (!wf && restoreLatestWf(ctx as any)) {
+      ctx.ui.notify?.(`已恢复上次需求 ${wf!.reqId}(epic ${wf!.epicId},模式 ${wf!.mode})。\n/wf resume <reqId> 切换,/wf new 新建,/wf idle 进通用模式。`, "info");
+      setModeStatus(ctx as any);
     }
-    // In manager mode, restore wf from state.json before registering tools.
-    if (WF_ROLE === "manager") {
-      const reqId = process.env.WF_REQID;
-      if (reqId) {
-        // Find the state.json: search .workflow/<reqId>/state.json in cwd and candidates.
-        const cwd = process.cwd();
-        const candidates = [
-          path.join(cwd, ".workflow", reqId, "state.json"),
-          ...((process.env.BEADS_REPO ? [path.join(process.env.BEADS_REPO, ".workflow", reqId, "state.json")] : [])),
-        ];
-        for (const sp of candidates) {
-          if (fs.existsSync(sp)) {
-            try {
-              wf = JSON.parse(fs.readFileSync(sp, "utf8")) as WorkflowState;
-              ctx.ui.notify?.(`经理:已恢复需求 ${wf.reqId}(epic ${wf.epicId})`, "info");
-              break;
-            } catch (_e) { /* ignore */ }
-          }
-        }
-      }
-      if (!wf) {
-        ctx.ui.notify?.("经理:未能从 state.json 恢复需求状态,工具不可用", "error");
-        return;
-      }
-      registerManagerTools(pi, ctx as any);
-    }
+    // Always register manager tools — the main session IS the manager now.
+    // Tool-set visibility is controlled by mode (idle=full, plan=readonly, build=executor),
+    // not by which process we're in (no more WF_ROLE/manager subprocess).
+    registerManagerTools(pi, ctx as any);
+    // Apply the current mode's tool set.
+    applyModeTools(pi, ctx as any);
   });
 
   pi.on("resources_discover", async () => {
@@ -889,27 +837,17 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event: any) => {
     try { const t = extractAssistantText(event?.messages); if (t) lastAssistantText = t; } catch (_e) { /* ignore */ }
-    // Manager-side: detect "exited without doing any work" so the main session
-    // can warn loudly instead of reporting a false success. Written to state.json
-    // because the manager is a separate process (main reads it on exit).
-    //
-    // We use TWO signals: in-memory counters (mgrHasSplit/mgrTasksProcessed)
-    // AND a bd reality check (actual task count under the epic). The bd check is
-    // authoritative — if the tool ran but crashed mid-way (leaving counters
-    // stale), bd still has the tasks it created. Only flag noop when BOTH agree.
-    if (WF_ROLE === "manager" && wf) {
+    // In build mode, detect "did zero work" so we can warn instead of a false success.
+    // Two signals: in-memory counters AND a bd reality check (task count under epic).
+    if (wf && wf.mode === "build") {
       const memSaysNoop = !mgrHasSplit && mgrTasksProcessed === 0;
       if (memSaysNoop) {
-        // Double-check against bd: count actual tasks under the epic.
         let bdTaskCount = 0;
         try {
           if (wf.epicId) {
-            const epic = process.env.WF_EPIC_ID || wf.epicId;
-            bdTaskCount = bd.children(wf.repo, epic).filter((i: any) => i.issue_type === "task").length;
+            bdTaskCount = bd.children(wf.repo, wf.epicId).filter((i: any) => i.issue_type === "task").length;
           }
         } catch (_e) { /* if bd is unreachable, trust the memory signal */ }
-        // If bd has tasks, the manager DID work (tool ran, just didn't update
-        // counters). Don't flag noop.
         if (bdTaskCount === 0) {
           wf.managerNoop = true;
           saveState(wf);
@@ -918,12 +856,11 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     }
   });
 
-  // Commands only in main session (not the manager).
-  if (WF_ROLE === "main") {
-    pi.registerCommand("wf", {
+  // Commands (always registered — there's only one session now, no WF_ROLE split).
+  pi.registerCommand("wf", {
       description: "workflow(PRD + 执行双模式):new / prd / analyze / status / verify / execute / help",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "done", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "done", "idle", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -943,6 +880,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           case "resume": cmdResume(ctx, rest); break;
           case "bug": await cmdBug(pi, ctx, rest); break;
           case "done": cmdDone(pi, ctx); break;
+          case "idle": cmdIdle(pi, ctx); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
@@ -953,12 +891,16 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "workflow 用法(PRD + 执行双模式):",
               "/wf new <名> [repo]    新建需求(bd epic),进 PRD 模式(只读讨论)",
               "/plan                   回 PRD 模式讨论",
+              "workflow 三模式:idle(通用,自由写代码) / plan(讨论需求,只读) / build(执行流水线)",
+              "/wf new <名> [repo]    新建需求(bd epic),进 plan 模式(只读讨论)",
+              "/wf idle                切到通用模式(工具全开,自由写代码/问问题,保留 wf)",
+              "/plan                   回 plan 模式讨论",
               "/wf resume [reqId]      切换到已有需求(无参=列列表)。新 session 自动恢复最近需求",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
-              "/execute [prd路径]      启动经理进程:拆 task→分配 dev(omp subagent)→测试。传 PRD 路径则用该 PRD(自动建新 epic),否则用当前需求 prd.md",
+              "/execute [prd路径]      进 build 模式:主 session 跑流水线(拆 task→派 dev/reviewer→测试)。传 PRD 路径用该 PRD,否则用当前 prd.md",
               "/wf status              查看 bd 子任务状态 + 进度(完成的/进行中/待处理 + 最新动作)",
-              "/wf done                结束当前需求的执行阶段(切回 PRD 模式,释放锁)。manager 跑完后用,或卡在 build 模式时用",
+              "/wf done                结束执行,切回 idle(释放 build 锁,恢复全工具集)",
               "/wf bug <描述>          建 bd bug(挂当前需求 epic,跳过 PRD),然后 /execute 修复",
               "/wf verify <cmd>        设置验证命令",
             ].join("\n"), "info");
@@ -966,14 +908,13 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       },
     });
 
-    pi.registerCommand("plan", {
-      description: "进入 PRD 模式(讨论需求,只读)",
-      handler: async (_args: string, ctx: ExtensionCommandContext) => { await cmdPlan(pi, ctx); },
-    });
+  pi.registerCommand("plan", {
+    description: "进入 PRD 模式(讨论需求,只读)",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => { await cmdPlan(pi, ctx); },
+  });
 
-    pi.registerCommand("execute", {
-      description: "进入执行模式(启动经理:拆 task→分配 dev→测试)",
-      handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx, args); },
-    });
-  }
+  pi.registerCommand("execute", {
+    description: "进入执行模式(拆 task→派 dev/reviewer→测试)",
+    handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx, args); },
+  });
 }

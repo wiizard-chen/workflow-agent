@@ -32,7 +32,7 @@
  * See DECISION_LOG.md for the full rationale (cache-safety, omp native subagent migration).
  */
 
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** 冻结后的 date 常量。用 epoch 日,语义上明确"这不是真实日期"。 */
 const FROZEN_DATE = "1970-01-01";
@@ -54,19 +54,15 @@ function isDeepSeekModel(ctx: any): boolean {
 }
 
 /**
- * 把 system prompt 数组里每个元素的 date 片段替换成 FROZEN_DATE。
- * 返回新数组(不 mutate 原数组)。无替换则返回 undefined(让 omp 用原值)。
+ * 把 system prompt 字符串里的 date 片段替换成 FROZEN_DATE。
+ * 返回新字符串(不 mutate 原值)。无替换则返回 undefined(让 pi 用原值)。
  */
-function freezeDateInPrompt(systemPrompt: string[]): string[] | undefined {
-  let changed = false;
-  const out = systemPrompt.map((segment) => {
-    if (typeof segment === "string" && DATE_RE.test(segment)) {
-      changed = true;
-      return segment.replace(DATE_RE, `Today is ${FROZEN_DATE},`);
-    }
-    return segment;
-  });
-  return changed ? out : undefined;
+function freezeDateInPrompt(systemPrompt: string): string | undefined {
+  if (typeof systemPrompt !== "string") return undefined;
+  if (!DATE_RE.test(systemPrompt)) return undefined;
+  // reset regex lastIndex (global flag is stateful)
+  DATE_RE.lastIndex = 0;
+  return systemPrompt.replace(DATE_RE, `Today is ${FROZEN_DATE},`);
 }
 
 /** 格式化 cache hit rate 百分比。 */
@@ -79,8 +75,8 @@ export default function cacheExtension(pi: ExtensionAPI): void {
   // ── Hook A: 冻结 system prompt 里的 date(仅 DeepSeek)─────────────────────
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (!isDeepSeekModel(ctx)) return;          // glm/zai 等不动
-    const sp: string[] = event?.systemPrompt;
-    if (!Array.isArray(sp)) return;
+    const sp: string | undefined = event?.systemPrompt;
+    if (typeof sp !== "string") return;
     const frozen = freezeDateInPrompt(sp);
     if (!frozen) return;                         // 没找到 date 行,不改
     return { systemPrompt: frozen };
