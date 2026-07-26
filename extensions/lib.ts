@@ -1,14 +1,13 @@
 /**
- * workflow lib — pure, omp-independent helpers (types, git/fs, dev-subagent/verify,
- * metrics). No scheduling logic lives here anymore — the manager LLM drives
- * execution via tools (see dev-pool.ts + workflow.ts). Kept separate from the
- * omp extension so it can be unit-tested without a live model.
+ * workflow lib — pure, omp-independent helpers (types, git/fs, verify).
+ * The manager LLM drives execution via omp's native task tool + the bd_task
+ * extension tool (see workflow.ts). Kept separate from the omp extension so
+ * it can be unit-tested without a live model.
  */
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { BdExec } from "./bd.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,16 +18,12 @@ export interface RoleRef { provider: string; model: string; }
 export interface WorkflowConfig {
   providers: Record<string, { baseUrl: string; apiKeyEnv: string; api: string; thinkingFormat?: string }>;
   roles: { discuss: RoleRef; prd: RoleRef; split: RoleRef; review: RoleRef };
-  /** dev execution layer: omp native subagent (replaces former reasonix binary). */
-  dev: { provider: string; model: string; timeoutMs: number };
   build: { verifyCommand: string; commitPrefix: string };
-  /** bd-driven execution & parallel scheduling (v2). */
+  /** Execution layer config (omp-native). dev/reviewer models live in .omp/agents/*.md frontmatter, not here. */
   execute?: {
-    driver?: "bd";          // only "bd" supported in v2; default "bd"
-    maxParallel?: number;   // concurrent workers; default 1 (= serial)
-    pollIntervalMs?: number; // scheduler poll interval; default 2000
-    worktreeDir?: string;   // where worktrees live (relative to repo); default "." (inside repo)
-    bdBin?: string;         // bd binary; default "bd"
+    driver?: "bd";          // only "bd" supported; default "bd"
+    maxParallel?: number;   // suggested parallel task(dev) calls for the manager prompt; default 1
+    pollIntervalMs?: number; // unused in omp-native path; kept for compat
   };
 }
 
@@ -129,22 +124,6 @@ export function runVerify(cfg: WorkflowConfig, s: WorkflowState, allowEmptyVerif
 // git helpers (worktree, commit)
 // ---------------------------------------------------------------------------
 
-/** Git status of code files only (excludes the .workflow/ artifacts dir). */
-export function codeStatus(repo: string): string {
-  return sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], repo).stdout.trim();
-}
-
-/** Commit only the subtask's CODE changes (never the .workflow/ artifacts).
- *  Runs in `cwd` (a worktree) so the commit lands on the worktree's branch. */
-export function commitSubtask(cfg: WorkflowConfig, cwd: string, t: { id: string; title: string }): { committed: boolean; sha?: string; empty?: boolean } {
-  if (!codeStatus(cwd)) return { committed: false, empty: true };
-  sh("git", ["add", "-A", "--", ".", ":!.workflow"], cwd);
-  const msg = `${cfg.build.commitPrefix} ${t.id}: ${t.title}`;
-  const c = sh("git", ["commit", "-m", msg], cwd);
-  if (c.code !== 0) return { committed: false };
-  return { committed: true, sha: gitHead(cwd) };
-}
-
 /** Commit the .workflow/<reqId>/ artifacts (PRD, subtasks, results, review) in one commit. */
 export function commitArtifacts(s: WorkflowState): { committed: boolean; sha?: string } {
   const rel = path.join(".workflow", s.reqId);
@@ -154,64 +133,4 @@ export function commitArtifacts(s: WorkflowState): { committed: boolean; sha?: s
   const c = sh("git", ["commit", "-m", `workflow: ${s.reqId} 计划/构建工件`], s.repo);
   if (c.code !== 0) return { committed: false };
   return { committed: true, sha: gitHead(s.repo) };
-}
-
-export interface Worktree {
-  path: string;   // absolute path to the worktree
-  branch: string; // branch name
-  name: string;   // worktree name (for removal)
-}
-
-/** Create a worktree via `bd worktree create` (shares the beads db automatically)
- *  OR fall back to plain `git worktree add` if bd isn't initialized. */
-export function addWorktree(repo: string, name: string, branch: string, exec?: BdExec): Worktree {
-  const bdInitialized = fs.existsSync(path.join(repo, ".beads", "metadata.json"));
-  if (bdInitialized && exec) {
-    // Prefer bd worktree: it wires up the shared beads db automatically.
-    const r = exec(repo, ["worktree", "create", name, "--branch", branch]);
-    if (r.code === 0) {
-      // bd worktree create puts it at <repo>/<name>
-      const wtPath = path.join(repo, name);
-      return { path: wtPath, branch, name };
-    }
-    // bd failed — log stderr and fall through to git (don't swallow silently).
-    console.error(`[wf] bd worktree create failed (code ${r.code}), 回退到 git: ${r.stderr.trim() || r.stdout.trim()}`);
-  }
-  // Plain git fallback (e.g. in tests without bd).
-  const wtPath = path.join(repo, name);
-  const r = sh("git", ["worktree", "add", "-b", branch, wtPath], repo);
-  if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr}`);
-  // Verify the worktree actually exists on disk (defensive: git can report
-  // success in edge cases like pre-existing empty dir).
-  if (!fs.existsSync(wtPath)) throw new Error(`worktree 创建后路径不存在:${wtPath}`);
-  return { path: wtPath, branch, name };
-}
-
-/** Remove a worktree (best-effort; tries bd first, then git). */
-export function removeWorktree(repo: string, wt: Worktree, exec?: BdExec): void {
-  try {
-    const bdInitialized = fs.existsSync(path.join(repo, ".beads", "metadata.json"));
-    if (bdInitialized && exec) {
-      const r = exec(repo, ["worktree", "remove", wt.name]);
-      if (r.code === 0) return;
-    }
-    sh("git", ["worktree", "remove", "--force", wt.path], repo);
-    sh("git", ["branch", "-D", wt.branch], repo);
-  } catch (e) { /* best effort, but log so failures are visible */ console.error(`[wf] removeWorktree 失败(${wt.name}): ${(e as Error).message}`); }
-}
-
-/** Merge a worktree's branch back into the current branch of `repo`.
- *  Returns {ok, conflict}. On conflict, the caller decides (abort or resolve). */
-export function mergeWorktree(repo: string, branch: string): { ok: boolean; conflict: boolean; output: string } {
-  const r = sh("git", ["merge", "--no-ff", branch, "-m", `merge: ${branch}`], repo);
-  if (r.code === 0) return { ok: true, conflict: false, output: r.stdout };
-  // Detect conflict: merge conflict markers in status, or "CONFLICT" in output.
-  const conflict = /CONFLICT|Merge conflict/i.test(r.stdout + r.stderr);
-  if (conflict) {
-    // Leave the merge in-progress so the caller can inspect; they must abort.
-    return { ok: false, conflict: true, output: (r.stdout + r.stderr).slice(-2000) };
-  }
-  // Non-conflict failure: abort to leave the tree clean.
-  sh("git", ["merge", "--abort"], repo);
-  return { ok: false, conflict: false, output: (r.stdout + r.stderr).slice(-2000) };
 }

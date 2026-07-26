@@ -9,13 +9,15 @@
  *                  become bd bugs the manager re-assigns.
  *
  * The manager is driven by .omp/agents/manager.md (editable, no code change).
- * It controls devs via three extension tools: split_prd_to_tasks, assign_dev,
- * run_test. Scheduling is the manager's LLM judgment, NOT a code loop.
+ * It uses omp's NATIVE `task` tool to spawn dev/reviewer subagents, plus
+ * extension tools (split_prd_to_tasks, bd_task, run_test) for deterministic
+ * bd lifecycle and pipeline stages. Scheduling is the manager's LLM judgment.
  *
- * Context reuse: each dev (dev1/dev2/...) owns ONE fixed worktree. A dev
- * subagent is a fresh omp --print process per task; cross-task context is
- * carried by bd comments + the DeepSeek prefix cache (cache.ts freezes the
- * system-prompt date so the prefix stays byte-stable across tasks).
+ * Dev execution: the manager calls `task(agent="dev", ...)` — omp spawns the
+ * subagent natively (no manual worktree/spawn in the extension). Dev changes
+ * land in the main repo's git history; the reviewer subagent reads them via
+ * git diff. Cross-task context is carried by bd comments + the DeepSeek
+ * prefix cache (cache.ts freezes the system-prompt date).
  *
  * WF_ROLE env var distinguishes the main session (PRD mode, commands active)
  * from the manager session (execute mode, tools active).
@@ -31,13 +33,10 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import {
   commitArtifacts,
-  commitSubtask,
   gitHead,
   isGitRepo,
-  mergeWorktree,
   nowStamp,
   readRepoBrief,
-  removeWorktree,
   repoBriefPath,
   reqPath,
   runVerify,
@@ -49,7 +48,6 @@ import {
   type WorkflowState,
 } from "./lib.ts";
 import * as bd from "./bd.ts";
-import { DevPool } from "./dev-pool.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -66,7 +64,6 @@ const DEFAULT_CONFIG: WorkflowConfig = {
     split: { provider: "deepseek", model: "deepseek-v4-pro" },
     review: { provider: "zai", model: "glm-5.2" },
   },
-  dev: { provider: "deepseek", model: "deepseek-flash", timeoutMs: 1800000 },
   build: { verifyCommand: "", commitPrefix: "subtask" },
   execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
 };
@@ -85,7 +82,6 @@ function loadConfig(): WorkflowConfig {
         return {
           providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
           roles: { ...DEFAULT_CONFIG.roles, ...(raw.roles || {}) },
-          dev: { ...DEFAULT_CONFIG.dev, ...(raw.dev || {}) },
           build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
           execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
         };
@@ -105,7 +101,6 @@ let wf: WorkflowState | undefined;
 let mgrHasSplit = false;
 let mgrTasksProcessed = 0;
 let lastAssistantText = "";
-let devPool: DevPool | undefined;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -510,7 +505,7 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): s
     `目标仓库:${wf.repo}`,
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
-    `dev 数量:${CONFIG.execute?.maxParallel ?? 1}(用 devId 1…N 调 assign_dev)`,
+    `dev 并发上限:${CONFIG.execute?.maxParallel ?? 20}(用原生 task 工具调 dev/reviewer subagent,可并行)`,
     `------------------`,
     ``,
     `现在开始:先读 PRD 文件,然后调 split_prd_to_tasks。`,
@@ -611,11 +606,11 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
   }
 
   if (exitCode === 0 && wf.managerNoop) {
-    // Manager exited clean but did ZERO work (no split, no assign) — almost
+    // Manager exited clean but did ZERO work (no split, no bd_task) — almost
     // certainly a model/prompt failure. Warn loudly so the user doesn't mistake
     // this for success.
     ctx.ui.notify(
-      `⚠ EXECUTE 空跑:经理进程退出码 0,但没有调用任何工具(split_prd_to_tasks / assign_dev 都没触发)。\n` +
+      `⚠ EXECUTE 空跑:经理进程退出码 0,但没有调用任何工具(split_prd_to_tasks / bd_task / task 都没触发)。\n` +
       `可能原因:模型出错、prompt 问题、或经理进程崩溃。\n` +
       `bd epic ${wf.epicId} 下没有创建任何 task。请检查经理模型(${CONFIG.roles.split.provider}/${CONFIG.roles.split.model})配置后重试 /execute。`,
       "error"
@@ -694,138 +689,104 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       saveState(wf!);
       mgrHasSplit = true;   // track that the manager actually did work
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
-      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在用 assign_dev(taskId, devId) 分配。独立的 task 散给不同 dev;有依赖链的给同一个 dev。` }], details: {} };
+      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在对每个 ready 的 task:用 bd_task(action=claim) 认领,再用原生 task 工具调 dev subagent 实现,然后调 reviewer subagent review,根据 review 结果用 bd_task(close 或 reopen)。独立的 task 可并行(多次 task 调用)。` }], details: {} };
     },
   });
 
-  // Tool 2: assign_dev — assign a task to a dev, run omp subagent synchronously
+  // Tool 2: bd_task — atomic bd lifecycle operations (claim/close/reopen/comment).
+  // The manager uses this for deterministic bd state transitions around native
+  // task() calls to dev/reviewer subagents. Replaces the former assign_dev tool
+  // which baked these into a spawn-based executor.
   pi.registerTool({
-    name: "assign_dev",
-    label: "分配 task 给 dev",
-    description: "把一个 task 分配给指定 dev(1…N)。同步执行:omp dev subagent 跑完才返回。dev 在 worktree 里写代码并内部闭环验证。返回成功/失败 + diff 摘要。",
+    name: "bd_task",
+    label: "bd task 生命周期操作",
+    description: "对 bd issue 做确定性生命周期操作:claim(原子认领)、close(关闭,可带 reason)、reopen(放回 ready)、comment(留备注)。配合原生 task 工具使用:claim → task(dev) → review → close/reopen。",
     parameters: Type.Object({
-      task_id: Type.String({ description: "bd issue id(如 xxx.1)" }),
-      dev_id: Type.Integer({ description: "dev 编号(1…N)" }),
+      action: Type.Union([Type.Literal("claim"), Type.Literal("close"), Type.Literal("reopen"), Type.Literal("comment")], { description: "操作类型" }),
+      task_id: Type.String({ description: "bd issue id" }),
+      text: Type.Optional(Type.String({ description: "close 的 reason / comment 的内容" })),
     }),
     async execute(_id, params) {
       const p = params as any;
+      const action: string = p.action;
       const taskId: string = p.task_id;
-      const devId: number = p.dev_id;
-      if (!devPool) { devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec); devPool.devExtPath = fileURLToPath(import.meta.url); }
-      mgrTasksProcessed++;   // track that the manager actually assigned work
-      const allowEmpty = !(wf!.verifyCommand ?? CONFIG.build.verifyCommand ?? "").trim();
-      const result = await devPool.runTask(devId, taskId, {
-        allowEmptyVerify: !!allowEmpty,
-        onNotify: (m) => ctx.ui.notify(m, "info"),
-      });
-      const status = result.ok ? (result.noChange ? "无改动(通过)" : `完成并合并 ${result.commit?.slice(0, 8)}`) : "失败(已放回 bd)";
-      return { content: [{ type: "text", text: `task ${taskId} → dev${devId}: ${status}\n${result.output.slice(-1500)}` }], details: {} };
-    },
-  });
-
-  // Tool 2b: assign_devs_batch — assign MULTIPLE independent tasks in parallel.
-  // Use this when several tasks have NO mutual dependency (bd ready shows them
-  // all at once). Each task runs on its own dev subagent in an isolated worktree;
-  // execution overlaps in time up to maxParallel, only the merge step serializes.
-  // For a dependency chain (B depends_on A), assign A first, wait, then assign B.
-  pi.registerTool({
-    name: "assign_devs_batch",
-    label: "并行分配多个独立 task",
-    description: "把多个互相独立的 task 并行分配给不同 dev。内部按 maxParallel(默认 3,目标 20)并发跑,合并串行。仅用于互相无依赖的 task;有依赖的用 assign_dev 顺序分配。返回每个 task 的结果。",
-    parameters: Type.Object({
-      assignments: Type.Array(Type.Object({
-        task_id: Type.String({ description: "bd issue id" }),
-        dev_id: Type.Integer({ description: "dev 编号(1…N)" }),
-      })),
-    }),
-    async execute(_id, params) {
-      const p = params as any;
-      const assignments: { task_id: string; dev_id: number }[] = p.assignments || [];
-      if (assignments.length === 0) {
-        return { content: [{ type: "text", text: "没有要分配的 task" }], details: {} };
+      const text: string | undefined = p.text;
+      const repo = wf!.repo;
+      try {
+        if (action === "claim") {
+          const agent = `manager-${wf!.reqId}`;
+          const ok = bd.claim(repo, taskId, agent);
+          return { content: [{ type: "text", text: ok ? `✓ 已认领 ${taskId}` : `✗ 认领失败(已被占用或状态非 open):${taskId}` }], details: {} };
+        }
+        if (action === "close") {
+          bd.close(repo, taskId, text);
+          mgrTasksProcessed++;
+          return { content: [{ type: "text", text: `✓ 已关闭 ${taskId}${text ? `(${text})` : ""}` }], details: {} };
+        }
+        if (action === "reopen") {
+          bd.reopen(repo, taskId);
+          return { content: [{ type: "text", text: `✓ 已放回 ready ${taskId}` }], details: {} };
+        }
+        if (action === "comment") {
+          if (!text) return { content: [{ type: "text", text: "错误:comment 需要 text 参数" }], details: {} };
+          bd.comment(repo, taskId, text);
+          return { content: [{ type: "text", text: `✓ 已在 ${taskId} 留 comment` }], details: {} };
+        }
+        return { content: [{ type: "text", text: `未知 action:${action}` }], details: {} };
+      } catch (e) {
+        return { content: [{ type: "text", text: `错误:${(e as Error).message}` }], details: {} };
       }
-      if (!devPool) { devPool = new DevPool(wf!, CONFIG, bd.defaultBdExec); devPool.devExtPath = fileURLToPath(import.meta.url); }
-      mgrTasksProcessed += assignments.length;
-      const allowEmpty = !(wf!.verifyCommand ?? CONFIG.build.verifyCommand ?? "").trim();
-      const concurrency = CONFIG.execute?.maxParallel ?? 3;
-      const results = await devPool.runTasksParallel(
-        assignments.map((a) => ({ devId: a.dev_id, taskId: a.task_id })),
-        concurrency,
-        { allowEmptyVerify: !!allowEmpty, onNotify: (m) => ctx.ui.notify(m, "info") },
-      );
-      const lines = assignments.map((a, i) => {
-        const r = results[i];
-        const status = r.ok ? (r.noChange ? "无改动(通过)" : `完成并合并 ${r.commit?.slice(0, 8)}`) : "失败(已放回 bd)";
-        return `task ${a.task_id} → dev${a.dev_id}: ${status}`;
-      });
-      const okCount = results.filter((r) => r.ok).length;
-      return { content: [{ type: "text", text: `并行完成 ${okCount}/${assignments.length}(并发 ${concurrency}):\n${lines.join("\n")}` }], details: {} };
     },
   });
 
-  // Tool 3: run_test — test the output, create bugs for failures
+  // Tool 3: run_test — write cumulative diff + run the verify gate.
+  // NOTE: per-task review is now done by the manager calling task(agent="reviewer")
+  // during the dispatch loop. run_test is the FINAL whole-requirement gate:
+  // it writes the cumulative diff (for the manager to feed a final reviewer
+  // subagent if desired) and runs the P0 verify command. Bug creation from
+  // review findings is now the manager's job (bd.create via bash), not baked in.
   pi.registerTool({
     name: "run_test",
     label: "测试产出",
-    description: "所有 task 完成后调用。用 glm-5.2 测试产出(跑验证 + review diff),失败的问题创建为 bd bug issue。",
+    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 task(agent='reviewer') 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
     parameters: Type.Object({}),
     async execute() {
       // Write cumulative diff.
       const diffBase = wf!.baseline || "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
       const diff = sh("git", ["diff", diffBase, "HEAD"], wf!.repo).stdout;
-      try { fs.writeFileSync(reqPath(wf!, "results", "cumulative.diff"), diff); } catch (_e) { /* ignore */ }
+      const diffPath = reqPath(wf!, "results", "cumulative.diff");
+      try { fs.writeFileSync(diffPath, diff); } catch (_e) { /* ignore */ }
 
-      // Verify gate.
+      // Verify gate (P0 safety — runs the configured verify command).
       const v = runVerify(CONFIG, wf!, true);
-      let verifyPart = v.ok ? "验证通过" : `验证失败:\n${v.output.slice(-1500)}`;
+      const verifyPart = v.ok ? "验证通过" : `验证失败:\n${v.output.slice(-1500)}`;
 
-      // glm-5.2 review.
-      const reviewPromptText = withBrief(wf!.repo, [
-        `你是资深测试工程师。对整个需求的实现做测试评审。`,
-        `请用 read 读取:PRD(${process.env.WF_PRD_PATH || reqPath(wf!, "prd.md")})、累积 diff(${reqPath(wf!, "results", "cumulative.diff")})。`,
-        `输出 review 报告:1) 总体结论;2) 问题清单,每条 文件:行 + 严重程度(blocker/major/minor)+ 说明。`,
-      ].join("\n"));
-      const review = await runStageText(pi, ctx, CONFIG.roles.review, reviewPromptText);
-      if (review) {
-        fs.writeFileSync(reqPath(wf!, "review.md"), stripFence(review) + "\n");
-      }
-
-      // Create bd bugs for blockers.
-      const bugs: string[] = [];
-      if (review) {
-        const blockerMatches = review.matchAll(/(?:blocker|严重)[^\n]*?[\n。]([^\n]+)/gi);
-        for (const m of blockerMatches) {
-          const desc = m[1].trim().slice(0, 200);
-          if (desc) {
-            try {
-              const bugParent = process.env.WF_EPIC_ID || wf!.epicId;
-              const bugId = bd.create(wf!.repo, { title: `bug: ${desc.slice(0, 40)}`, type: "bug", parent: bugParent, description: desc });
-              bugs.push(bugId);
-            } catch (_e) { /* ignore */ }
-          }
-        }
-      }
       commitArtifacts(wf!);
-      const bugPart = bugs.length ? `\n创建了 ${bugs.length} 个 bug(${bugs.join(", ")}),请用 assign_dev 分配修复。` : "\n无 blocker 级 bug。";
-      return { content: [{ type: "text", text: `${verifyPart}\nreview: ${reqPath(wf!, "review.md")}${bugPart}` }], details: {} };
+      return {
+        content: [{ type: "text", text:
+          `${verifyPart}\n累积 diff 已写入:${diffPath}\n` +
+          `下一步建议:调 task(agent="reviewer", task="审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>")。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→task(dev)→task(reviewer) 循环修复。`
+        }],
+        details: {},
+      };
     },
   });
 
-  // HARD CONSTRAINT: lock the tool set so the manager can ONLY use its three
-  // tools + read-only/bash (for bd queries + reading code). Without this, the
-  // manager LLM in --print mode ignores manager.md's "don't write code" advice
-  // and uses built-in write/edit to implement tasks directly in the main repo,
-  // bypassing assign_dev → worktree → dev subagent entirely (no worktree, no
-  // isolation, code lands untracked). setActiveTools is the physical enforcement.
+  // HARD CONSTRAINT: lock the tool set so the manager delegates rather than
+  // hand-writing code. The manager uses native `task` to spawn dev/reviewer
+  // subagents, and the bd_task tool for deterministic bd lifecycle. Without
+  // this lock, the manager LLM in --print mode would use built-in write/edit
+  // to implement tasks directly, bypassing the dev subagent pipeline.
   try {
     pi.setActiveTools([
-      "split_prd_to_tasks", "assign_dev", "run_test",   // the only 3 work tools
-      ...READONLY_TOOLS,                                 // read, grep, find, ls
-      "bash",                                            // for bd CLI queries only
+      "split_prd_to_tasks", "bd_task", "run_test",   // workflow tools (bd lifecycle + pipeline)
+      "task",                                         // NATIVE omp: spawn dev/reviewer subagents
+      ...READONLY_TOOLS,                             // read, grep, find, ls
+      "bash",                                        // for bd CLI queries + reading code/diffs
     ]);
   } catch (_e) { /* if setActiveTools fails, tools remain open (best effort) */ }
 
-  ctx.ui.notify(`经理工具已激活:split_prd_to_tasks, assign_dev, run_test(已锁定:无法自己写代码)`, "info");
+  ctx.ui.notify(`经理工具已激活:split_prd_to_tasks, bd_task, run_test, task(原生 subagent)(已锁定:无法自己写代码)`, "info");
 }
 
 // ---------------------------------------------------------------------------
