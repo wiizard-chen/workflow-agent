@@ -30,6 +30,7 @@ import {
   commitArtifacts,
   gitHead,
   isGitRepo,
+  type Mode,
   nowStamp,
   readRepoBrief,
   repoBriefPath,
@@ -118,6 +119,48 @@ async function waitTurnComplete(ctx: ExtensionCommandContext, maxMs = 600000): P
 function setModeStatus(ctx: ExtensionCommandContext): void {
   const label = wf ? `WF:${wf.mode} ${wf.reqId}` : "WF:—";
   try { ctx.ui.setStatus("workflow", label); } catch (_e) { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Tab mode-cycling (opencode-style): idle -> plan -> build -> idle -> ...
+//
+// Mirrors the three real wf.mode values, driving the same commands a user
+// would type by hand:
+//   - idle, no wf:        Tab prefills "/wf new " (never guesses a name).
+//   - idle, wf exists:    Tab re-enters PLAN on the current requirement
+//                         (equivalent to /plan).
+//   - plan:               Tab prefills /wf prd (no prd.md yet) or /execute
+//                         (prd.md already exists) — whichever is the next
+//                         logical step.
+//   - build:              Tab calls /wf done (back to idle, tools unlocked).
+// ---------------------------------------------------------------------------
+
+async function cycleMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const mode: Mode = wf ? wf.mode : "idle";
+
+  if (mode === "idle") {
+    if (!wf) {
+      ctx.ui.setEditorText("/wf new ");
+      ctx.ui.notify("PLAN 模式:填写需求名后回车(/wf new <需求名> [repo路径])", "info");
+      return;
+    }
+    await cmdPlan(pi, ctx);
+    return;
+  }
+
+  if (mode === "plan") {
+    if (!fs.existsSync(reqPath(wf!, "prd.md"))) {
+      ctx.ui.setEditorText("/wf prd");
+      ctx.ui.notify("回车生成 PRD(glm-5.2,基于讨论)。", "info");
+    } else {
+      ctx.ui.setEditorText("/execute");
+      ctx.ui.notify("BUILD 模式:回车执行(拆 task → 派 dev/reviewer → 测试)。", "info");
+    }
+    return;
+  }
+
+  // mode === "build": Tab ends the run and returns to idle.
+  cmdDone(pi, ctx);
 }
 
 /** Apply the tool set for the current mode.
@@ -916,5 +959,15 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   pi.registerCommand("execute", {
     description: "进入执行模式(拆 task→派 dev/reviewer→测试)",
     handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx, args); },
+  });
+
+  // Tab: cycle idle -> plan -> build -> idle (opencode-style mode switching),
+  // driving the same /wf new, /plan, /wf prd, /execute, /wf done commands a
+  // user would type by hand. "tab" is app-level only (not bound by default,
+  // distinct from the editor's own tab-to-autocomplete) so this doesn't
+  // collide with in-editor completion.
+  pi.registerShortcut("tab", {
+    description: "切换 workflow 模式(idle → plan → build → idle)",
+    handler: async (ctx) => { await cycleMode(pi, ctx as ExtensionCommandContext); },
   });
 }
