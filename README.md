@@ -109,9 +109,13 @@ WF_AGENT_HOME=/path wfpi      # 自定义 workflow-agent 路径
 4. 审阅 `.workflow/<reqId>/prd.md`。不满意继续讨论后再 `/wf prd`。
 5. `/execute` — 进入 **build 模式**:**主 session 自己就是经理**(无独立进程)。`/execute` 通过 `sendUserMessage` 把 manager-prompt.md 注入主 session,主 session 读 PRD → 拆 task 进 bd → `subagent(dev)` / `subagent(reviewer)` → 测试。失败自动建 bd bug,主 session 继续分配修复,直到全过。整个过程用户可直接观察并插话。
 6. `/wf done` — 结束 build,回到 **idle 模式**(保留 wf 上下文)。`/wf idle` 可随时切到通用编码模式(完整工具集)。
-7. `/wf status` 查看 bd 子任务状态;需修订 `/plan` 回到讨论。
+7. `/wf status` 查看 bd 子任务状态 + 本需求 token/cache 用量;需修订 `/plan` 回到讨论。
 
-辅助命令:`/wf analyze [--refresh]`、`/wf verify <cmd>`(设置验证命令,如 `npm test`)、`/plan`、`/wf idle`(切到通用编码模式)。
+**先看计划再动手**:`/execute --dry-run` 只让经理拆 task + 汇报计划(拆分结果会真的建成 bd task 方便审阅依赖图),**不派 dev、不改代码**。确认无误后再跑 `/execute` 正式执行。
+
+**跑歪了回滚**:`/wf abort` 把目标 repo `git reset --hard` 回 `/execute` 时记录的 baseline,并把 epic 下的 task 全部 reopen。执行前会列出将丢弃的 commit / 改动统计 / 未提交改动并要求确认,`.workflow/` 工件会先提交一次保留作审计记录。**不可逆,谨慎使用。**
+
+辅助命令:`/wf analyze [--refresh]`、`/wf verify <cmd>`(设置验证命令,如 `npm test`)、`/plan`、`/wf idle`(切到通用编码模式)、`/wf abort`(回滚)。
 
 ### Tab 切换模式
 
@@ -177,9 +181,9 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 
 ## dev 池与并行执行(`maxParallel`)
 
-`workflow.config.json` 的 `execute.maxParallel` 是**经理可用的 dev 并行度**(默认 3)。每个 dev 是一次 `subagent({agent:"dev"})` spawn 的 pi-subagents subagent,持有固定 worktree:
+`workflow.config.json` 的 `execute.maxParallel` 是**经理一次并行派 dev 的建议上限**(代码内置默认 3;仓库自带的配置文件设成了 20)。扩展会把这个数字注入 manager prompt 的运行上下文,经理据此决定一次 `subagent({tasks:[...]})` 里同时派几个 dev。每个 dev 是一次 pi-subagents subagent spawn:
 
-- 独立的 task 并行调 `subagent`(可传 `worktree: true` 隔离改动),取代旧的"依赖链给同一 dev 走 `--continue`"路由。
+- 独立的 task 并行调 `subagent`(传 `worktree: true` 让每个并行子任务在独立 git worktree 里跑,commit 不交错),取代旧的"依赖链给同一 dev 走 `--continue`"路由。
 - 跨 task 上下文不再靠 session 续跑,而是靠:(a) `cache.ts` 冻结 system-prompt 的 date 让 DeepSeek 前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。
 - dev 在自己的 subagent 内部做闭环验证(write → verify → fix 直到通过),把结构化结果写进 output JSON 文件,经理读这个文件决定下一步。
 - 经理(主 session)是驻留 LLM,默认做 stage 级委派(dynamic granularity),异常时细粒度介入。
@@ -196,14 +200,16 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 <repo>/.workflow/
 ├── _repo-brief.md           # 仓库级简报(/wf analyze,跨需求复用)
 └── <reqId>/
-    ├── state.json              # 流水线状态(reqId/epicId/mode/baseline)
+    ├── state.json              # 流水线状态(reqId/epicId/mode/baseline/subtaskIds)
     ├── prd.md                  # PRD(glm-5.2)
     ├── subtasks/
-    │   └── NN-*.md             # 子任务规格(deepseek-pro);bd issue notes 指向这里
+    │   ├── NN-*.md             # 子任务规格(deepseek-pro);bd issue notes 指向这里
+    │   └── bug-*.md            # /wf bug 生成的 bug 规格
     ├── results/
-    │   ├── NN.metrics.json     # 每个 pi dev subagent run 的 token/cache/cost
-    │   ├── cumulative.diff     # 全量累积改动(供 review)
-    │   └── summary.json        # 成本 + 平均 cache 命中汇总
+    │   ├── <taskId>.json        # 每个 dev subagent 的结构化结果(verifyPassed/commitSha/…)
+    │   ├── <taskId>.review.json # 每个 reviewer subagent 的判定(verdict/issues/…)
+    │   ├── cumulative.diff      # 全量累积改动(run_test 写,供整体 review)
+    │   └── summary.json         # token / cache 命中 / cost 汇总(按模型分组,每轮实时落盘)
     └── review.md               # 整体 review(glm-5.2,建议性)
 
 <repo>/.beads/                 # bd 数据(bd init 创建)
@@ -213,6 +219,8 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 ```
 
 子任务 DAG(依赖、状态、归属)存在 bd 里,是权威;`.workflow/` 只放文本产物。代码改动走 git,每子任务一个 code commit,`.workflow/` 工件最后单独一个 commit。
+
+`results/summary.json` 由 `message_end` hook 实时累计(按 `provider/model` 分组的 turns / input / output / cacheRead / cacheWrite / cost + 整体 cache 命中率),每轮写一次,所以即使跑崩了也留得下数据。`/wf status` 会顺带显示这份汇总的单行摘要。
 
 ## PLAN 阶段联网(Playwright MCP + pi-web-access)
 
@@ -225,7 +233,21 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 
 ## 配置
 
-`workflow.config.json` 可调:provider endpoint / 模型 id、各阶段角色、**dev 执行层**(dev 模型 id / 超时;历史字段 `reasonix: {bin, model, maxSteps, timeoutMs}` 早已迁移为 `dev: {model, timeoutMs}`,reasonix 二进制已移除)、默认验证命令、commit 前缀、**并行上限**(`execute.maxParallel`)。改完 `/reload` 或重启 pi。
+`workflow.config.json` 可调:
+
+| 字段 | 作用 |
+|---|---|
+| `providers.*` | provider endpoint / apiKey 环境变量名 / api 格式 |
+| `roles.{discuss,prd,split,review}` | 各阶段用哪个 provider + 模型 id |
+| `build.verifyCommand` | 默认验证命令(`/wf verify <cmd>` 可按需求覆盖) |
+| `build.commitPrefix` | 子任务 commit 消息前缀 |
+| `execute.maxParallel` | 经理一次并行派 dev 的建议上限(注入 manager prompt;代码内置默认 3) |
+
+**dev / reviewer 的模型不在这里配**——它们是 pi-subagents 的 subagent,模型写在 `.pi/agents/dev.md` / `.pi/agents/reviewer.md` 的 frontmatter(`model:` 字段)里。(历史字段 `reasonix: {bin, model, maxSteps, timeoutMs}` 和后来的 `dev: {model, timeoutMs}` 都已移除,不再读取。)
+
+`execute.driver` 只实现了 `"bd"`;`execute.pollIntervalMs` 是死字段(当前实现不轮询),保留仅为兼容旧配置。
+
+改完 `/reload` 或重启 pi。
 
 ## 缓存说明
 

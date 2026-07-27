@@ -26,10 +26,12 @@
     "commitPrefix": "subtask"
   },
   "execute": {
-    "$comment": "执行层配置(omp-native)。/execute 启动经理 omp 进程,它用原生 task 工具调 dev/reviewer subagent。dev/reviewer 的 model 在 .omp/agents/*.md 的 frontmatter 里定义,不在这里。",
+    "$comment": "执行层配置。/execute 不再 spawn 独立经理进程——主 session 自己就是经理(manager-prompt.md 注入),用 pi-subagents 的 `subagent` 工具调 dev/reviewer。dev/reviewer 的 model 在 .pi/agents/*.md 的 frontmatter 里定义,不在这里。",
     "driver": "bd",
+    "$comment_driver": "保留字段:目前只实现了 \"bd\"(beads 驱动任务状态)。改成其他值无效。",
     "maxParallel": 20,
-    "$comment_maxParallel": "经理并行调 task(dev) 的建议上限(写进 manager prompt)。omp 原生 task.maxConcurrency 默认 32 是硬上限。实测遇限流可调低。",
-    "pollIntervalMs": 2000
+    "$comment_maxParallel": "经理一次 subagent({tasks:[...]}) 里同时派 dev 的建议上限,由扩展注入 manager prompt 的运行上下文。代码内置默认 3;实测遇 provider 限流可调低。",
+    "pollIntervalMs": 2000,
+    "$comment_pollIntervalMs": "死字段:当前主 session 即经理的实现里不轮询,保留仅为兼容旧配置文件不报错。改它没有任何效果。"
   }
 }

@@ -37,11 +37,12 @@
 - **风险场景**:子任务多、spec 详细时,`splitPrompt` 输出可能撞到 `maxTokens: 8192` 硬顶被截断。未做过"大量子任务"场景的压力测试。
 - **建议修复**:JSON 解析失败或解析出的对象缺少必要字段(如每个 subtask 缺 `spec`)时应该报错重试,而不是接受一个可能不完整的结果。
 
-### 4. `aggregateMetrics` 靠字段名猜测,已随 reasonix 移除而过时(已解决/obsolete)
+### 4. `aggregateMetrics` 靠字段名猜测,已随 reasonix 移除而过时(已修复)
 
 - **位置**:`extensions/lib.ts` `aggregateMetrics()`——`key.includes("cost")`、`key.includes("cache") && key.includes("hit")` 这类启发式匹配。
 - **问题(历史)**:过去恰好对上 reasonix v1.11 的字段名。reasonix 是快速迭代项目(TS→Go 重写、v0.x→v1.0→v2),字段名一旦变化,这段代码不会报错,只会把 `cost`/`cacheHit` 算成 `undefined`,`summary.json` 悄悄失去意义,没有任何提示。
-- **现状(迁移后)**:reasonix 二进制早已移除,执行层先迁到 omp native subagent,再随上游迁到 pi-subagents(nicobailon)的 `subagent` 工具,不再产出 `reasonix -metrics` JSON。这段基于字段名猜测的 metrics 聚合因此**已过时**——要么随 dev subagent 的新 metrics 输出重写(改用 pi 的 `message_end` hook 聚合 `prompt_cache_hit_tokens`),要么直接移除。
+- **中间状态**:reasonix 二进制移除后,执行层先迁到 omp native subagent,再随上游迁到 pi-subagents(nicobailon)的 `subagent` 工具,不再产出 `reasonix -metrics` JSON。这段猜字段名的聚合随之被删除,但**没有替代品**——于是有一段时间整条流水线跑完完全看不到 token/成本/cache 命中,而"DeepSeek 前缀缓存省钱"恰恰是这个项目的核心卖点之一。
+- **现状(已修复)**:改用 pi 原生的 `message_end` hook 聚合 usage(`input`/`output`/`cacheRead`/`cacheWrite`/`cost`),按 `provider/model` 分组累计,每轮实时落盘到 `.workflow/<reqId>/results/summary.json`(跑崩了也留得下数据)。相关实现在 `lib.ts` 的 `addUsage`/`buildRunSummary`/`writeRunSummary`/`cacheHitRate`/`formatUsageLine`(有单元测试覆盖),hook 注册和累加器在 `workflow.ts` 的 `trackUsage()`。`/wf status` 会显示单行摘要。不再有字段名猜测——读的是 pi 自己的结构化 usage 字段。
 
 ### 5. `review.md` 无强制力,BUILD 终点可能被无视
 

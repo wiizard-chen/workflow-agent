@@ -31,19 +31,26 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
+  addUsage,
+  buildRunSummary,
   commitArtifacts,
+  emptyUsageTotals,
+  formatUsageLine,
   gitHead,
   isGitRepo,
   type Mode,
   nowStamp,
   readRepoBrief,
+  readRunSummary,
   repoBriefPath,
   reqPath,
   runVerify,
   saveState,
   sh,
   slug,
+  writeRunSummary,
   type RoleRef,
+  type UsageTotals,
   type WorkflowConfig,
   type WorkflowState,
 } from "./lib.ts";
@@ -65,7 +72,12 @@ const DEFAULT_CONFIG: WorkflowConfig = {
     review: { provider: "zai", model: "glm-5.2" },
   },
   build: { verifyCommand: "", commitPrefix: "subtask" },
-  execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
+  // maxParallel is the suggested dev-fanout ceiling injected into the manager
+  // prompt (see loadManagerPrompt). Default 3 matches README; override in
+  // workflow.config.json. `driver` is retained for forward-compat (only "bd"
+  // is implemented); `pollIntervalMs` is unused in the current in-session
+  // manager path and kept only so old config files don't fail to parse.
+  execute: { driver: "bd", maxParallel: 3, pollIntervalMs: 2000 },
 };
 
 function loadConfig(): WorkflowConfig {
@@ -111,6 +123,23 @@ let wf: WorkflowState | undefined;
 let mgrHasSplit = false;
 let mgrTasksProcessed = 0;
 let lastAssistantText = "";
+
+// Cost/cache telemetry accumulator, keyed by "provider/model". Reset when the
+// active requirement changes; flushed to results/summary.json on every turn end
+// (cheap: one small JSON write) so a crashed/interrupted run still leaves data.
+let usageByModel: Record<string, UsageTotals> = {};
+
+/** Fold the just-finished message's usage into the accumulator + persist. */
+function trackUsage(event: any, ctx: any): void {
+  if (!wf) return;
+  const usage = event?.message?.usage;
+  if (!usage) return;
+  const model = ctx?.model;
+  const key = model ? `${model.provider ?? "?"}/${model.id ?? model.name ?? "?"}` : "unknown";
+  if (!usageByModel[key]) usageByModel[key] = emptyUsageTotals();
+  addUsage(usageByModel[key], usage);
+  writeRunSummary(wf, buildRunSummary(wf, usageByModel));
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -412,6 +441,7 @@ async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
 
   const reqId = `${nowStamp()}-${slug(name)}`;
   wf = { reqId, name, repo, mode: "plan", createdAt: new Date().toISOString(), epicId, subtaskIds: [] };
+  usageByModel = {};   // fresh telemetry for a fresh requirement
   fs.mkdirSync(reqPath(wf, "subtasks"), { recursive: true });
   fs.mkdirSync(reqPath(wf, "results"), { recursive: true });
   saveState(wf);
@@ -488,6 +518,7 @@ function cmdStatus(ctx: ExtensionCommandContext): void {
   if (!wf) { ctx.ui.notify("无活动需求。/wf new <名字> [repo] 开始。", "info"); return; }
   let lines: string[] = [];
   let summary = "";
+  let bdFailed = false;
   try {
     if (wf.epicId) {
       const kids = bd.children(wf.repo, wf.epicId).filter((k: any) => k.issue_type === "task" || k.issue_type === "bug");
@@ -515,8 +546,30 @@ function cmdStatus(ctx: ExtensionCommandContext): void {
         });
       }
     }
-  } catch (_e) { lines = ["  (无法读取 bd)"]; }
-  ctx.ui.notify(`需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}${summary ? `\n${summary}` : ""}\n${lines.join("\n")}`, "info");
+  } catch (e) {
+    // P1 fix: bd being unreachable (Dolt issue, missing binary, corrupt db) used
+    // to make progress completely invisible. Fall back to the task ids recorded
+    // in state.json — less detail (no live status), but you still know what the
+    // split produced and can go look those ids up by hand.
+    bdFailed = true;
+    const ids = wf.subtaskIds ?? [];
+    lines = [
+      `  ⚠ 无法读取 bd:${(e as Error).message.split("\n")[0]}`,
+      `  降级显示 state.json 记录的子任务 id(无实时状态):`,
+      ...(ids.length ? ids.map((id) => `    · ${id}`) : ["    (state.json 里也没有记录的子任务 id)"]),
+      `  排查:bd -C ${wf.repo} children ${wf.epicId} --json`,
+    ];
+  }
+  // Cost/cache rollup (P1): read the persisted summary so a run's token spend
+  // and DeepSeek cache hit rate are visible, not just task status.
+  const usage = readRunSummary(wf);
+  const usageLine = usage ? `\n用量 ${formatUsageLine(usage)}` : "";
+  ctx.ui.notify(
+    `需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}` +
+    (bdFailed ? "  (bd 不可用,降级模式)" : "") +
+    (summary ? `\n${summary}` : "") + usageLine + `\n${lines.join("\n")}`,
+    bdFailed ? "warning" : "info",
+  );
 }
 
 /** /wf resume <reqId> — switch the active requirement to a previously-created
@@ -537,6 +590,7 @@ function cmdResume(ctx: ExtensionCommandContext, args: string): void {
   if (!target) { ctx.ui.notify(`找不到需求:${arg}\n/wf resume(无参)看列表。`, "error"); return; }
   if (wf && wf.mode === "build") { ctx.ui.notify(`需求 ${wf.reqId} 正在执行中,不能切换。`, "error"); return; }
   wf = target;
+  usageByModel = {};   // telemetry is per-requirement; don't mix across reqs
   setModeStatus(ctx);
   ctx.ui.notify(`已切换到需求 ${wf.reqId}(epic ${wf.epicId})\n模式 ${wf.mode}`, "info");
 }
@@ -630,7 +684,7 @@ async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
 /** Load the manager prompt (.pi/manager-prompt.md) + inject run context.
  *  The manager prompt guides the main session through the pipeline in build mode.
  *  It's NOT an agent definition — the main session IS the manager. */
-function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): string {
+function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dryRun = false): string {
   if (!wf) throw new Error("无活动需求");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -645,6 +699,10 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): s
   if (!template) throw new Error("找不到 .pi/manager-prompt.md");
   const prdFile = prdPathOverride || reqPath(wf, "prd.md");
   const epicId = epicIdOverride || wf.epicId;
+  // Inject the configured dev-fanout ceiling so `execute.maxParallel` is a
+  // live setting rather than dead config. The manager prompt refers to this
+  // value instead of a hardcoded "N".
+  const maxParallel = CONFIG.execute?.maxParallel ?? 3;
   const context = [
     ``,
     `--- 运行上下文 ---`,
@@ -653,10 +711,24 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string): s
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
     `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
+    `dev 并行上限:${maxParallel}(来自 workflow.config.json 的 execute.maxParallel;一次 subagent({tasks:[...]}) 里同时派的 dev 不要超过这个数)`,
     `------------------`,
     ``,
-    `现在开始:先读 PRD 文件,然后调 split_prd_to_tasks。`,
-    `一口气跑完整条流水线,异常(dev 反复失败/reviewer 多次 fail)才停下问用户。`,
+    ...(dryRun
+      ? [
+          `**DRY-RUN 模式(只拆分,不实现)**`,
+          `本次是预演:你只做到"拆分 + 给出计划"就停,**绝对不要派 dev、不要调 subagent、不要改任何代码**。`,
+          `步骤:`,
+          `1. 读 PRD 文件。`,
+          `2. 调 split_prd_to_tasks 把 PRD 拆成 bd task(这一步会真的创建 bd issue,方便你审阅依赖图)。`,
+          `3. 把拆分结果整理成一份人类可读的计划汇报给用户:每个 task 的标题、依赖关系、你打算怎么分配(串行/并行、并行度多少)、预计的风险点。`,
+          `4. 然后**停下来**,告诉用户"dry-run 完成,确认计划无误后跑 /execute 正式执行"。`,
+          `不要调 bd_task(claim)、不要调 subagent、不要调 run_test。`,
+        ]
+      : [
+          `现在开始:先读 PRD 文件,然后调 split_prd_to_tasks。`,
+          `一口气跑完整条流水线,异常(dev 反复失败/reviewer 多次 fail)才停下问用户。`,
+        ]),
   ].join("\n");
   return template + "\n" + context;
 }
@@ -669,8 +741,13 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (!wf.epicId) { ctx.ui.notify("缺少 bd epic id。", "error"); return; }
 
-  // Parse optional PRD path arg. Empty → use current requirement's prd.md.
-  const prdArg = args.trim().replace(/["']/g, "");
+  // Parse args: optional `--dry-run` flag + optional PRD path.
+  // dry-run (P1) = split the PRD into bd tasks and report the plan, but never
+  // dispatch dev/reviewer subagents or touch code. Lets you sanity-check the
+  // breakdown before a system that self-commits starts writing.
+  const rawArgs = args.trim().replace(/["']/g, "");
+  const dryRun = /(^|\s)--dry-run(\s|$)/.test(rawArgs);
+  const prdArg = rawArgs.replace(/(^|\s)--dry-run(\s|$)/, " ").trim();
   let prdPath = "";
   let epicIdOverride = "";
   if (prdArg) {
@@ -699,21 +776,116 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
   setModeStatus(ctx);
   applyModeTools(pi, ctx);
 
-  const dirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
-  if (dirty) {
-    const go = await ctx.ui.confirm("工作树不干净", "目标 repo 有未提交改动,建议先提交。仍要继续?");
-    if (!go) { wf.mode = "idle"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx); return; }
+  // Dirty-tree check only matters when we're about to actually write code.
+  // A dry-run never dispatches dev, so uncommitted work is harmless.
+  if (!dryRun) {
+    const dirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
+    if (dirty) {
+      const go = await ctx.ui.confirm("工作树不干净", "目标 repo 有未提交改动,建议先提交。仍要继续?");
+      if (!go) { wf.mode = "idle"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx); return; }
+    }
   }
 
   // Switch to the split/reasoning model for orchestration, then inject the
   // manager prompt as a user message — the main session LLM picks it up and
   // starts running the pipeline (split → subagent(dev) → subagent(reviewer) → ...).
   await useRole(pi, ctx, CONFIG.roles.split);
-  const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined);
-  ctx.ui.notify(`EXECUTE:主 session 进入 build 模式,开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式。`, "info");
+  const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined, dryRun);
+  ctx.ui.notify(
+    dryRun
+      ? `EXECUTE --dry-run:只拆分 + 汇报计划,不派 dev、不改代码。\n拆分结果会真的建成 bd task(方便审阅依赖图),确认无误后跑 /execute 正式执行;不满意可 /wf abort 清理。`
+      : `EXECUTE:主 session 进入 build 模式,开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式,跑歪了可 /wf abort 回滚到 baseline。`,
+    "info",
+  );
   pi.sendUserMessage(prompt);
   // cmdExecute returns here — the pipeline runs asynchronously in the main session.
   // The user can watch it unfold and intervene; /wf done ends it.
+}
+
+/** /wf abort — roll the target repo back to the baseline recorded at /execute
+ *  time and reopen every bd task under the epic (P1 fix: `wf.baseline` was
+ *  recorded but nothing ever used it, so a run that went the wrong way could
+ *  only be undone by hand).
+ *
+ *  This is destructive: it hard-resets the repo's code commits made since
+ *  baseline. Requires explicit confirmation and reports exactly what it will
+ *  discard first. `.workflow/` artifacts are preserved (they're the audit
+ *  trail — a separate commit anyway). */
+async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  if (!wf) { ctx.ui.notify("无活动需求。", "warning"); return; }
+  if (!wf.baseline) {
+    ctx.ui.notify("这个需求没有记录 baseline(可能从未 /execute 过),无法回滚。", "error");
+    return;
+  }
+  const head = gitHead(wf.repo);
+  if (head === wf.baseline) {
+    ctx.ui.notify(`HEAD 已经在 baseline (${wf.baseline.slice(0, 8)}),没有代码改动需要回滚。`, "info");
+  }
+
+  // Show exactly what would be discarded before asking.
+  const log = sh("git", ["log", "--oneline", `${wf.baseline}..HEAD`], wf.repo).stdout.trim();
+  const stat = sh("git", ["diff", "--stat", wf.baseline, "HEAD"], wf.repo).stdout.trim();
+  const dirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
+
+  const preview = [
+    `目标 repo:${wf.repo}`,
+    `baseline:${wf.baseline.slice(0, 8)}   当前 HEAD:${head?.slice(0, 8) ?? "?"}`,
+    ``,
+    log ? `将丢弃的 commit:\n${log}` : `(baseline..HEAD 之间没有 commit)`,
+    stat ? `\n改动统计:\n${stat}` : "",
+    dirty ? `\n⚠ 还有未提交改动,也会被一并丢弃:\n${dirty}` : "",
+  ].filter(Boolean).join("\n");
+
+  ctx.ui.notify(`/wf abort 预览:\n${preview}`, "warning");
+  const go = await ctx.ui.confirm(
+    "确认回滚?(不可逆)",
+    `将 git reset --hard 到 baseline ${wf.baseline.slice(0, 8)},丢弃上面列出的代码 commit 和未提交改动,并把 epic ${wf.epicId} 下的 task 全部 reopen。.workflow/ 工件会保留。确定继续?`,
+  );
+  if (!go) { ctx.ui.notify("已取消,未做任何改动。", "info"); return; }
+
+  // 1) Roll back code. Keep .workflow/ artifacts by stashing them out of the way:
+  //    reset --hard would nuke uncommitted artifact changes too, so commit them
+  //    first (they're the audit trail of what just happened).
+  commitArtifacts(wf);
+  const reset = sh("git", ["reset", "--hard", wf.baseline], wf.repo);
+  if (reset.code !== 0) {
+    ctx.ui.notify(`git reset --hard 失败:\n${reset.stderr || reset.stdout}`, "error");
+    return;
+  }
+
+  // 2) Reopen every non-closed-by-design task under the epic so the pipeline
+  //    can be re-run from a clean slate.
+  let reopened = 0;
+  let bdError = "";
+  try {
+    if (wf.epicId) {
+      const kids = bd.children(wf.repo, wf.epicId).filter((k: any) => k.issue_type === "task" || k.issue_type === "bug");
+      for (const k of kids) {
+        if (k.status === "open") continue;   // already ready
+        try {
+          bd.reopen(wf.repo, k.id);
+          bd.comment(wf.repo, k.id, `[abort] 需求回滚到 baseline ${wf.baseline!.slice(0, 8)},task 已重置为 open`);
+          reopened++;
+        } catch (_e) { /* keep going; report the count we managed */ }
+      }
+    }
+  } catch (e) { bdError = (e as Error).message.split("\n")[0]; }
+
+  // 3) Back to idle — the build lock is released, tools unlocked.
+  wf.mode = "idle";
+  saveState(wf);
+  setModeStatus(ctx);
+  applyModeTools(pi, ctx);
+
+  ctx.ui.notify(
+    `已回滚到 baseline ${wf.baseline.slice(0, 8)}。\n` +
+    `- 代码:git reset --hard 完成(HEAD 现在是 ${gitHead(wf.repo)?.slice(0, 8) ?? "?"})\n` +
+    `- bd:reopen 了 ${reopened} 个 task${bdError ? `(bd 读取有问题:${bdError})` : ""}\n` +
+    `- .workflow/ 工件已保留(回滚前先提交了一次,作为审计记录)\n` +
+    `- 模式:已切回 idle\n` +
+    `想重跑:修订 PRD 后 /execute,或先 /execute --dry-run 看计划。`,
+    "info",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -931,6 +1103,13 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     return {};
   });
 
+  // Cost/cache telemetry (P1): accumulate per-model token usage for the active
+  // requirement and persist it to results/summary.json. This restores the
+  // observability lost when the reasonix `-metrics` aggregation was removed.
+  pi.on("message_end", async (event: any, ctx: any) => {
+    try { trackUsage(event, ctx); } catch (_e) { /* never break a run over telemetry */ }
+  });
+
   pi.on("agent_end", async (event: any) => {
     try { const t = extractAssistantText(event?.messages); if (t) lastAssistantText = t; } catch (_e) { /* ignore */ }
     // In build mode, detect "did zero work" so we can warn instead of a false success.
@@ -954,9 +1133,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   // Commands (always registered — there's only one session now, no WF_ROLE split).
   pi.registerCommand("wf", {
-      description: "workflow(PRD + 执行双模式):new / prd / analyze / status / verify / execute / help",
+      description: "workflow 流水线:new / prd / analyze / status / verify / execute / resume / bug / done / idle / abort",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "done", "idle", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "done", "idle", "abort", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -977,6 +1156,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           case "bug": await cmdBug(pi, ctx, rest); break;
           case "done": cmdDone(pi, ctx); break;
           case "idle": cmdIdle(pi, ctx); break;
+          case "abort": await cmdAbort(pi, ctx); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
@@ -984,21 +1164,22 @@ export default function workflowExtension(pi: ExtensionAPI): void {
             ctx.ui.notify(`验证命令:${rest || "(清空)"}`, "info"); break;
           default:
             ctx.ui.notify([
-              "workflow 用法(PRD + 执行双模式):",
-              "/wf new <名> [repo]    新建需求(bd epic),进 PRD 模式(只读讨论)",
-              "/plan                   回 PRD 模式讨论",
               "workflow 三模式:idle(通用,自由写代码) / plan(讨论需求,只读) / build(执行流水线)",
-              "/wf new <名> [repo]    新建需求(bd epic),进 plan 模式(只读讨论)",
-              "/wf idle                切到通用模式(工具全开,自由写代码/问问题,保留 wf)",
-              "/plan                   回 plan 模式讨论",
+              "编辑器为空时按 Tab 可循环切换 idle → plan → build → idle。",
+              "",
+              "/wf new <名> [repo]     新建需求(bd epic),进 plan 模式(只读讨论)",
               "/wf resume [reqId]      切换到已有需求(无参=列列表)。新 session 自动恢复最近需求",
+              "/plan                   回 plan 模式讨论",
+              "/wf idle                切到通用模式(工具全开,自由写代码/问问题,保留 wf)",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
               "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
               "/execute [prd路径]      进 build 模式:主 session 跑流水线(拆 task→派 dev/reviewer→测试)。传 PRD 路径用该 PRD,否则用当前 prd.md",
-              "/wf status              查看 bd 子任务状态 + 进度(完成的/进行中/待处理 + 最新动作)",
+              "/execute --dry-run      只拆 task + 汇报计划,不派 dev、不改代码(先看计划再决定)",
+              "/wf status              查看 bd 子任务状态 + 进度 + 本需求 token/cache 用量(bd 不可用时降级显示 state.json 里的 task id)",
               "/wf done                结束执行,切回 idle(释放 build 锁,恢复全工具集)",
+              "/wf abort               回滚:git reset --hard 到 /execute 前的 baseline + 把 epic 下 task 全部 reopen(需确认,不可逆)",
               "/wf bug <描述>          建 bd bug(挂当前需求 epic,跳过 PRD),然后 /execute 修复",
-              "/wf verify <cmd>        设置验证命令",
+              "/wf verify <cmd>        设置验证命令(空 = 触发 P0 门:每个 task close 时会因无验证而被拒)",
             ].join("\n"), "info");
         }
       },
@@ -1010,7 +1191,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("execute", {
-    description: "进入执行模式(拆 task→派 dev/reviewer→测试)",
+    description: "进入执行模式(拆 task→派 dev/reviewer→测试);--dry-run 只拆分不实现",
     handler: async (args: string, ctx: ExtensionCommandContext) => { await cmdExecute(pi, ctx, args); },
   });
 

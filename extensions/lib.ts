@@ -133,3 +133,117 @@ export function commitArtifacts(s: WorkflowState): { committed: boolean; sha?: s
   if (c.code !== 0) return { committed: false };
   return { committed: true, sha: gitHead(s.repo) };
 }
+
+// ---------------------------------------------------------------------------
+// Cost / cache telemetry (P1: restore observability)
+//
+// The v1 pipeline aggregated `reasonix -metrics` JSON files; reasonix is gone
+// and that aggregation was removed, which left the project with no way to see
+// what a run cost — even though DeepSeek prefix-cache savings are one of its
+// headline claims. These helpers re-establish it from pi's own per-message
+// usage data (accumulated via a `message_end` hook in workflow.ts) and persist
+// it to `.workflow/<reqId>/results/summary.json`.
+// ---------------------------------------------------------------------------
+
+/** Per-model token/cost rollup. All fields are cumulative for one requirement. */
+export interface UsageTotals {
+  turns: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** Provider-reported cost when available (often 0 for self-registered providers). */
+  cost: number;
+}
+
+export interface RunSummary {
+  reqId: string;
+  epicId?: string;
+  updatedAt: string;
+  /** Rollup across every model used in this requirement. */
+  totals: UsageTotals;
+  /** Per-model breakdown, keyed by "provider/model". */
+  byModel: Record<string, UsageTotals>;
+  /** cacheRead / (cacheRead + input), 0..1, or null when no tokens seen yet. */
+  cacheHitRate: number | null;
+}
+
+export function emptyUsageTotals(): UsageTotals {
+  return { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+}
+
+/** Fold one message's usage into a totals accumulator (mutates and returns it). */
+export function addUsage(into: UsageTotals, usage: Record<string, unknown> | undefined): UsageTotals {
+  if (!usage) return into;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  into.turns += 1;
+  into.input += n(usage.input);
+  into.output += n(usage.output);
+  into.cacheRead += n(usage.cacheRead);
+  into.cacheWrite += n(usage.cacheWrite);
+  into.cost += n((usage as any).cost);
+  return into;
+}
+
+/** cacheRead / (cacheRead + input). Null when there's nothing to divide. */
+export function cacheHitRate(t: UsageTotals): number | null {
+  const denom = t.cacheRead + t.input;
+  return denom > 0 ? t.cacheRead / denom : null;
+}
+
+/** Build the serializable summary from an accumulator map. */
+export function buildRunSummary(
+  s: WorkflowState,
+  byModel: Record<string, UsageTotals>,
+): RunSummary {
+  const totals = emptyUsageTotals();
+  for (const t of Object.values(byModel)) {
+    totals.turns += t.turns;
+    totals.input += t.input;
+    totals.output += t.output;
+    totals.cacheRead += t.cacheRead;
+    totals.cacheWrite += t.cacheWrite;
+    totals.cost += t.cost;
+  }
+  return {
+    reqId: s.reqId,
+    epicId: s.epicId,
+    updatedAt: new Date().toISOString(),
+    totals,
+    byModel,
+    cacheHitRate: cacheHitRate(totals),
+  };
+}
+
+/** Persist the summary to `.workflow/<reqId>/results/summary.json`. Best effort. */
+export function writeRunSummary(s: WorkflowState, summary: RunSummary): void {
+  try {
+    const dir = reqPath(s, "results");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  } catch (_e) { /* best effort — never break a run over telemetry */ }
+}
+
+/** Read back a previously written summary, if any. */
+export function readRunSummary(s: WorkflowState): RunSummary | undefined {
+  try {
+    const p = reqPath(s, "results", "summary.json");
+    if (!fs.existsSync(p)) return undefined;
+    return JSON.parse(fs.readFileSync(p, "utf8")) as RunSummary;
+  } catch (_e) { return undefined; }
+}
+
+/** One-line human-readable rollup for /wf status and build-completion notices. */
+export function formatUsageLine(summary: RunSummary): string {
+  const t = summary.totals;
+  const rate = summary.cacheHitRate;
+  const parts = [
+    `${t.turns} turns`,
+    `in ${t.input.toLocaleString()}`,
+    `out ${t.output.toLocaleString()}`,
+    `cacheRead ${t.cacheRead.toLocaleString()}`,
+  ];
+  if (rate != null) parts.push(`hit ${(rate * 100).toFixed(1)}%`);
+  if (t.cost > 0) parts.push(`cost ${t.cost.toFixed(4)}`);
+  return parts.join(" | ");
+}
