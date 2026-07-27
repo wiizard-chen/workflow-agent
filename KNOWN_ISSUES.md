@@ -41,7 +41,7 @@
 
 - **位置**:`extensions/lib.ts` `aggregateMetrics()`——`key.includes("cost")`、`key.includes("cache") && key.includes("hit")` 这类启发式匹配。
 - **问题(历史)**:过去恰好对上 reasonix v1.11 的字段名。reasonix 是快速迭代项目(TS→Go 重写、v0.x→v1.0→v2),字段名一旦变化,这段代码不会报错,只会把 `cost`/`cacheHit` 算成 `undefined`,`summary.json` 悄悄失去意义,没有任何提示。
-- **现状(迁移后)**:reasonix 二进制早已移除,执行层先迁到 omp native subagent,再随上游迁到 pi-subagents 的 `delegate` 工具,不再产出 `reasonix -metrics` JSON。这段基于字段名猜测的 metrics 聚合因此**已过时**——要么随 dev subagent 的新 metrics 输出重写(改用 pi 的 `message_end` hook 聚合 `prompt_cache_hit_tokens`),要么直接移除。
+- **现状(迁移后)**:reasonix 二进制早已移除,执行层先迁到 omp native subagent,再随上游迁到 pi-subagents(nicobailon)的 `subagent` 工具,不再产出 `reasonix -metrics` JSON。这段基于字段名猜测的 metrics 聚合因此**已过时**——要么随 dev subagent 的新 metrics 输出重写(改用 pi 的 `message_end` hook 聚合 `prompt_cache_hit_tokens`),要么直接移除。
 
 ### 5. `review.md` 无强制力,BUILD 终点可能被无视
 
@@ -69,7 +69,7 @@
 ### 9. 测试覆盖的是"状态机逻辑正确性",不是"真实故障场景"
 
 - `test/build.test.ts` 全部用假的 pi/subagent 调用(原 `execReasonix` 桩,现为 fake subagent 测试桩),测的是我们自己 `runBuildPipeline` 的逻辑,完全没测:
-  - pi dev subagent 真实失败(网络断、限流、`delegate` 返回的 output JSON 格式异常、非零退出码)时 `delegate` 调用的实际行为
+  - pi dev subagent 真实失败(网络断、限流、`subagent` 返回的 output JSON 格式异常、非零退出码)时 `subagent` 调用的实际行为
   - glm/deepseek 长时间不响应时的真实超时表现
   - 大规模 PRD/子任务(10+ 个)下 prompt 是否会撞 token 上限
 
@@ -81,9 +81,9 @@
 ## 已确认不是缺陷、无需处理的结论(避免重复纠结)
 
 - **架构选择本身(pi 编排 + pi-subagents subagent 执行)是合理的**,已核实:
-  - omp/opencode 的 subagent 机制历史上是"内部模型/prompt 角色切换",无法承载"委托给独立外部进程"(原 reasonix 执行层)这种需求——这也是当初引入外部 reasonix 二进制的理由。现已统一:dev 执行由 pi-subagents 的 `delegate` 工具承担(`delegate(agent="dev", ...)` spawn 一个定义在 `.pi/agents/dev.md` 的 subagent),编排与执行同源。(注:omp 是 pi 的前身,这段历史保留以解释架构演化。)
+  - omp/opencode 的 subagent 机制历史上是"内部模型/prompt 角色切换",无法承载"委托给独立外部进程"(原 reasonix 执行层)这种需求——这也是当初引入外部 reasonix 二进制的理由。现已统一:dev 执行由 pi-subagents(nicobailon)的 `subagent` 工具承担(`subagent({agent:"dev", ...})` spawn 一个定义在 `.pi/agents/dev.md` 的 subagent),编排与执行同源。(注:omp 是 pi 的前身,这段历史保留以解释架构演化。)
   - pi 的 plugin hook 体系没有暴露 `before_provider_request` 级别的钩子,无法在插件层修复它的缓存命中率问题;fork 内核改的维护成本远超现有方案。
-  - DeepSeek 前缀缓存机制(原 reasonix 自带 90%+~99.82%,用户长期实测)在迁移后由 `cache.ts` 覆盖 dev subagent 层,命中率表现被保留——和编排层用什么工具无关,编排层脆弱不会污染执行层的缓存表现,两者物理隔离(`delegate` 只是 spawn 一个 subagent 等返回)。
+  - DeepSeek 前缀缓存机制(原 reasonix 自带 90%+~99.82%,用户长期实测)在迁移后由 `cache.ts` 覆盖 dev subagent 层,命中率表现被保留——和编排层用什么工具无关,编排层脆弱不会污染执行层的缓存表现,两者物理隔离(`subagent` 只是 spawn 一个 subagent 等返回)。
 - 严格串行、无并行 —— 主动设计取舍,避免多进程写冲突。
 - 失败即停、无自动重试 —— 主动设计取舍,人工介入优于自动重试可能导致的连锁错误。
 

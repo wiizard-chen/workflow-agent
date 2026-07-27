@@ -6,19 +6,23 @@
  *   plan  mode:  readonly — you + pi discuss the requirement → glm-5.2 writes prd.md
  *   build mode:  the main session runs the pipeline itself (interactive, no subprocess):
  *                reads prd.md, splits into bd tasks, delegates to dev/reviewer
- *                subagents (via pi-subagents' `delegate` tool), tests the output.
+ *                subagents (via nicobailon/pi-subagents' `subagent` tool), tests the output.
  *
  * The main session IS the manager — there's no separate manager process. The
  * manager prompt (.pi/manager-prompt.md) is injected as a user message on
  * /execute; the session LLM runs the pipeline, watched by the user.
  *
- * Dev/reviewer are pi-subagents subagents (defined in .pi/agents/*.md). The
- * manager calls `delegate(agent="dev", ...)`; dev writes code + commits + writes
- * a structured result JSON to an output file; reviewer reads git diff + writes
- * a verdict JSON. The manager reads these files to decide bd close/reopen.
+ * Dev/reviewer are pi-subagents subagents (defined in .pi/agents/*.md, discovered
+ * via the package's standard `.pi/agents/**\/*.md` convention). The manager calls
+ * `subagent({ agent: "dev", task: "...", output: "..." })`; dev writes code +
+ * commits + writes a structured result JSON to an output file; reviewer reads
+ * git diff + writes a verdict JSON. The manager reads these files to decide bd
+ * close/reopen.
  *
  * Load:  pi -e ./extensions/workflow.ts -e ./extensions/cache.ts
- *        (requires the pi-subagents package: pi install npm:pi-subagents)
+ *        (requires nicobailon/pi-subagents: pi install npm:pi-subagents — this
+ *        registers a tool named `subagent`, NOT `delegate`; earlier revisions
+ *        of this project's docs/prompts incorrectly called it `delegate`)
  */
 
 import * as fs from "node:fs";
@@ -88,6 +92,17 @@ function loadConfig(): WorkflowConfig {
 }
 
 const READONLY_TOOLS = ["read", "grep", "find", "ls"];
+
+// Tools registered by nicobailon/pi-web-access (pi install npm:pi-web-access),
+// if installed. These are plain extension tools (not MCP-prefixed like the
+// playwright bridge below), so they need an explicit name allowlist rather
+// than the prefix-matching used for MCP servers. Web access is read-only by
+// nature (search/fetch, no code mutation), so it's safe to allow in PLAN mode
+// alongside playwright-mcp — the two are complementary, not competing:
+// playwright-mcp drives a real browser for frontend debugging (screenshots,
+// DOM interaction, click-testing); pi-web-access is for PLAN-stage research
+// (search, doc/GitHub content fetch) without needing a live browser session.
+const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content", "source_check"];
 
 let CONFIG = loadConfig();
 let wf: WorkflowState | undefined;
@@ -166,7 +181,7 @@ async function cycleMode(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promis
 /** Apply the tool set for the current mode.
  *  - idle:  full toolset (pi default) — pi is a normal coding agent, workflow context retained.
  *  - plan:  readonly (read/grep/find/ls + mcp) — discuss requirements, no code mutation.
- *  - build: executor set (split/bd_task/run_test/delegate + readonly + bash) — run the pipeline.
+ *  - build: executor set (split/bd_task/run_test/subagent + readonly + bash) — run the pipeline.
  *  Called on session_start and whenever mode changes. */
 function applyModeTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   if (!wf) return;
@@ -176,11 +191,11 @@ function applyModeTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
     } else if (wf.mode === "build") {
       pi.setActiveTools([
         "split_prd_to_tasks", "bd_task", "run_test",
-        "delegate",               // pi-subagents: spawn dev/reviewer subagents
+        "subagent",                // nicobailon/pi-subagents: spawn dev/reviewer subagents
         ...READONLY_TOOLS,
         "bash",
       ]);
-      ctx.ui.notify?.(`build 模式:工具集已锁定(split/bd_task/run_test/delegate + 只读 + bash)`, "info");
+      ctx.ui.notify?.(`build 模式:工具集已锁定(split/bd_task/run_test/subagent + 只读 + bash)`, "info");
     }
     // idle: do nothing — leave the full default toolset active
   } catch (_e) { /* best effort */ }
@@ -213,10 +228,19 @@ function restoreLatestWf(ctx: ExtensionCommandContext): boolean {
 
 function lockReadonly(pi: ExtensionAPI): void {
   try {
+    // Keep the read-only built-ins, plus any MCP-bridged tools registered by the
+    // pi-mcp extension (server_toolName, e.g. playwright_browser_navigate) so
+    // PLAN-mode discussion/analyze can browse the web without gaining write
+    // access to the target repo's real files. pi-mcp registers one server per
+    // .mcp.json entry; we don't hardcode names, we detect by prefix.
     const mcpServerNames = Object.keys(readMcpServers());
     const allNames = pi.getAllTools().map((t) => t.name);
     const mcpTools = allNames.filter((n) => mcpServerNames.some((s) => n.startsWith(`${s}_`)) || n.startsWith("mcp__"));
-    pi.setActiveTools([...READONLY_TOOLS, ...mcpTools]);
+    // Also allow pi-web-access's tools if that package is installed (checked
+    // by name, not by package presence — setActiveTools silently ignores
+    // names that aren't registered, so this is a no-op when absent).
+    const webAccessTools = WEB_ACCESS_TOOLS.filter((n) => allNames.includes(n));
+    pi.setActiveTools([...READONLY_TOOLS, ...mcpTools, ...webAccessTools]);
   } catch (_e) { /* ignore */ }
 }
 
@@ -248,8 +272,10 @@ function stripFence(text: string): string {
   return (m ? m[1] : t).trim();
 }
 
-/** Strict JSON extraction (P1 #3): validate required fields, fail loudly. */
-function extractSubtasksJson(text: string): { subtasks: any[] } {
+/** Strict JSON extraction (P1 #3): validate required fields, fail loudly.
+ *  Exported for unit testing (test/workflow-logic.test.ts) — pure function,
+ *  no pi/bd dependency. */
+export function extractSubtasksJson(text: string): { subtasks: any[] } {
   const stripped = stripFence(text);
   let parsed: any;
   try {
@@ -681,7 +707,7 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
 
   // Switch to the split/reasoning model for orchestration, then inject the
   // manager prompt as a user message — the main session LLM picks it up and
-  // starts running the pipeline (split → delegate(dev) → delegate(reviewer) → ...).
+  // starts running the pipeline (split → subagent(dev) → subagent(reviewer) → ...).
   await useRole(pi, ctx, CONFIG.roles.split);
   const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined);
   ctx.ui.notify(`EXECUTE:主 session 进入 build 模式,开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式。`, "info");
@@ -753,18 +779,19 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       saveState(wf!);
       mgrHasSplit = true;   // track that the manager actually did work
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
-      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在对每个 ready 的 task:用 bd_task(action=claim) 认领,再用原生 task 工具调 dev subagent 实现,然后调 reviewer subagent review,根据 review 结果用 bd_task(close 或 reopen)。独立的 task 可并行(多次 task 调用)。` }], details: {} };
+      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在对每个 ready 的 task:用 bd_task(action=claim) 认领,再用 subagent 工具(agent="dev")调 dev subagent 实现,然后用 subagent 工具(agent="reviewer")调 reviewer subagent review,根据 review 结果用 bd_task(close 或 reopen)。独立的 task 可并行(多次 subagent 调用)。` }], details: {} };
     },
   });
 
   // Tool 2: bd_task — atomic bd lifecycle operations (claim/close/reopen/comment).
-  // The manager uses this for deterministic bd state transitions around native
-  // task() calls to dev/reviewer subagents. Replaces the former assign_dev tool
-  // which baked these into a spawn-based executor.
+  // The manager uses this for deterministic bd state transitions around
+  // subagent({ agent: "dev"|"reviewer", ... }) calls (nicobailon/pi-subagents'
+  // `subagent` tool). Replaces the former assign_dev tool which baked these
+  // into a spawn-based executor.
   pi.registerTool({
     name: "bd_task",
     label: "bd task 生命周期操作",
-    description: "对 bd issue 做确定性生命周期操作:claim(原子认领)、close(关闭,可带 reason)、reopen(放回 ready)、comment(留备注)。配合原生 task 工具使用:claim → task(dev) → review → close/reopen。",
+    description: "对 bd issue 做确定性生命周期操作:claim(原子认领,记录 baseline SHA 供 reviewer 精确 diff 定位)、close(关闭前会在代码层强制跑一次验证命令复核,不通过则自动 reopen——不要只信 dev 自报的 verifyPassed)、reopen(放回 ready)、comment(留备注)。配合 subagent 工具使用:claim → subagent(agent=dev) → review → close/reopen。",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("claim"), Type.Literal("close"), Type.Literal("reopen"), Type.Literal("comment")], { description: "操作类型" }),
       task_id: Type.String({ description: "bd issue id" }),
@@ -784,14 +811,39 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
         if (action === "claim") {
           const agent = `manager-${wf!.reqId}`;
           const ok = bd.claim(repo, taskId, agent);
-          if (ok) track("▶ 认领,开始派 dev");
+          if (ok) {
+            // Record the HEAD at claim time as this task's change-range baseline.
+            // Reviewer uses `git diff <baseline>..<commitSha>` instead of
+            // `commitSha~1` because parallel subagent() calls interleave commits
+            // across tasks — `~1` may belong to a different task entirely.
+            const baseline = gitHead(repo) ?? "unknown";
+            track(`▶ 认领,开始派 dev。baseline=${baseline}`);
+          }
           return { content: [{ type: "text", text: ok ? `✓ 已认领 ${taskId}` : `✗ 认领失败(已被占用或状态非 open):${taskId}` }], details: {} };
         }
         if (action === "close") {
+          // Code-level P0 recheck (risk #2/#4): don't trust the dev's
+          // self-reported verifyPassed alone. Re-run the requirement's actual
+          // verify command before allowing close. A missing/empty verify
+          // command is NOT treated as pass here — runVerify(allowEmptyVerify
+          // = false) fails loudly, same P0 policy as run_test's final gate.
+          const v = runVerify(CONFIG, wf!, false);
+          if (!v.ok) {
+            bd.reopen(repo, taskId);
+            track(`✗ close 被拒:代码层验证复核未通过,已自动 reopen。\n${v.output.slice(-800)}`);
+            return {
+              content: [{ type: "text", text:
+                `✗ close 被拒绝:验证命令复核未通过,已自动 reopen ${taskId}。\n` +
+                `${v.output.slice(-1200)}\n` +
+                `不要直接重试 close——先确认 subagent(dev) 指令里传的验证命令和仓库配置一致,或检查 dev 的改动是否真的让验证通过。`
+              }],
+              details: {},
+            };
+          }
           bd.close(repo, taskId, text);
-          track(`✔ 关闭${text ? `:${text.slice(0, 120)}` : ""}`);
+          track(`✔ 关闭(验证复核通过)${text ? `:${text.slice(0, 120)}` : ""}`);
           mgrTasksProcessed++;
-          return { content: [{ type: "text", text: `✓ 已关闭 ${taskId}${text ? `(${text})` : ""}` }], details: {} };
+          return { content: [{ type: "text", text: `✓ 已关闭 ${taskId}(验证复核通过)${text ? `(${text})` : ""}` }], details: {} };
         }
         if (action === "reopen") {
           bd.reopen(repo, taskId);
@@ -811,15 +863,16 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
   });
 
   // Tool 3: run_test — write cumulative diff + run the verify gate.
-  // NOTE: per-task review is done by the manager calling delegate(agent="reviewer")
-  // during the dispatch loop. run_test is the FINAL whole-requirement gate:
-  // it writes the cumulative diff (for the manager to feed a final reviewer
-  // subagent if desired) and runs the P0 verify command. Bug creation from
-  // review findings is now the manager's job (bd.create via bash), not baked in.
+  // NOTE: per-task review is done by the manager calling
+  // subagent({ agent: "reviewer", ... }) during the dispatch loop. run_test is
+  // the FINAL whole-requirement gate: it writes the cumulative diff (for the
+  // manager to feed a final reviewer subagent if desired) and runs the P0
+  // verify command. Bug creation from review findings is now the manager's
+  // job (bd.create via bash), not baked in.
   pi.registerTool({
     name: "run_test",
     label: "测试产出",
-    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 delegate(agent='reviewer') 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
+    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 subagent({agent:'reviewer'}) 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
     parameters: Type.Object({}),
     async execute() {
       // Write cumulative diff.
@@ -836,7 +889,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       return {
         content: [{ type: "text", text:
           `${verifyPart}\n累积 diff 已写入:${diffPath}\n` +
-          `下一步建议:调 delegate(agent="reviewer", task="审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>")。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→delegate(dev)→delegate(reviewer) 循环修复。`
+          `下一步建议:调 subagent({agent:"reviewer", task:"审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>"})。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→subagent(dev)→subagent(reviewer) 循环修复。`
         }],
         details: {},
       };

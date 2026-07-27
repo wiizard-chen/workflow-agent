@@ -14,7 +14,7 @@ description: 跨 agent session 交接工作状态,把进度、决策、待办固
 - **经理(主 session)→ dev**:经理把 task 分配给 dev 时,通过 bd issue 的 notes/规格文件传递上下文。
 - **dev → 经理**:dev 完成/失败后,通过 output JSON 文件 + bd issue 的状态 + comment 回报。
 - **build 结束前**:`/wf done` 退出 build 模式前,把整体进度汇总写进 epic 的 comment。
-- **dev 跨 task 复用**:同一 dev 的连续 task 不再有持久 session——每次 `delegate` 都是 fresh spawn,上下文复用靠 bd comment(显式交接)和 cache.ts 前缀缓存(DeepSeek 系统提示日期冻结,保持前缀缓存命中)。
+- **dev 跨 task 复用**:同一 dev 的连续 task 不再有持久 session——每次 `subagent` 都是 fresh spawn,上下文复用靠 bd comment(显式交接)和 cache.ts 前缀缓存(DeepSeek 系统提示日期冻结,保持前缀缓存命中)。
 
 ## session 模型(理解交接的前提)
 
@@ -23,27 +23,27 @@ pi-workflow 有这些 session:
 | session | 宿主 | 生命周期 | 跨调用复用 |
 |---|---|---|---|
 | 主 pi session | pi | 整个交互(idle / plan / build 三模式) | 天然复用(就是当前对话) |
-| dev pi subagent | pi-subagents `delegate` | 单个 task 的执行 | **不复用**(每次 delegate fresh spawn,上下文靠 bd + cache.ts) |
+| dev pi subagent | pi-subagents `subagent` | 单个 task 的执行 | **不复用**(每次 subagent 调用都是 fresh spawn,上下文靠 bd + cache.ts) |
 
 **关键**:
 - **经理就是主 session 自己**(build 模式下)。manager-prompt.md 在 `/execute` 时注入主 session,主 session 直接跑流水线,用户可观察。没有独立经理进程,所以"经理进程每次新启动"这个问题不存在了——但主 session 仍是单一职责,要做的事还是必须落 bd,不能留在内存里。
-- dev 不再有持久 session 路径(原 `~/.reasonix/projects/<escaped-worktree-path>/sessions/` 机制早已废弃)。每个 task 是 `delegate(agent="dev")` fresh spawn 的 pi subagent(定义在 `.pi/agents/dev.md`,在专属 worktree 里跑),无 session 复用。跨 task 上下文复用靠:**(a) bd comment(显式交接进度/坑/决策)** + **(b) cache.ts 前缀缓存(冻结 DeepSeek 系统提示里的日期,保持 prompt 前缀稳定,命中 DeepSeek prefix cache)**。
+- dev 不再有持久 session 路径(原 `~/.reasonix/projects/<escaped-worktree-path>/sessions/` 机制早已废弃)。每个 task 是 `subagent({agent:"dev"})` fresh spawn 的 pi subagent(定义在 `.pi/agents/dev.md`,在专属 worktree 里跑),无 session 复用。跨 task 上下文复用靠:**(a) bd comment(显式交接进度/坑/决策)** + **(b) cache.ts 前缀缓存(冻结 DeepSeek 系统提示里的日期,保持 prompt 前缀稳定,命中 DeepSeek prefix cache)**。
 
 ## 交接协议
 
 ### 经理(主 session)→ dev(分配 task)
 
-经理先调 `bd_task(action="claim", taskId)`,再调 `delegate(agent="dev", task="...")`。bd_task 工具内部:
+经理先调 `bd_task(action="claim", taskId)`,再调 `subagent({agent:"dev", task="..."})`。bd_task 工具内部:
 1. `bd show <taskId>` 读规格文件路径(从 notes)。
 2. `bd update <taskId> --claim --assignee dev<id>-<reqId>`(状态 → in_progress)。
 
-然后 `delegate(agent="dev", ...)` spawn 一个 pi dev subagent(定义在 `.pi/agents/dev.md`),把"实现这个子任务,规格在 <文件>"作为指令传入,在专属 worktree 里执行。
+然后 `subagent({agent:"dev", ...})` spawn 一个 pi dev subagent(定义在 `.pi/agents/dev.md`),把"实现这个子任务,规格在 <文件>"作为指令传入,在专属 worktree 里执行。
 
 **交接信息载体**:bd issue 的 `notes` 字段(指向规格文件)+ 规格文件内容。dev 读这两样就够了。
 
 ### dev → 经理(完成/失败回报)
 
-dev 跑完后,把结构化结果写进一个 output JSON 文件(路径由经理在 delegate 时指定,落在 `.workflow/<reqId>/results/`),经理读这个文件决定下一步:
+dev 跑完后,把结构化结果写进一个 output JSON 文件(路径由经理在调 subagent 时指定,落在 `.workflow/<reqId>/results/`),经理读这个文件决定下一步:
 - **成功**:`bd close <taskId>` + commit + merge。dev 的产出在 git commit 里,经理看 git log。
 - **失败**:`bd reopen <taskId>` + `bd comment <taskId> "dev<id> dev subagent 失败(<一句话原因>)"`。task 回到队列,经理可重试或换 dev。
 
@@ -61,7 +61,7 @@ bd comment <epicId> "执行完成汇总:处理 N 个 task(dev1: x 个, dev2: y �
 
 ### dev 跨 task 上下文复用(cache.ts + bd,显式交接)
 
-同一 dev 的连续 task **不再复用 session**(原 `--continue` 机制已废弃)。每次 `delegate(agent="dev")` 都是 fresh spawn,什么都不记得。上下文复用靠两条机制,都需要显式落 bd:
+同一 dev 的连续 task **不再复用 session**(原 `--continue` 机制已废弃)。每次 `subagent({agent:"dev"})` 都是 fresh spawn,什么都不记得。上下文复用靠两条机制,都需要显式落 bd:
 
 - **cache.ts 前缀缓存**(自动):DeepSeek 系统提示里的日期被冻结,prompt 前缀保持稳定 → DeepSeek prefix cache 命中,跨 task 的系统提示 / dev.md / 项目结构说明等"公共前缀"几乎免费复用。
 - **bd comment 跨 task 上下文**(显式):dev 把"项目理解、之前踩的坑、关键决策"写进 bd comment。下一个 task 的 dev(即使不是同一个)能从 bd 读到。dev 的 subagent 记得:
@@ -69,7 +69,7 @@ bd comment <epicId> "执行完成汇总:处理 N 个 task(dev1: x 个, dev2: y �
   - 代码库结构(从前缀缓存命中的公共系统提示读)。
   - 之前踩过的坑(从 bd comment 读)。
 
-**上下文复用的核心收益**(现在更显式):经理把有依赖链的一串 task(A→B→C)依次 delegate,dev 在每个 task 开始时从 bd + cache 读到 A 建立的上下文,直接做 B、C,不用重新读项目——前提是 A 的 dev 把关键发现写进了 bd comment。
+**上下文复用的核心收益**(现在更显式):经理把有依赖链的一串 task(A→B→C)依次调 subagent(dev),dev 在每个 task 开始时从 bd + cache 读到 A 建立的上下文,直接做 B、C,不用重新读项目——前提是 A 的 dev 把关键发现写进了 bd comment。
 
 ## 重要约束
 

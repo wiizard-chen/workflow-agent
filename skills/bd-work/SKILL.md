@@ -1,25 +1,25 @@
 ---
 name: bd-work
-description: 实现单个 beads task 的工作循环:认领 → 读规格 → 实现 → 验证 → 关闭。用于 pi dev subagent 执行 delegate(agent="dev") 分配的 task、实现子任务、认领工作、关闭完成的 task、报告阻碍。核心是 dev 只做当前 task、不越界、严守验证门、阻碍建 bug。触发词:实现 task、认领、delegate dev、dev 工作、close、done、实现子任务、认领工作、遇到阻碍、blocker。
+description: 实现单个 beads task 的工作循环:认领 → 读规格 → 实现 → 验证 → 关闭。用于 pi dev subagent 执行 subagent({agent:"dev"}) 分配的 task、实现子任务、认领工作、关闭完成的 task、报告阻碍。核心是 dev 只做当前 task、不越界、严守验证门、阻碍建 bug。触发词:实现 task、认领、subagent dev、dev 工作、close、done、实现子任务、认领工作、遇到阻碍、blocker。
 ---
 
 # bd-work · 认领 → 实现 → 关闭(单个 task)
 
-实现**一个** beads task 的标准工作循环。这是 pi dev subagent 在执行阶段最频繁执行的动作——经理(主 session)每调一次 `delegate(agent="dev", ...)`,dev 就跑一遍这个循环。
+实现**一个** beads task 的标准工作循环。这是 pi dev subagent 在执行阶段最频繁执行的动作——经理(主 session)每调一次 `subagent({agent:"dev", ...})`,dev 就跑一遍这个循环。
 
-> **角色定位**:这个 skill 主要给 **pi dev subagent** 用(执行层,deepseek-flash)。dev 是单一职责执行者:**只实现当前分配的 task,不拆分、不测试、不分配、不越界**。经理(主 session,用 `bd_task` + `delegate` 工具)负责 claim 和 bd 状态管理,但 dev 要理解整个循环以便正确报告。
+> **角色定位**:这个 skill 主要给 **pi dev subagent** 用(执行层,deepseek-flash)。dev 是单一职责执行者:**只实现当前分配的 task,不拆分、不测试、不分配、不越界**。经理(主 session,用 `bd_task` + `subagent` 工具)负责 claim 和 bd 状态管理,但 dev 要理解整个循环以便正确报告。
 
 ## 何时使用
 
-- 经理(主 session)调 `delegate(agent="dev")` 把一个 task 分配给你时。
-- 你是一个 pi dev subagent,收到"实现这个子任务"的指令时(每次 `delegate` 都是 fresh spawn,定义在 `.pi/agents/dev.md`,在专属 worktree 里跑;上下文由 bd comment + cache.ts 前缀缓存携带,无 session 复用)。
+- 经理(主 session)调 `subagent({agent:"dev"})` 把一个 task 分配给你时。
+- 你是一个 pi dev subagent,收到"实现这个子任务"的指令时(每次 `subagent` 都是 fresh spawn,定义在 `.pi/agents/dev.md`,在专属 worktree 里跑;上下文由 bd comment + cache.ts 前缀缓存携带,无 session 复用)。
 - 实现过程中发现需要建阻碍 bug 时。
 
 ## dev 的工作循环
 
 ### 1. 认领(由 bd_task 完成,dev 无需手动 claim)
 
-`bd_task` 工具(经理在 delegate 前调)内部已经做了原子认领:
+`bd_task` 工具(经理在调 subagent 前调)内部已经做了原子认领:
 
 ```bash
 bd update <taskId> --claim --assignee dev<id>-<reqId>

@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "setup": "bash scripts/setup.sh",
+    "test": "node --experimental-strip-types test/workflow-logic.test.ts",
     "skills:install": "node scripts/install-skills.mjs",
     "skills:uninstall": "node scripts/uninstall-skills.mjs",
     "skills:list": "node scripts/install-skills.mjs --list"

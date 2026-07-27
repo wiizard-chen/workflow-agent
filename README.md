@@ -1,6 +1,6 @@
 # pi-workflow
 
-一个 [pi coding-agent](https://pi.dev) 扩展,把"需求 → PRD → 拆 task → 分配 dev → 测试"做成 **idle / plan / build 三模式**流水线。plan 模式(只读)你和 pi 讨论需求;build 模式下**主 session 自己就是技术经理**(不再 spawn 独立经理进程)——它把 PRD 拆成 task、用 pi-subagents 的 `delegate` 工具分配给 **pi dev subagent**(定义在 `.pi/agents/dev.md`,在专属 worktree 里跑)、最后让 glm-5.2 测试,失败自动建 bd bug。idle 模式 pi 退回成普通编码 agent(完整工具集)。
+一个 [pi coding-agent](https://pi.dev) 扩展,把"需求 → PRD → 拆 task → 分配 dev → 测试"做成 **idle / plan / build 三模式**流水线。plan 模式(只读)你和 pi 讨论需求;build 模式下**主 session 自己就是技术经理**(不再 spawn 独立经理进程)——它把 PRD 拆成 task、用 [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) 的 `subagent` 工具分配给 **pi dev subagent**(定义在 `.pi/agents/dev.md`,在专属 worktree 里跑)、最后让 glm-5.2 测试,失败自动建 bd bug。idle 模式 pi 退回成普通编码 agent(完整工具集)。
 
 > 历史注记:本项目早期基于 omp(opencode fork)构建,后随上游迁移到 pi(`@earendil-works/pi-coding-agent`)。文档里如出现 omp 字样均指这段历史。
 
@@ -16,16 +16,17 @@ build 模式(/execute):
   主 session 本身就是经理(无独立进程,manager-prompt.md 注入主 session 的 system prompt):
     1. 读 prd.md
     2. split_prd_to_tasks  → bd create tasks + dep add(拆分原则:尽量独立)
-    3. bd_task(claim) → delegate(agent="dev", ...) → delegate(agent="reviewer", ...)
-       pi-subagents 的 delegate 工具每次 spawn 一个 fresh dev subagent(定义在 .pi/agents/dev.md,
-       在专属 worktree 里跑);独立 task 并行 delegate,dev 内部闭环验证(write→verify→fix 直到通过),
+    3. bd_task(claim) → subagent({agent:"dev",...}) → subagent({agent:"reviewer",...})
+       pi-subagents 的 subagent 工具每次 spawn 一个 fresh dev subagent(定义在 .pi/agents/dev.md,
+       在专属 worktree 里跑);独立 task 并行调 subagent(传 worktree:true 隔离改动),
+       dev 内部闭环验证(write→verify→fix 直到通过),
        把结构化结果写进一个 output JSON 文件,经理读这个文件决定 close/reopen
     4. run_test → glm-5.2 测试产出,blocker 创建为 bd bug
-    5. bug 再走 claim→delegate(dev)→delegate(reviewer) 循环修复 → 重测,直到无 bug
+    5. bug 再走 claim→subagent(dev)→subagent(reviewer) 循环修复 → 重测,直到无 bug
   /wf done → 回到 idle 模式(保留 wf 上下文)
 ```
 
-**核心设计**:调度是经理 LLM 的判断(不是代码循环);每个 dev 是一个 pi-subagents subagent,持有固定 worktree。跨 task 的上下文不靠 session 续跑(原 reasonix 的 `--continue` 机制早在上一轮迁移就已移除),而是靠:(a) `cache.ts` 把 system-prompt 里的 date 冻结成常量,让 DeepSeek 服务端前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。独立 task 并行 delegate,取代旧的"依赖链给同一 dev 走 --continue"路由。
+**核心设计**:调度是经理 LLM 的判断(不是代码循环);每个 dev 是一个 pi-subagents subagent,持有固定 worktree。跨 task 的上下文不靠 session 续跑(原 reasonix 的 `--continue` 机制早在上一轮迁移就已移除),而是靠:(a) `cache.ts` 把 system-prompt 里的 date 冻结成常量,让 DeepSeek 服务端前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。独立 task 并行调 `subagent`(可传 `worktree: true` 隔离改动),取代旧的"依赖链给同一 dev 走 --continue"路由。
 
 ## 模型分工
 
@@ -34,14 +35,14 @@ build 模式(/execute):
 | 讨论需求 | 主 pi | deepseek-pro (`deepseek-v4-pro`) |
 | 写 PRD | 主 pi | glm-5.2 |
 | 技术经理(拆 task/分配/测试) | **主 session(build 模式)** | deepseek-pro |
-| 实现每个 task | **pi dev subagent**(由 `delegate` spawn) | deepseek-flash |
+| 实现每个 task | **pi dev subagent**(由 `subagent` 工具 spawn) | deepseek-flash |
 | 测试产出 | 主 session 调 glm-5.2 | glm-5.2 |
 
-build 模式时 manager-prompt.md 注入主 session 的 system prompt,主 session 据此使用 `split_prd_to_tasks` / `bd_task` / `run_test` + pi-subagents 的 `delegate` 工具。provider 由扩展注册(用 `$DEEPSEEK_API_KEY`、`$GLM5_2_API_KEY`)。
+build 模式时 manager-prompt.md 注入主 session 的 system prompt,主 session 据此使用 `split_prd_to_tasks` / `bd_task` / `run_test` + pi-subagents 的 `subagent` 工具。provider 由扩展注册(用 `$DEEPSEEK_API_KEY`、`$GLM5_2_API_KEY`)。
 
 ## 前置
 
-- `pi`(v0.81+,`@earendil-works/pi-coding-agent`)、`pi-subagents` 插件(`pi install npm:pi-subagents`,提供 `delegate` 工具)、`bd`/`beads`(v1.1.0+)、`git` 已安装。(dev/reviewer 执行层由 pi-subagents 的 subagent 承担,无需额外二进制。)
+- `pi`(v0.81+,`@earendil-works/pi-coding-agent`)、`pi-subagents` 插件(`pi install npm:pi-subagents`,来自 [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents),提供 `subagent` 工具)、`bd`/`beads`(v1.1.0+)、`git` 已安装。(dev/reviewer 执行层由 pi-subagents 的 subagent 承担,无需额外二进制。)
   ```bash
   brew install beads          # 安装 bd v1.1.0
   ```
@@ -106,7 +107,7 @@ WF_AGENT_HOME=/path wfpi      # 自定义 workflow-agent 路径
 2. 自由对话讨论需求。
 3. `/wf prd` — 生成 `prd.md`(glm-5.2,基于讨论;缺仓库简报会先自动分析)。
 4. 审阅 `.workflow/<reqId>/prd.md`。不满意继续讨论后再 `/wf prd`。
-5. `/execute` — 进入 **build 模式**:**主 session 自己就是经理**(无独立进程)。`/execute` 通过 `sendUserMessage` 把 manager-prompt.md 注入主 session,主 session 读 PRD → 拆 task 进 bd → `delegate(dev)` / `delegate(reviewer)` → 测试。失败自动建 bd bug,主 session 继续分配修复,直到全过。整个过程用户可直接观察并插话。
+5. `/execute` — 进入 **build 模式**:**主 session 自己就是经理**(无独立进程)。`/execute` 通过 `sendUserMessage` 把 manager-prompt.md 注入主 session,主 session 读 PRD → 拆 task 进 bd → `subagent(dev)` / `subagent(reviewer)` → 测试。失败自动建 bd bug,主 session 继续分配修复,直到全过。整个过程用户可直接观察并插话。
 6. `/wf done` — 结束 build,回到 **idle 模式**(保留 wf 上下文)。`/wf idle` 可随时切到通用编码模式(完整工具集)。
 7. `/wf status` 查看 bd 子任务状态;需修订 `/plan` 回到讨论。
 
@@ -176,9 +177,9 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 
 ## dev 池与并行执行(`maxParallel`)
 
-`workflow.config.json` 的 `execute.maxParallel` 是**经理可用的 dev 并行度**(默认 3)。每个 dev 是一次 `delegate(agent="dev")` spawn 的 pi-subagents subagent,持有固定 worktree:
+`workflow.config.json` 的 `execute.maxParallel` 是**经理可用的 dev 并行度**(默认 3)。每个 dev 是一次 `subagent({agent:"dev"})` spawn 的 pi-subagents subagent,持有固定 worktree:
 
-- 独立的 task 并行 delegate 给不同 dev(取代旧的"依赖链给同一 dev 走 `--continue`"路由)。
+- 独立的 task 并行调 `subagent`(可传 `worktree: true` 隔离改动),取代旧的"依赖链给同一 dev 走 `--continue`"路由。
 - 跨 task 上下文不再靠 session 续跑,而是靠:(a) `cache.ts` 冻结 system-prompt 的 date 让 DeepSeek 前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。
 - dev 在自己的 subagent 内部做闭环验证(write → verify → fix 直到通过),把结构化结果写进 output JSON 文件,经理读这个文件决定下一步。
 - 经理(主 session)是驻留 LLM,默认做 stage 级委派(dynamic granularity),异常时细粒度介入。
@@ -213,11 +214,14 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 
 子任务 DAG(依赖、状态、归属)存在 bd 里,是权威;`.workflow/` 只放文本产物。代码改动走 git,每子任务一个 code commit,`.workflow/` 工件最后单独一个 commit。
 
-## 浏览器访问(Playwright MCP)
+## PLAN 阶段联网(Playwright MCP + pi-web-access)
 
-PLAN 阶段有时需要读网页。这层挂在 pi 编排层,通过第三方扩展 [`scaryrawr/pi-mcp`](https://github.com/scaryrawr/pi-mcp) 桥接标准 MCP server。已接好 [`microsoft/playwright-mcp`](https://github.com/microsoft/playwright-mcp)(`.mcp.json`),PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*` 工具。
+PLAN 阶段的联网需求分两类,各用不同工具,职责不重叠:
 
-首次使用:`pi install git:github.com/scaryrawr/pi-mcp -l`。
+- **前端调试(真实浏览器)**:用 [`scaryrawr/pi-mcp`](https://github.com/scaryrawr/pi-mcp) 桥接标准 MCP server,已接好 [`microsoft/playwright-mcp`](https://github.com/microsoft/playwright-mcp)(`.mcp.json`)。跑起来的是真实浏览器实例,适合截图、DOM 交互、点击测试这类必须有活浏览器上下文的调试场景。首次使用:`pi install git:github.com/scaryrawr/pi-mcp -l`。
+- **查资料(搜索/抓取内容)**:用 [`nicobailon/pi-web-access`](https://github.com/nicobailon/pi-web-access)(`pi install npm:pi-web-access`)。提供 `web_search`/`fetch_content`/`source_check` 等工具,零配置(Exa MCP 兜底),用于搜索、抓取网页/GitHub 仓库/文档内容——不需要真实浏览器,PLAN 阶段查资料时更轻量。
+
+PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*` 工具(按 MCP server 名前缀检测),以及 `pi-web-access` 注册的工具(`web_search`/`fetch_content`/`get_search_content`/`source_check`,按工具名显式检测,未安装时是无害的 no-op)。两者可以同时装,分别覆盖"调试网页"和"查资料"两种场景。
 
 ## 配置
 
@@ -225,7 +229,7 @@ PLAN 阶段有时需要读网页。这层挂在 pi 编排层,通过第三方扩�
 
 ## 缓存说明
 
-- 每个子任务由一个独立的 pi dev subagent run 承担(`delegate(agent="dev")`),命中 DeepSeek **服务端前缀热缓存**(成本大头)。
+- 每个子任务由一个独立的 pi dev subagent run 承担(`subagent({agent:"dev"})`),命中 DeepSeek **服务端前缀热缓存**(成本大头)。
 - **worktree 并行不击穿缓存**(实测):worktree 的 cwd 差异不注入 pi system prompt,前缀缓存跨 worktree 共享。详见 `DECISION_LOG.md`。
 - pi 侧多模型切换(pro/glm)天然会各走各的缓存桶,属于预期,量小无碍。
 
@@ -233,7 +237,7 @@ PLAN 阶段有时需要读网页。这层挂在 pi 编排层,通过第三方扩�
 
 pi 的 system prompt 里有动态 date 字段(`Today is YYYY-MM-DD,`),每天午夜变一次,击穿 DeepSeek 前缀缓存。本扩展用 `before_agent_start` hook,**只对 DeepSeek 模型**把 date 冻结成固定常量,让讨论/拆分/PRD/review 阶段的前缀字节稳定:
 
-- **dev subagent 执行层**:cache.ts 同样覆盖——每次 `delegate(agent="dev")` spawn 的 pi dev subagent 启动时 system-prompt 的 date 被冻结成同一常量,前缀缓存跨 task / 跨 dev 保持热度(取代了原 reasonix 执行层自带的字节级缓存优化,~99.8% 命中率被保留)。
+- **dev subagent 执行层**:cache.ts 同样覆盖——每次 `subagent({agent:"dev"})` spawn 的 pi dev subagent 启动时 system-prompt 的 date 被冻结成同一常量,前缀缓存跨 task / 跨 dev 保持热度(取代了原 reasonix 执行层自带的字节级缓存优化,~99.8% 命中率被保留)。
 - **pi 讨论层**:`cache.ts` 冻结 date → 前缀跨 turn/midnight 稳定 → 缓存命中。
 - **telemetry**:`message_end` hook 累计 DeepSeek 的 `prompt_cache_hit_tokens`,每 5 turn 通知一次命中率。
 - 只对 DeepSeek 生效(glm/zai 不用前缀缓存,冻结无益)。
@@ -263,6 +267,6 @@ node --experimental-strip-types test/build.test.ts
 
 ## 备注
 
-- 每个 pi dev subagent 是独立的一次 `delegate(agent="dev")` run;若网络受限访问 z.ai,给 pi 配好代理可减少 `Connection error` 重试。
+- 每个 pi dev subagent 是独立的一次 `subagent({agent:"dev"})` run;若网络受限访问 z.ai,给 pi 配好代理可减少 `Connection error` 重试。
 - glm-5.2 endpoint / 模型 id 默认 `https://api.z.ai/api/coding/paas/v4` + `glm-5.2`;版本不同在 `workflow.config.json` 调整。
 - bd 1.1.0 真实命令与官方文档有差异(用 `assign`/`comment`/`config.yaml`,无 `pin`/`hook`);以 `extensions/bd.ts` 封装为准。
