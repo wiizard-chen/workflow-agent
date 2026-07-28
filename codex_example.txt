@@ -1,0 +1,15 @@
+model_provider = "OpenAI"
+model = "gpt-5.6-sol"
+review_model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+network_access = "enabled"
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "http://38.207.191.44:8080"
+wire_api = "responses"
+requires_openai_auth = true
+
+[features]
+goals = true

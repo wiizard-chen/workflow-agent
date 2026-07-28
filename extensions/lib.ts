@@ -94,6 +94,38 @@ export function gitHead(dir: string): string | undefined {
   return r.code === 0 ? r.stdout.trim() : undefined;
 }
 
+export interface CommitRangeValidation {
+  ok: boolean;
+  reason?: "missing-sha" | "no-new-commit" | "baseline-not-ancestor" | "commit-not-integrated" | "empty-diff" | "git-error";
+}
+
+/** Validate that a task produced a real commit range and it is integrated. */
+export function validateIntegratedCommitRange(
+  dir: string,
+  baseline: string,
+  commit: string,
+): CommitRangeValidation {
+  const base = baseline.trim();
+  const sha = commit.trim();
+  if (!base || !sha) return { ok: false, reason: "missing-sha" };
+  if (base === sha) return { ok: false, reason: "no-new-commit" };
+  if (sh("git", ["merge-base", "--is-ancestor", base, sha], dir).code !== 0) {
+    return { ok: false, reason: "baseline-not-ancestor" };
+  }
+  if (!isCommitIntegrated(dir, sha)) return { ok: false, reason: "commit-not-integrated" };
+  const diff = sh("git", ["diff", "--quiet", base, sha], dir).code;
+  if (diff === 0) return { ok: false, reason: "empty-diff" };
+  if (diff !== 1) return { ok: false, reason: "git-error" };
+  return { ok: true };
+}
+
+/** True only when `commit` is already reachable from the target repo's HEAD. */
+export function isCommitIntegrated(dir: string, commit: string): boolean {
+  const sha = commit.trim();
+  if (!sha) return false;
+  return sh("git", ["merge-base", "--is-ancestor", sha, "HEAD"], dir).code === 0;
+}
+
 // ---------------------------------------------------------------------------
 // dev subagent invocation
 // ---------------------------------------------------------------------------

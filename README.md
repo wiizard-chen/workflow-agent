@@ -18,7 +18,7 @@ build 模式(/execute):
     2. split_prd_to_tasks  → bd create tasks + dep add(拆分原则:尽量独立)
     3. bd_task(claim) → subagent({agent:"dev",...}) → subagent({agent:"reviewer",...})
        pi-subagents 的 subagent 工具每次 spawn 一个 fresh dev subagent(定义在 .pi/agents/dev.md,
-       在专属 worktree 里跑);独立 task 并行调 subagent(传 worktree:true 隔离改动),
+       当前采用单 writer 串行模式,直接在目标仓库实现并 commit;禁用 worktree:true 并行 writer),
        dev 内部闭环验证(write→verify→fix 直到通过),
        把结构化结果写进一个 output JSON 文件,经理读这个文件决定 close/reopen
     4. run_test → glm-5.2 测试产出,blocker 创建为 bd bug
@@ -26,7 +26,7 @@ build 模式(/execute):
   /wf done → 回到 idle 模式(保留 wf 上下文)
 ```
 
-**核心设计**:调度是经理 LLM 的判断(不是代码循环);每个 dev 是一个 pi-subagents subagent,持有固定 worktree。跨 task 的上下文不靠 session 续跑(原 reasonix 的 `--continue` 机制早在上一轮迁移就已移除),而是靠:(a) `cache.ts` 把 system-prompt 里的 date 冻结成常量,让 DeepSeek 服务端前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。独立 task 并行调 `subagent`(可传 `worktree: true` 隔离改动),取代旧的"依赖链给同一 dev 走 --continue"路由。
+**核心设计**:调度是经理 LLM 的判断(不是代码循环);每个 task 由一个 fresh pi-subagents dev subagent 串行实现。跨 task 的上下文不靠 session 续跑,而是靠:(a) `cache.ts` 冻结 system-prompt 的 date,让 DeepSeek 服务端前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。当前禁止 `worktree:true` 并行 writer:pi-subagents 只返回 patch/handoff,不会自动合并目标仓库;`bd_task(close)` 会拒绝任何尚未进入目标仓库 HEAD 的 dev commit。
 
 ## 模型分工
 
@@ -168,14 +168,15 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 
 安装和卸载共享同一份所有权清单(skills-lib.mjs),保证装/卸完全对称。symlink 模式下,改了仓库里的 skill 全局立刻生效,不用重装——适合开发自己的包。脚本只处理本项目拥有的 6 个 skill(`bd-*` 四件套 + `plan-interrogation` + `beads`),对目录里其他 skill 只读保护。
 
-## dev 池与并行执行(`maxParallel`)
+## dev writer 与安全串行(`maxParallel`)
 
-`workflow.config.json` 的 `execute.maxParallel` 是**经理一次并行派 dev 的建议上限**(代码内置默认 3;仓库自带的配置文件设成了 20)。扩展会把这个数字注入 manager prompt 的运行上下文,经理据此决定一次 `subagent({tasks:[...]})` 里同时派几个 dev。每个 dev 是一次 pi-subagents subagent spawn:
+`workflow.config.json` 的 `execute.maxParallel` 当前固定为 **1**。每个 dev 是一次 fresh pi-subagents subagent spawn,直接在目标仓库串行实现、验证并 commit:
 
-- 独立的 task 并行调 `subagent`(传 `worktree: true` 让每个并行子任务在独立 git worktree 里跑,commit 不交错),取代旧的"依赖链给同一 dev 走 `--continue`"路由。
-- 跨 task 上下文不再靠 session 续跑,而是靠:(a) `cache.ts` 冻结 system-prompt 的 date 让 DeepSeek 前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。
-- dev 在自己的 subagent 内部做闭环验证(write → verify → fix 直到通过),把结构化结果写进 output JSON 文件,经理读这个文件决定下一步。
-- 经理(主 session)是驻留 LLM,默认做 stage 级委派(dynamic granularity),异常时细粒度介入。
+- 当前禁止 `subagent({tasks:[...], worktree:true})` 并行 writer。pi-subagents 的 worktree 模式只生成 patch/handoff manifest,不会自动把 child commit 合并回目标仓库。
+- `bd_task(claim)` 会保存 `<taskId>.claim.json` baseline;`bd_task(close)` 校验 dev 的 `commitSha` 必须形成 claim 后的非空 commit range,且已进入目标仓库 HEAD。未集成或复用旧 commit 都会自动 reopen,避免“task 已关闭但代码没落地”。
+- 跨 task 上下文靠:(a) `cache.ts` 冻结 system-prompt date 保持 DeepSeek 前缀缓存;(b) bd comments 显式携带状态。
+- dev 在 subagent 内部闭环验证(write → verify → fix),再 commit 并返回结构化结果;经理随后 reviewer + close/reopen。
+- 后续只有在实现确定性的 handoff patch 集成工具后,才应重新开放并行 writer。
 
 **缓存安全性已实测验证**(详见 `DECISION_LOG.md`):worktree 路径不破坏 DeepSeek 前缀缓存。
 
@@ -230,7 +231,7 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 | `roles.{discuss,prd,split,review}` | 各阶段用哪个 provider + 模型 id |
 | `build.verifyCommand` | 默认验证命令(`/wf verify <cmd>` 可按需求覆盖) |
 | `build.commitPrefix` | 子任务 commit 消息前缀 |
-| `execute.maxParallel` | 经理一次并行派 dev 的建议上限(注入 manager prompt;代码内置默认 3) |
+| `execute.maxParallel` | 当前安全上限固定为 1;确定性 worktree handoff 集成完成前禁止并行 writer |
 
 **dev / reviewer 的模型不在这里配**——它们是 pi-subagents 的 subagent,模型写在 `.pi/agents/dev.md` / `.pi/agents/reviewer.md` 的 frontmatter(`model:` 字段)里。(历史字段 `reasonix: {bin, model, maxSteps, timeoutMs}` 和后来的 `dev: {model, timeoutMs}` 都已移除,不再读取。)
 

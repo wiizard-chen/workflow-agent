@@ -34,7 +34,7 @@ import {
   type BdExec,
   type BdExecResult,
 } from "../extensions/bd.ts";
-import { extractSubtasksJson } from "../extensions/workflow.ts";
+import { extractSubtasksJson, registerManagerTools } from "../extensions/workflow.ts";
 import {
   addUsage,
   buildRunSummary,
@@ -43,6 +43,8 @@ import {
   emptyUsageTotals,
   formatUsageLine,
   gitHead,
+  isCommitIntegrated,
+  validateIntegratedCommitRange,
   readRunSummary,
   runVerify,
   saveState,
@@ -291,6 +293,11 @@ try {
     check("commitArtifacts() commits when .workflow/<reqId>/ has untracked content", art.committed === true, JSON.stringify(art));
     const after = gitHead(tmpRoot);
     check("commitArtifacts() advances HEAD", after !== before, `${before} -> ${after}`);
+    check("isCommitIntegrated() accepts a commit reachable from HEAD", !!after && isCommitIntegrated(tmpRoot, after!));
+    check("isCommitIntegrated() rejects an unknown commit", !isCommitIntegrated(tmpRoot, "0000000000000000000000000000000000000000"));
+    check("validateIntegratedCommitRange() accepts a real post-baseline diff", !!before && !!after && validateIntegratedCommitRange(tmpRoot, before!, after!).ok);
+    check("validateIntegratedCommitRange() rejects baseline reused as commit", !!after && validateIntegratedCommitRange(tmpRoot, after!, after!).reason === "no-new-commit");
+    check("validateIntegratedCommitRange() rejects an unknown commit", !!before && validateIntegratedCommitRange(tmpRoot, before!, "0000000000000000000000000000000000000000").ok === false);
     const art2 = commitArtifacts(s);
     check("commitArtifacts() is a no-op (nothing to commit) on second call", art2.committed === false, JSON.stringify(art2));
   }
@@ -379,6 +386,19 @@ try {
 console.log("\nregression guard — build-mode tool whitelist uses the real tool name:");
 
 {
+  const registered: string[] = [];
+  const fakePi = {
+    registerTool(tool: { name: string }) { registered.push(tool.name); },
+  };
+  registerManagerTools(fakePi as any, {} as any);
+  check(
+    "fresh repo registers all manager tools before wf exists",
+    ["split_prd_to_tasks", "bd_task", "run_test"].every((name) => registered.includes(name)),
+    JSON.stringify(registered),
+  );
+}
+
+{
   const src = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
   const activeToolsBlock = src.match(/pi\.setActiveTools\(\[\s*"split_prd_to_tasks"[\s\S]*?\]\)/);
   check("applyModeTools()'s build-mode whitelist block exists", !!activeToolsBlock);
@@ -433,18 +453,26 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   const loadMgr = src.match(/function loadManagerPrompt\([\s\S]*?\n}/);
   check("loadManagerPrompt() exists", !!loadMgr);
   if (loadMgr) {
-    check("loadManagerPrompt() reads execute.maxParallel from CONFIG", /CONFIG\.execute\?\.maxParallel/.test(loadMgr[0]));
+    check("loadManagerPrompt() enforces the serial writer ceiling", /const maxParallel = 1/.test(loadMgr[0]));
     check("loadManagerPrompt() injects the parallel ceiling into the prompt", /dev 并行上限/.test(loadMgr[0]));
     check("loadManagerPrompt() supports a dryRun branch", /dryRun/.test(loadMgr[0]));
     check("dry-run branch forbids dispatching dev", /不要派 dev|绝对不要派 dev/.test(loadMgr[0]));
   }
-  // The code default must match what README documents (3), not the old 1.
-  check("DEFAULT_CONFIG.execute.maxParallel is 3 (matches README)", /execute:\s*\{[^}]*maxParallel:\s*3/.test(src));
+  // Worktree writers are disabled until deterministic patch integration exists.
+  check("DEFAULT_CONFIG.execute.maxParallel is 1 (safe serial writer)", /execute:\s*\{[^}]*maxParallel:\s*1/.test(src));
 
   // manager-prompt.md must no longer contain the never-substituted "N 个开发".
   const mgrPrompt = fs.readFileSync(new URL("../.pi/manager-prompt.md", import.meta.url), "utf8");
   check('manager-prompt.md no longer says the placeholder "N 个开发"', !/N 个开发/.test(mgrPrompt));
   check("manager-prompt.md documents the injected parallel ceiling", /并行上限/.test(mgrPrompt));
+  check("manager-prompt.md forbids worktree writers", /禁止 `worktree:true`|不要传 `worktree:true`/.test(mgrPrompt));
+  check("bd_task close validates a claim-bound integrated commit range", /validateIntegratedCommitRange/.test(src) && /\.claim\.json/.test(src));
+
+  // Fresh repositories have no wf during session_start. Manager tools must be
+  // registered anyway, with active-workflow checks inside each execute handler.
+  const registerTools = src.match(/function registerManagerTools\([\s\S]*?\n}/);
+  check("registerManagerTools() does not return early when wf is absent", !!registerTools && !/if \(!wf\) return/.test(registerTools[0]));
+  check("manager tool handlers fail safely without an active workflow", (src.match(/错误:没有活动需求。先 \/wf new。/g) || []).length >= 3);
 
   // P1-7: /execute --dry-run parsing.
   check("cmdExecute() parses --dry-run", /--dry-run/.test(src));
@@ -483,6 +511,13 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check(".pi/settings.json has a packages array", Array.isArray(pkgs) && pkgs.length > 0, JSON.stringify(settings));
   check(".pi/settings.json lists pi-subagents", pkgs.some((p) => p.includes("pi-subagents")), JSON.stringify(pkgs));
   check(".pi/settings.json lists pi-web-access", pkgs.some((p) => p.includes("pi-web-access")), JSON.stringify(pkgs));
+
+  const devAgent = fs.readFileSync(new URL("../.pi/agents/dev.md", import.meta.url), "utf8");
+  const reviewerAgent = fs.readFileSync(new URL("../.pi/agents/reviewer.md", import.meta.url), "utf8");
+  const providerSource = fs.readFileSync(new URL("../extensions/providers.ts", import.meta.url), "utf8");
+  check("provider bridge maps GLM5_2_API_KEY for builtin Z.AI children", /ZAI_API_KEY[\s\S]*GLM5_2_API_KEY/.test(providerSource));
+  check("dev model is provider-qualified", /model:\s*deepseek\/deepseek-v4-flash/.test(devAgent));
+  check("reviewer model is provider-qualified", /model:\s*zai\/glm-5\.2/.test(reviewerAgent));
 }
 
 {

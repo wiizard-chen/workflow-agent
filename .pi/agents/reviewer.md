@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: 代码审查 subagent(glm-5.2)。读 dev subagent 的代码改动(git diff),判断实现是否正确、是否越界、是否符合验收标准。不写代码,只 review + 把判定写到 output 文件。
-model: glm-5.2
+model: zai/glm-5.2
 tools: read, bash, grep, find
 systemPromptMode: replace
 inheritSkills: false

@@ -62,11 +62,9 @@ bd show <taskId> --json
 
 ### 5. 关闭 task
 
-实现 + 验证通过后,**由 bd_task 工具内部关闭**(dev 不需要手动 close,工具会处理 commit → merge → bd close)。但如果 dev 手动管理:
+实现 + 验证通过后,dev 先在目标仓库自己 commit;经理随后用 `bd_task(close)` 复核 commit 已进入目标仓库 HEAD、重跑验证并关闭 task。
 
-```bash
-bd close <taskId> --reason="实现完成,<一句话说明>"
-```
+dev 不要自己执行 `bd close`;把 commitSha 写入结果 JSON,由经理完成确定性的 close 门。
 
 ### 6. 报告阻碍(建 bug)
 
@@ -90,7 +88,7 @@ bd comment <taskId> "受阻于 bug <bugId>:<原因>。已建 bug,等修复后重
 
 - **不越界**:只实现当前 task 的验收标准。看到"顺便能做"的其他改动——忍住,那是别的 dev 的 task。
 - **不跳验证**:验证门失败不能假装通过。验证命令没配 → 报告,不要绕过。
-- **不手动 commit 到主分支**:你在 worktree 里,commit 由 bd_task 工具处理(每个子任务一个 commit,最后 merge)。
+- **自己 commit 当前 task**:当前 writer 串行运行在目标仓库,验证通过后按 dev prompt 自己提交;`bd_task(close)` 不负责 commit/merge,只负责集成检查、验证复核和 bd close。
 - **阻碍用 bd,不用本地文件**:遇到问题建 bd bug,不要写本地 TODO/markdown——bd 才是跨 session 权威,本地文件经理看不到。
 
 ## pi subagent 执行层注意

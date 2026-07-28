@@ -6,6 +6,9 @@ node_modules/
 .pi/git/
 .pi/npm/
 
+# pi-subagents runtime artifacts (may contain prompts/transcripts/absolute paths)
+.pi-subagents/
+
 # os / editor
 .DS_Store
 *.swp

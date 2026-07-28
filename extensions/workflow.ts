@@ -49,12 +49,14 @@ import {
   sh,
   slug,
   writeRunSummary,
+  validateIntegratedCommitRange,
   type RoleRef,
   type UsageTotals,
   type WorkflowConfig,
   type WorkflowState,
 } from "./lib.ts";
 import * as bd from "./bd.ts";
+import { registerWorkflowProviders } from "./providers.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -72,12 +74,10 @@ const DEFAULT_CONFIG: WorkflowConfig = {
     review: { provider: "zai", model: "glm-5.2" },
   },
   build: { verifyCommand: "", commitPrefix: "subtask" },
-  // maxParallel is the suggested dev-fanout ceiling injected into the manager
-  // prompt (see loadManagerPrompt). Default 3 matches README; override in
-  // workflow.config.json. `driver` is retained for forward-compat (only "bd"
-  // is implemented); `pollIntervalMs` is unused in the current in-session
-  // manager path and kept only so old config files don't fail to parse.
-  execute: { driver: "bd", maxParallel: 3, pollIntervalMs: 2000 },
+  // Worktree-isolated parallel children return patches/handoff manifests; they
+  // do not auto-merge into the target repository. Until deterministic handoff
+  // integration is implemented, the safe default is one serial dev writer.
+  execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
 };
 
 function loadConfig(): WorkflowConfig {
@@ -305,39 +305,6 @@ async function runStageText(pi: ExtensionAPI, ctx: ExtensionCommandContext, role
     if (i < attempts - 1) { ctx.ui.notify(`  ↻ 模型无输出,重试 ${i + 2}/${attempts}…`, "warning"); await sleep(1500); }
   }
   return null;
-}
-
-function registerProviders(pi: ExtensionAPI): void {
-  const byProvider = new Map<string, Set<string>>();
-  for (const role of Object.values(CONFIG.roles)) {
-    if (!byProvider.has(role.provider)) byProvider.set(role.provider, new Set());
-    byProvider.get(role.provider)!.add(role.model);
-  }
-  // Also register models used by agent definitions (.pi/agents/*.md) that may
-  // not appear in any role — e.g. the dev subagent uses deepseek-v4-flash.
-  // These are fixed workflow companions; roles only cover discuss/prd/split/review.
-  const agentModels: Record<string, string[]> = {
-    deepseek: ["deepseek-v4-flash"],
-  };
-  for (const [prov, ids] of Object.entries(agentModels)) {
-    if (!byProvider.has(prov)) byProvider.set(prov, new Set());
-    for (const id of ids) byProvider.get(prov)!.add(id);
-  }
-  for (const [provName, modelIds] of byProvider) {
-    const p = CONFIG.providers[provName];
-    if (!p) continue;
-    // pi resolves "$ENV_VAR" / "${ENV_VAR}" from the environment itself;
-    // omp accepted the raw value. Use the $-form so it works on both.
-    const models = [...modelIds].map((id) => ({
-      id, name: id, reasoning: true,
-      input: ["text"] as ("text" | "image")[],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: id.startsWith("deepseek") ? 1000000 : 200000,
-      maxTokens: 8192,
-      compat: p.thinkingFormat ? ({ thinkingFormat: p.thinkingFormat } as any) : undefined,
-    }));
-    pi.registerProvider(provName, { baseUrl: p.baseUrl, apiKey: `$${p.apiKeyEnv}`, api: p.api as any, models });
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +717,7 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dr
   // Inject the configured dev-fanout ceiling so `execute.maxParallel` is a
   // live setting rather than dead config. The manager prompt refers to this
   // value instead of a hardcoded "N".
-  const maxParallel = CONFIG.execute?.maxParallel ?? 3;
+  const maxParallel = 1;
   const context = [
     ``,
     `--- 运行上下文 ---`,
@@ -937,11 +904,13 @@ async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 }
 
 // ---------------------------------------------------------------------------
-// Manager tools (registered only when WF_ROLE=manager)
+// Manager tools (registered for every session; handlers require active wf)
 // ---------------------------------------------------------------------------
 
-function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
-  if (!wf) return;   // no active requirement → no executor tools
+export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  // Register these tools for every session, including a fresh repository that
+  // has not created its first workflow yet. Each execute handler performs its
+  // own active-workflow check so an early/manual call fails safely.
 
   // Tool 1: split_prd_to_tasks — read PRD, create bd tasks with deps
   pi.registerTool({
@@ -952,7 +921,10 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       prd_path: Type.Optional(Type.String({ description: "PRD 文件路径(默认用上下文里的)" })),
     }),
     async execute(_id, params) {
-      const prdPath = (params as any).prd_path || process.env.WF_PRD_PATH || reqPath(wf!, "prd.md");
+      if (!wf) {
+        return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
+      }
+      const prdPath = (params as any).prd_path || process.env.WF_PRD_PATH || reqPath(wf, "prd.md");
       if (!fs.existsSync(prdPath)) {
         return { content: [{ type: "text", text: `错误:PRD 文件不存在 ${prdPath}` }], details: {} };
       }
@@ -999,7 +971,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       saveState(wf!);
       mgrHasSplit = true;   // track that the manager actually did work
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
-      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在对每个 ready 的 task:用 bd_task(action=claim) 认领,再用 subagent 工具(agent="dev")调 dev subagent 实现,然后用 subagent 工具(agent="reviewer")调 reviewer subagent review,根据 review 结果用 bd_task(close 或 reopen)。独立的 task 可并行(多次 subagent 调用)。` }], details: {} };
+      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在严格串行处理 ready task:每次只 claim 一个 task,调用一个 subagent(agent="dev"),再调用 reviewer,最后根据结果 close/reopen;完成整个循环后再认领下一个 task。禁止并行 writer、tasks:[...] 和 worktree:true。` }], details: {} };
     },
   });
 
@@ -1018,6 +990,9 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       text: Type.Optional(Type.String({ description: "close 的 reason / comment 的内容" })),
     }),
     async execute(_id, params) {
+      if (!wf) {
+        return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
+      }
       const p = params as any;
       const action: string = p.action;
       const taskId: string = p.task_id;
@@ -1029,19 +1004,63 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
       const track = (msg: string) => { try { bd.comment(repo, taskId, `[${stamp}] ${msg}`); } catch (_e) { /* best effort */ } };
       try {
         if (action === "claim") {
-          const agent = `manager-${wf!.reqId}`;
+          const agent = `manager-${wf.reqId}`;
           const ok = bd.claim(repo, taskId, agent);
-          if (ok) {
-            // Record the HEAD at claim time as this task's change-range baseline.
-            // Reviewer uses `git diff <baseline>..<commitSha>` instead of
-            // `commitSha~1` because parallel subagent() calls interleave commits
-            // across tasks — `~1` may belong to a different task entirely.
-            const baseline = gitHead(repo) ?? "unknown";
-            track(`▶ 认领,开始派 dev。baseline=${baseline}`);
+          if (!ok) {
+            return { content: [{ type: "text", text: `✗ 认领失败(已被占用或状态非 open):${taskId}` }], details: {} };
           }
-          return { content: [{ type: "text", text: ok ? `✓ 已认领 ${taskId}` : `✗ 认领失败(已被占用或状态非 open):${taskId}` }], details: {} };
+          // Persist a structured claim baseline. close uses this to prove the
+          // reported commit belongs to a non-empty range created after claim.
+          const baseline = gitHead(repo);
+          const claimPath = reqPath(wf, "results", `${taskId}.claim.json`);
+          if (!baseline) {
+            bd.reopen(repo, taskId);
+            return { content: [{ type: "text", text: `✗ 认领后无法读取目标仓库 HEAD,已 reopen ${taskId}` }], details: {} };
+          }
+          try {
+            fs.mkdirSync(path.dirname(claimPath), { recursive: true });
+            fs.writeFileSync(claimPath, JSON.stringify({ taskId, baseline, claimedAt: new Date().toISOString() }, null, 2) + "\n");
+          } catch (e) {
+            bd.reopen(repo, taskId);
+            return { content: [{ type: "text", text: `✗ 无法保存 claim baseline,已 reopen ${taskId}: ${(e as Error).message}` }], details: {} };
+          }
+          track(`▶ 认领,开始派 dev。baseline=${baseline}`);
+          return { content: [{ type: "text", text: `✓ 已认领 ${taskId}; baseline 已保存到 ${claimPath}` }], details: {} };
         }
         if (action === "close") {
+          // Prove this task produced a non-empty commit range after its claim,
+          // and that the resulting commit is integrated into target HEAD.
+          const resultPath = reqPath(wf, "results", `${taskId}.json`);
+          const claimPath = reqPath(wf, "results", `${taskId}.claim.json`);
+          let commitSha = "";
+          let baseline = "";
+          try {
+            const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+            const claim = JSON.parse(fs.readFileSync(claimPath, "utf8"));
+            commitSha = typeof result?.commitSha === "string" ? result.commitSha.trim() : "";
+            baseline = claim?.taskId === taskId && typeof claim?.baseline === "string" ? claim.baseline.trim() : "";
+          } catch (e) {
+            bd.reopen(repo, taskId);
+            track(`✗ close 被拒:dev 结果或 claim baseline 缺失/无效,已自动 reopen。`);
+            return {
+              content: [{ type: "text", text: `✗ close 被拒绝:结果或 claim baseline 缺失/无效,已自动 reopen ${taskId}。\n${(e as Error).message}` }],
+              details: {},
+            };
+          }
+          const range = validateIntegratedCommitRange(repo, baseline, commitSha);
+          if (!range.ok) {
+            bd.reopen(repo, taskId);
+            track(`✗ close 被拒:commit range 校验失败(${range.reason}),已自动 reopen。`);
+            return {
+              content: [{ type: "text", text:
+                `✗ close 被拒绝:task ${taskId} 的 commit range 无效(${range.reason}),已自动 reopen。\n` +
+                `baseline=${baseline || "(空)"}\ncommit=${commitSha || "(空)"}\n` +
+                `要求:dev 必须在 claim 后产生非空 commit,且该 commit 已进入目标仓库 HEAD。worktree patch/handoff 未集成时不会通过。`
+              }],
+              details: {},
+            };
+          }
+
           // Code-level P0 recheck (risk #2/#4): don't trust the dev's
           // self-reported verifyPassed alone. Re-run the requirement's actual
           // verify command before allowing close. A missing/empty verify
@@ -1095,6 +1114,9 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
     description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 subagent({agent:'reviewer'}) 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
     parameters: Type.Object({}),
     async execute() {
+      if (!wf) {
+        return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
+      }
       // Write cumulative diff.
       const diffBase = wf!.baseline || "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
       const diff = sh("git", ["diff", diffBase, "HEAD"], wf!.repo).stdout;
@@ -1125,7 +1147,7 @@ function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): v
 
 export default function workflowExtension(pi: ExtensionAPI): void {
   CONFIG = loadConfig();
-  registerProviders(pi);
+  registerWorkflowProviders(pi, CONFIG);
 
   pi.on("session_start", async (_e, ctx) => {
     setModeStatus(ctx as any);
