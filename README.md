@@ -117,17 +117,6 @@ WF_AGENT_HOME=/path wfpi      # 自定义 workflow-agent 路径
 
 辅助命令:`/wf analyze [--refresh]`、`/wf verify <cmd>`(设置验证命令,如 `npm test`)、`/plan`、`/wf idle`(切到通用编码模式)、`/wf abort`(回滚)。
 
-### Tab 切换模式
-
-编辑器为空时按 `Tab` 可像 opencode 一样循环切换 `idle → plan → build → idle`:
-
-- **idle 且无活动需求**:预填 `/wf new `,接着输入需求名回车即可(不会替你瞎猜需求名)。
-- **idle 且有需求**:直接重新进入该需求的 plan 模式(等价于 `/plan`)。
-- **plan**:还没生成 `prd.md` 时预填 `/wf prd`;已有 `prd.md` 时预填 `/execute`——始终指向下一步该做的事。
-- **build**:等价于 `/wf done`,结束执行回到 idle(工具集恢复全开)。
-
-Tab 只是"预填/触发对应命令"的快捷方式,和手动敲 `/wf new`、`/wf prd`、`/execute`、`/wf done` 完全等价,随时可以直接打命令。
-
 ## 经理 prompt(可编辑)
 
 build 模式的经理行为由 `.pi/manager-prompt.md` 定义。注意它**不是 agent 定义**(manager 不再是独立 subagent,就是主 session 自己),而是一段在 `/execute` 时通过 `sendUserMessage` 注入主 session 的 prompt。你可以直接编辑这个文件调整经理的拆分/分配/测试策略,**不用改代码**。扩展注入时会附带运行上下文(reqId/repo/epicId/prd 路径)。
