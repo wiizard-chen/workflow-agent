@@ -15,11 +15,23 @@ import * as path from "node:path";
 
 export interface RoleRef { provider: string; model: string; }
 
+export interface ModelProfile {
+  /** Main PLAN discussion, issue analysis, splitting, and BUILD manager model. */
+  main: string;
+  prd: string;
+  dev: string;
+  reviewer: string;
+  finalReviewer: string;
+}
+
 export interface WorkflowConfig {
   providers: Record<string, { baseUrl: string; apiKeyEnv: string; api: string; thinkingFormat?: string }>;
+  activeModelProfile: string;
+  modelProfiles: Record<string, ModelProfile>;
+  /** Derived compatibility view used by existing main-session stage helpers. */
   roles: { discuss: RoleRef; prd: RoleRef; split: RoleRef; review: RoleRef };
   build: { verifyCommand: string; commitPrefix: string };
-  /** Execution layer config. dev/reviewer models live in .pi/agents/*.md frontmatter. */
+  /** Execution layer config. All role models are resolved from the active model profile. */
   execute?: {
     driver?: "bd";          // only "bd" supported; default "bd"
     maxParallel?: number;   // suggested parallel task(dev) calls for the manager prompt; default 1

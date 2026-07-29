@@ -20,7 +20,8 @@ import {
   sha256File, ensureRequirementDirs, preservedBaseline, splitDecision,
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
-  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed, renderedToolName
+  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
+  workflowAgentModel, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bd_task",
     label: "bd task 生命周期操作",
-    description: "对 bd issue 做确定性生命周期操作:claim(原子认领,记录 baseline SHA 供 reviewer 精确 diff 定位)、close(要求绑定 commit 的 GLM review pass,并重跑验证命令)、reopen(放回 ready)、comment(留备注)。配合受控 pi-workflow.dev/reviewer subagent 使用。",
+    description: "对 bd issue 做确定性生命周期操作:claim(原子认领,记录 baseline SHA)、close(要求绑定 commit 且符合 active profile 的 reviewer pass,并重跑验证命令)、reopen、comment。",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("claim"), Type.Literal("close"), Type.Literal("reopen"), Type.Literal("comment")], { description: "操作类型" }),
       task_id: Type.String({ description: "bd issue id" }),
@@ -136,7 +137,9 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
             const resultAudit = readJson(reqPath(wf, "results", `${taskId}.audit.json`));
             const claim = readJson(claimPath);
             if (!result || !resultAudit || !claim) throw new Error("JSON artifact 无法解析");
-            if (resultAudit.status !== "completed" || resultAudit.resolvedModel !== "deepseek/deepseek-v4-flash"
+            const expectedDevModel = workflowAgentModel("pi-workflow.dev");
+            if (resultAudit.status !== "completed" || resultAudit.resolvedModel !== expectedDevModel
+              || resultAudit.profile !== CONFIG.activeModelProfile
               || resultAudit.context !== "fresh" || resultAudit.outputSha256 !== sha256File(resultPath) || resultAudit.toolsSafe !== true) {
               throw new Error("dev agent/model/tool/output audit 无效");
             }
@@ -158,13 +161,15 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
             if (!review || !audit) throw new Error("review JSON artifact 无法解析");
             const reviewBound = review?.verdict === "pass" && review?.taskId === taskId
               && review?.baseline === baseline && review?.commitSha === commitSha;
-            const auditValid = audit?.status === "completed" && audit?.resolvedModel === "zai/glm-5.2"
+            const expectedReviewerModel = workflowAgentModel("pi-workflow.reviewer");
+            const auditValid = audit?.status === "completed" && audit?.resolvedModel === expectedReviewerModel
+              && audit?.profile === CONFIG.activeModelProfile
               && audit?.context === "fresh" && audit?.outputSha256 === sha256File(reviewPath);
-            if (!reviewBound || !auditValid) throw new Error("review verdict 未通过、未绑定 task/commit,或 GLM audit 无效");
+            if (!reviewBound || !auditValid) throw new Error(`review verdict 未通过、未绑定 task/commit,或 ${expectedReviewerModel} audit 无效`);
           } catch (e) {
             bd.reopen(repo, taskId);
             track(`✗ close 被拒:review 证据缺失/无效,已自动 reopen。`);
-            return { content: [{ type: "text", text: `✗ close 被拒绝:必须先由 zai/glm-5.2 reviewer 对 taskId/baseline/commitSha 给出绑定的 pass verdict。\n${(e as Error).message}` }], details: {} };
+            return { content: [{ type: "text", text: `✗ close 被拒绝:必须先由 ${workflowAgentModel("pi-workflow.reviewer")} reviewer 对 taskId/baseline/commitSha 给出绑定的 pass verdict。\n${(e as Error).message}` }], details: {} };
           }
           const range = validateIntegratedCommitRange(repo, baseline, commitSha);
           if (!range.ok) {

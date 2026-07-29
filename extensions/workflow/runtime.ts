@@ -9,25 +9,83 @@ import {
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
-  type RoleRef, type UsageTotals, type WorkflowConfig, type WorkflowState,
+  type ModelProfile, type RoleRef, type UsageTotals, type WorkflowConfig, type WorkflowState,
 } from "../lib.ts";
 import * as bd from "../bd.ts";
+import { syncSubagentCapabilityCeiling } from "./capabilities.ts";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+
+export const DEFAULT_MODEL_PROFILES: Record<string, ModelProfile> = {
+  gpt56: {
+    main: "codex2api/gpt-5.6-sol",
+    prd: "codex2api/gpt-5.6-sol",
+    dev: "codex2api/gpt-5.6-terra",
+    reviewer: "codex2api/gpt-5.6-luna",
+    finalReviewer: "codex2api/gpt-5.6-luna",
+  },
+  "deepseek-glm": {
+    main: "deepseek/deepseek-v4-pro",
+    prd: "zai/glm-5.2",
+    dev: "deepseek/deepseek-v4-flash",
+    reviewer: "zai/glm-5.2",
+    finalReviewer: "zai/glm-5.2",
+  },
+};
+
+export function parseQualifiedModel(value: string): RoleRef {
+  const normalized = String(value || "").trim();
+  const slash = normalized.indexOf("/");
+  if (slash <= 0 || slash === normalized.length - 1) throw new Error(`模型必须是 provider/model 格式:${normalized || "(空)"}`);
+  return { provider: normalized.slice(0, slash), model: normalized.slice(slash + 1) };
+}
+
+export function activeModelProfile(config: WorkflowConfig = CONFIG): ModelProfile {
+  const profile = config.modelProfiles?.[config.activeModelProfile];
+  if (!profile) throw new Error(`未知 activeModelProfile:${config.activeModelProfile}`);
+  for (const key of ["main", "prd", "dev", "reviewer", "finalReviewer"] as const) parseQualifiedModel(profile[key]);
+  return profile;
+}
+
+export async function assertActiveProfileModelsAvailable(ctx: ExtensionCommandContext, config: WorkflowConfig = CONFIG): Promise<void> {
+  const profile = activeModelProfile(config);
+  const available = await ctx.modelRegistry.getAvailable();
+  const availableIds = new Set(available.map((model: any) => `${model.provider}/${model.id}`));
+  for (const qualified of new Set([profile.main, profile.prd, profile.dev, profile.reviewer, profile.finalReviewer])) {
+    const role = parseQualifiedModel(qualified);
+    if (!ctx.modelRegistry.find(role.provider, role.model)) throw new Error(`active profile 模型未注册:${qualified}`);
+    if (!availableIds.has(qualified)) throw new Error(`active profile 模型未配置认证或当前不可用:${qualified}`);
+  }
+}
+
+export function workflowAgentModel(agent: string, config: WorkflowConfig = CONFIG): string {
+  const profile = activeModelProfile(config);
+  if (agent === "pi-workflow.prd-writer") return profile.prd;
+  if (agent === "pi-workflow.dev") return profile.dev;
+  if (agent === "pi-workflow.reviewer") return profile.reviewer;
+  if (agent === "pi-workflow.final-reviewer") return profile.finalReviewer;
+  throw new Error(`未知 workflow agent:${agent}`);
+}
+
+function derivedRoles(profile: ModelProfile): WorkflowConfig["roles"] {
+  return {
+    discuss: parseQualifiedModel(profile.main),
+    prd: parseQualifiedModel(profile.prd),
+    split: parseQualifiedModel(profile.main),
+    review: parseQualifiedModel(profile.reviewer),
+  };
+}
 
 export const DEFAULT_CONFIG: WorkflowConfig = {
   providers: {
     deepseek: { baseUrl: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY", api: "openai-completions", thinkingFormat: "deepseek" },
     zai: { baseUrl: "https://api.z.ai/api/coding/paas/v4", apiKeyEnv: "GLM5_2_API_KEY", api: "openai-completions", thinkingFormat: "zai" },
   },
-  roles: {
-    discuss: { provider: "deepseek", model: "deepseek-v4-pro" },
-    prd: { provider: "zai", model: "glm-5.2" },
-    split: { provider: "deepseek", model: "deepseek-v4-pro" },
-    review: { provider: "zai", model: "glm-5.2" },
-  },
+  activeModelProfile: "gpt56",
+  modelProfiles: DEFAULT_MODEL_PROFILES,
+  roles: derivedRoles(DEFAULT_MODEL_PROFILES.gpt56),
   build: { verifyCommand: "", commitPrefix: "subtask" },
   // Worktree-isolated parallel children return patches/handoff manifests; they
   // do not auto-merge into the target repository. Until deterministic handoff
@@ -35,27 +93,45 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
 };
 
+export function configuredActiveProfileName(raw: any, fallback: string): string {
+  if (!Object.prototype.hasOwnProperty.call(raw, "activeModelProfile")) return fallback;
+  if (typeof raw.activeModelProfile !== "string" || !raw.activeModelProfile.trim()) {
+    throw new Error("workflow 配置 activeModelProfile 必须是非空字符串");
+  }
+  return raw.activeModelProfile.trim();
+}
+
 export function loadConfig(): WorkflowConfig {
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-      path.join(here, "..", "..", "workflow.config.json"),
-      path.join(here, "..", "workflow.config.json"),
-      path.join(process.cwd(), "workflow.config.json"),
-    ];
-    for (const c of candidates) {
-      if (fs.existsSync(c)) {
-        const raw = JSON.parse(fs.readFileSync(c, "utf8"));
-        return {
-          providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
-          roles: { ...DEFAULT_CONFIG.roles, ...(raw.roles || {}) },
-          build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
-          execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
-        };
-      }
-    }
-  } catch (_e) { /* defaults */ }
-  return DEFAULT_CONFIG;
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "..", "..", "workflow.config.json"),
+    path.join(here, "..", "workflow.config.json"),
+    path.join(process.cwd(), "workflow.config.json"),
+  ];
+  const configPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!configPath) return DEFAULT_CONFIG;
+  let raw: any;
+  try { raw = JSON.parse(fs.readFileSync(configPath, "utf8")); }
+  catch (e) { throw new Error(`workflow 配置解析失败:${configPath}:${(e as Error).message}`); }
+  if (raw.modelProfiles !== undefined && (!raw.modelProfiles || typeof raw.modelProfiles !== "object" || Array.isArray(raw.modelProfiles))) {
+    throw new Error(`workflow 配置 modelProfiles 必须是对象 (${configPath})`);
+  }
+  const modelProfiles = { ...DEFAULT_MODEL_PROFILES, ...(raw.modelProfiles || {}) } as Record<string, ModelProfile>;
+  let activeName: string;
+  try { activeName = configuredActiveProfileName(raw, DEFAULT_CONFIG.activeModelProfile); }
+  catch (e) { throw new Error(`${(e as Error).message} (${configPath})`); }
+  const profile = modelProfiles[activeName];
+  if (!profile) throw new Error(`workflow 配置引用未知 profile:${activeName} (${configPath})`);
+  const config: WorkflowConfig = {
+    providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
+    activeModelProfile: activeName,
+    modelProfiles,
+    roles: derivedRoles(profile),
+    build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
+    execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
+  };
+  activeModelProfile(config);
+  return config;
 }
 
 export const READONLY_TOOLS = ["read", "grep", "find", "ls"];
@@ -134,6 +210,7 @@ export function setModeStatus(ctx: ExtensionCommandContext): void {
 
 /** Apply the capability boundary for the active workflow mode. */
 export function applyModeTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  syncSubagentCapabilityCeiling(ctx, wf?.mode);
   if (!wf) {
     if (baseActiveTools.length) pi.setActiveTools(baseActiveTools);
     return;
@@ -257,6 +334,76 @@ export function assertWorkflowAgentsUnshadowed(repo: string): void {
   }
 }
 
+export const ADVISORY_AGENTS = ["researcher", "scout", "oracle"] as const;
+
+export function advisoryRepoSnapshot(repo: string): { head: string | null; status: string } {
+  const result = sh("git", ["status", "--porcelain=v1", "--untracked-files=all"], repo);
+  const status = result.code === 0
+    ? result.stdout.split("\n").filter((line) => line && !line.includes(".workflow/")).join("\n")
+    : `ERROR:${result.stderr}`;
+  return { head: gitHead(repo) ?? null, status };
+}
+
+export function advisoryOutputPath(agent: string): string {
+  if (!wf) throw new Error("没有活动需求");
+  if (agent === "researcher") return reqPath(wf, "results", "research.md");
+  if (agent === "scout") return repoBriefPath(wf.repo);
+  if (agent === "oracle") return reqPath(wf, "results", "prd-oracle.md");
+  throw new Error(`未知 advisory agent:${agent}`);
+}
+
+export function nearestProjectSettings(repo: string): string | undefined {
+  let current = path.resolve(repo);
+  while (true) {
+    const candidate = path.join(current, ".pi", "settings.json");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+/** Fail closed if project/user definitions shadow builtin PLAN advisory roles. */
+export function assertAdvisoryAgentsUnshadowed(repo: string): void {
+  const required = new Set<string>(ADVISORY_AGENTS);
+  const dirs = [
+    path.join(repo, ".pi", "agents"), path.join(repo, ".agents"),
+    path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "agents"),
+    path.join(os.homedir(), ".agents"),
+    ...(process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS || "").split(path.delimiter).filter(Boolean),
+  ];
+  for (const dir of dirs) {
+    for (const file of markdownFiles(dir)) {
+      const runtime = agentRuntimeName(file);
+      if (runtime && required.has(runtime)) throw new Error(`builtin advisory agent 被高优先级定义覆盖:${runtime} (${file})`);
+    }
+  }
+  const projectSettings = nearestProjectSettings(repo);
+  for (const settingsPath of [
+    path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "settings.json"),
+    ...(projectSettings ? [projectSettings] : []),
+  ]) {
+    const settings = readJson(settingsPath);
+    const subagents = settings?.subagents;
+    if (Array.isArray(subagents?.defaultExtensions) && subagents.defaultExtensions.length > 0) {
+      throw new Error(`builtin advisory agent 禁止 subagents.defaultExtensions (${settingsPath})`);
+    }
+    if (subagents?.disableBuiltins === true) throw new Error(`builtin advisory agents 已被禁用 (${settingsPath})`);
+    const overrides = subagents?.agentOverrides;
+    if (!overrides || typeof overrides !== "object") continue;
+    for (const runtime of required) if (Object.prototype.hasOwnProperty.call(overrides, runtime)) {
+      const override = overrides[runtime];
+      const safeKeys = new Set(["model", "fallbackModels", "thinking"]);
+      const unsafeKeys = !override || typeof override !== "object" || Array.isArray(override)
+        ? ["invalid override"]
+        : Object.keys(override).filter((key) => !safeKeys.has(key));
+      if (unsafeKeys.length > 0) {
+        throw new Error(`builtin advisory agent 存在不安全 settings override:${runtime} [${unsafeKeys.join(",")}] (${settingsPath})`);
+      }
+    }
+  }
+}
+
 export function assertActiveChildIssue(taskId: string): bd.BdIssue {
   if (!wf?.epicId) throw new Error("没有活动 epic");
   const issue = bd.show(wf.repo, taskId);
@@ -274,8 +421,8 @@ export function validateSubagentCall(event: any): string | undefined {
   if (input.tasks || input.chain || input.worktree || input.async || input.count) {
     return "workflow 禁止 parallel/chain/worktree/async subagent 调用";
   }
-  if (input.model || input.acceptance || input.outputSchema) {
-    return "workflow 禁止覆盖 agent model/acceptance/output schema";
+  if (input.acceptance || input.outputSchema) {
+    return "workflow 禁止覆盖 agent acceptance/output schema";
   }
   if (resolvedPath(input.cwd) !== path.resolve(wf.repo)) {
     return `subagent cwd 必须精确为当前 workflow repo:${wf.repo}`;
@@ -284,7 +431,20 @@ export function validateSubagentCall(event: any): string | undefined {
   const output = resolvedPath(input.output);
 
   if (wf.mode === "plan") {
-    if (agent !== "pi-workflow.prd-writer") return "plan 模式只允许 pi-workflow.prd-writer subagent";
+    if ((ADVISORY_AGENTS as readonly string[]).includes(agent)) {
+      const allowedKeys = new Set(["agent", "task", "context", "cwd", "output"]);
+      const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+      if (unsupportedKeys.length > 0) return `advisory subagent 参数不允许:${unsupportedKeys.join(",")}`;
+      try { assertAdvisoryAgentsUnshadowed(wf.repo); }
+      catch (e) { return (e as Error).message; }
+      const expectedContext = agent === "oracle" ? "fork" : "fresh";
+      if (input.context !== expectedContext) return `${agent} 必须 context=${expectedContext}`;
+      if (output !== path.resolve(advisoryOutputPath(agent))) return `${agent} output 路径错误`;
+      return undefined;
+    }
+    if (agent !== "pi-workflow.prd-writer") return "plan 模式只允许 researcher/scout/oracle advisory 或 pi-workflow.prd-writer";
+    const expectedModel = workflowAgentModel(agent);
+    if (input.model !== expectedModel) return `prd-writer model 必须是 active profile 配置:${expectedModel}`;
     if (input.context !== "fork") return "prd-writer 必须 context=fork";
     if (output !== path.resolve(reqPath(wf, "prd.md"))) return "prd-writer output 必须是当前 prd.md";
     return undefined;
@@ -295,6 +455,8 @@ export function validateSubagentCall(event: any): string | undefined {
   if (!["pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) {
     return "build 模式只允许 pi-workflow.dev/reviewer/final-reviewer";
   }
+  const expectedModel = workflowAgentModel(agent);
+  if (input.model !== expectedModel) return `${agent} model 必须是 active profile 配置:${expectedModel}`;
   if (input.context !== "fresh") return `${agent} 必须 context=fresh`;
   if (agent === "pi-workflow.dev") {
     if (activeDevToolCallId) return "已有 dev writer 在运行;writer 上限固定为 1";

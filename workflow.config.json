@@ -1,6 +1,26 @@
 {
-  "$comment": "workflow 扩展配置。修改后重启 pi 或 /reload 生效。apiKey 用 $ENV 形式,从你的 shell 环境(zshrc)解析。",
+  "$comment": "workflow 扩展配置。修改 activeModelProfile 后重启 pi 或 /reload 生效。所有模型统一使用 provider/model 格式。",
+  "activeModelProfile": "gpt56",
+  "modelProfiles": {
+    "gpt56": {
+      "$comment": "GPT-5.6 分工:Sol 主 session/PRD,Terra 单 task 编码,Luna 代码与最终审查。",
+      "main": "codex2api/gpt-5.6-sol",
+      "prd": "codex2api/gpt-5.6-sol",
+      "dev": "codex2api/gpt-5.6-terra",
+      "reviewer": "codex2api/gpt-5.6-luna",
+      "finalReviewer": "codex2api/gpt-5.6-luna"
+    },
+    "deepseek-glm": {
+      "$comment": "原有 DeepSeek + GLM 分工,切换 activeModelProfile 即可恢复。",
+      "main": "deepseek/deepseek-v4-pro",
+      "prd": "zai/glm-5.2",
+      "dev": "deepseek/deepseek-v4-flash",
+      "reviewer": "zai/glm-5.2",
+      "finalReviewer": "zai/glm-5.2"
+    }
+  },
   "providers": {
+    "$comment": "仅需在这里注册非 Pi builtin provider。codex2api 由 Pi 自身配置提供,无需重复 endpoint/key。",
     "deepseek": {
       "baseUrl": "https://api.deepseek.com",
       "apiKeyEnv": "DEEPSEEK_API_KEY",
@@ -14,24 +34,18 @@
       "thinkingFormat": "zai"
     }
   },
-  "roles": {
-    "discuss": { "provider": "deepseek", "model": "deepseek-v4-pro" },
-    "prd":     { "provider": "zai",    "model": "glm-5.2" },
-    "split":   { "provider": "deepseek", "model": "deepseek-v4-pro" },
-    "review":  { "provider": "zai",    "model": "glm-5.2" }
-  },
   "build": {
     "verifyCommand": "",
-    "$comment_verify": "每个子任务关闭及最终验收都会执行的唯一预配置命令(在目标 repo 内,如 'go build ./...' / 'npm test' / 'pytest -q')。留空是配置错误:/execute、claim、close、run_verify 都会直接拒绝。可用 /wf verify <cmd> 按需求覆盖。",
+    "$comment_verify": "每个子任务关闭及最终验收都会执行的唯一预配置命令。留空是配置错误:/execute、claim、close、run_verify 都会直接拒绝。可用 /wf verify <cmd> 按需求覆盖。",
     "commitPrefix": "subtask"
   },
   "execute": {
-    "$comment": "执行层配置。/execute 不再 spawn 独立经理进程——主 session 自己就是经理(manager-prompt.md 注入),用 pi-subagents 的 `subagent` 工具调 dev/reviewer。dev/reviewer 的 model 在 .pi/agents/*.md 的 frontmatter 里定义,不在这里。",
+    "$comment": "主 session 自己是只读经理,用 pi-subagents 调 dev/reviewer；所有角色模型由 activeModelProfile 统一决定。",
     "driver": "bd",
-    "$comment_driver": "保留字段:目前只实现了 \"bd\"(beads 驱动任务状态)。改成其他值无效。",
+    "$comment_driver": "保留字段:目前只实现 bd。",
     "maxParallel": 1,
-    "$comment_maxParallel": "安全上限。当前固定为 1:pi-subagents 的 worktree:true 只产出 patch/handoff,不会自动合并主仓库;在确定性集成工具完成前禁用并行 writer,避免 task 已关闭但代码未落主仓库。",
+    "$comment_maxParallel": "安全上限固定为 1；确定性 worktree handoff 完成前禁止并行 writer。",
     "pollIntervalMs": 2000,
-    "$comment_pollIntervalMs": "死字段:当前主 session 即经理的实现里不轮询,保留仅为兼容旧配置文件不报错。改它没有任何效果。"
+    "$comment_pollIntervalMs": "死字段:当前实现不轮询,仅为兼容。"
   }
 }

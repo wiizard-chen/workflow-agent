@@ -6,9 +6,10 @@ import { readRunSummary, formatUsageLine, readRepoBrief, reqPath, saveState } fr
 import * as bd from "../bd.ts";
 import { registerWorkflowProviders } from "../providers.ts";
 import { registerManagerTools } from "./manager-tools.ts";
+import { validateAdvisoryLaunchContract } from "./capabilities.ts";
 import {
   cmdAbort, cmdAnalyze, cmdBug, cmdDone, cmdExecute, cmdNew, cmdPlan,
-  cmdPrd, cmdResume, cmdStatus, cmdTask,
+  cmdPrd, cmdResearch, cmdOracle, cmdResume, cmdStatus, cmdTask,
 } from "./commands.ts";
 import {
   CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
@@ -19,7 +20,8 @@ import {
   sha256File, ensureRequirementDirs, preservedBaseline, splitDecision,
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
-  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed, renderedToolName
+  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
+  advisoryOutputPath, advisoryRepoSnapshot, workflowAgentModel, renderedToolName
 } from "./runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -57,10 +59,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     try { trackUsage(event, ctx); } catch (_e) { /* never break a run over telemetry */ }
   });
 
-  pi.on("tool_call", async (event: any) => {
+  pi.on("tool_call", async (event: any, ctx: any) => {
     if (event?.toolName !== "subagent") return;
     const reason = validateSubagentCall(event);
     if (reason) return { block: true, reason };
+    if (["researcher", "scout", "oracle"].includes(String(event?.input?.agent || ""))) {
+      const contractReason = await validateAdvisoryLaunchContract(event.input, ctx);
+      if (contractReason) return { block: true, reason: contractReason };
+    }
   });
 
   // Persist the resolved child model and child usage reported by pi-subagents.
@@ -72,10 +78,63 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       if (event?.toolName !== "subagent") return;
       const agent = String(event?.input?.agent || "");
       if (agent === "pi-workflow.dev" && activeDevToolCallId === String(event?.toolCallId || "")) setActiveDevToolCallId(undefined);
-      if (!wf || !["pi-workflow.prd-writer", "pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) return;
+      if (!wf) return;
       const result = event?.details?.results?.[0];
       const usage = result?.usage ?? event?.details?.totalChildUsage ?? event?.usage ?? null;
       const inputOutput = String(event?.input?.output || "");
+      if (["researcher", "scout", "oracle"].includes(agent)) {
+        const expectedOutput = advisoryOutputPath(agent);
+        const auditPath = agent === "researcher"
+          ? reqPath(wf, "results", "research.audit.json")
+          : agent === "scout"
+            ? reqPath(wf, "results", "scout.audit.json")
+            : reqPath(wf, "results", "prd-oracle.audit.json");
+        const expectedContext = agent === "oracle" ? "fork" : "fresh";
+        const launched = readJson(auditPath);
+        const completedRepoSnapshot = advisoryRepoSnapshot(wf.repo);
+        const repoUnchanged = !!launched?.repoSnapshot
+          && launched.repoSnapshot.head === completedRepoSnapshot.head
+          && launched.repoSnapshot.status === completedRepoSnapshot.status;
+        const exactOutput = !!inputOutput && path.resolve(inputOutput) === path.resolve(expectedOutput)
+          && (!result?.savedOutputPath || path.resolve(result.savedOutputPath) === path.resolve(expectedOutput));
+        const context = result?.context ?? event?.details?.context ?? null;
+        const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
+        const mutationTools = toolCalls.map((call: any) => renderedToolName(call)).filter((name: string) => ["write", "edit", "bash"].includes(name));
+        const capabilityAudit = result?.capabilityAudit ?? null;
+        const effectiveTools = Array.isArray(capabilityAudit?.effectiveTools) ? capabilityAudit.effectiveTools : [];
+        const capabilitySafe = capabilityAudit?.ceiling?.sources?.includes("pi-workflow-plan")
+          && !effectiveTools.some((name: string) => ["write", "edit", "bash", "bd", "subagent"].includes(name));
+        const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
+          && exactOutput && fs.existsSync(expectedOutput) && context === expectedContext && repoUnchanged
+          && mutationTools.length === 0 && capabilitySafe;
+        fs.writeFileSync(auditPath, JSON.stringify({
+          status: ok ? "completed" : "failed",
+          agent,
+          authority: "advisory",
+          resolvedModel: result?.model ?? null,
+          attemptedModels: result?.attemptedModels ?? [],
+          context,
+          usage,
+          output: expectedOutput,
+          outputSha256: sha256File(expectedOutput) ?? null,
+          outputExists: fs.existsSync(expectedOutput),
+          exactOutput,
+          mutationTools,
+          toolsAdvisorySafe: mutationTools.length === 0,
+          capabilitySafe,
+          capabilityAudit,
+          toolCalls,
+          launchedRepoSnapshot: launched?.repoSnapshot ?? null,
+          completedRepoSnapshot,
+          repoUnchanged,
+          excludedFromAuthoritativeEvidence: true,
+          exitCode: result?.exitCode ?? null,
+          error: result?.error ?? result?.outputSaveError ?? (event?.isError ? "subagent tool failed" : null),
+          completedAt: new Date().toISOString(),
+        }, null, 2) + "\n");
+        return;
+      }
+      if (!["pi-workflow.prd-writer", "pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) return;
       let expectedOutput: string;
       let auditPath: string;
       let expectedContext: "fork" | "fresh";
@@ -111,7 +170,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         return allowedTools.has(toolName);
       });
       const verify = agent === "pi-workflow.final-reviewer" ? readJson(reqPath(wf, "results", "verify.json")) : undefined;
-      const expectedModel = agent === "pi-workflow.dev" ? "deepseek/deepseek-v4-flash" : "zai/glm-5.2";
+      const expectedModel = workflowAgentModel(agent);
       const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
         && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expectedModel
         && context === expectedContext && !!usage && toolsSafe;
@@ -119,6 +178,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         status: ok ? "completed" : "failed",
         agent,
         requestedModel: expectedModel,
+        profile: CONFIG.activeModelProfile,
         resolvedModel,
         attemptedModels: result?.attemptedModels ?? [],
         context,
@@ -161,9 +221,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   // Commands (always registered — there's only one session now, no WF_ROLE split).
   pi.registerCommand("wf", {
-      description: "workflow 流水线:new / prd / analyze / status / verify / execute / resume / bug / task / done / abort",
+      description: "workflow 流水线:new / research / analyze / prd / oracle / status / verify / execute / resume / bug / task / done / abort",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "task", "done", "abort", "help"];
+        const subs = ["new", "research", "analyze", "prd", "oracle", "status", "verify", "execute", "resume", "bug", "task", "done", "abort", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -173,7 +233,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         const rest = trimmed.slice(sub.length).trim();
         switch (sub) {
           case "new": await cmdNew(pi, ctx, rest); break;
+          case "research": await cmdResearch(pi, ctx, rest); break;
           case "prd": await cmdPrd(pi, ctx); break;
+          case "oracle": await cmdOracle(pi, ctx); break;
           case "analyze": {
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
             if (readRepoBrief(wf.repo) && rest !== "--refresh") { ctx.ui.notify(`简报已存在。/wf analyze --refresh 重析。`, "info"); break; }
@@ -198,8 +260,10 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/wf new <名> [repo]     新建 Beads epic,进入 plan",
               "/wf resume [epicId]     从全部 Beads epic 选择;缺 state 时可重建",
               "/plan                   回 plan 模式讨论",
-              "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
+              "/wf analyze [--refresh] builtin scout 分析仓库,生成跨需求复用简报",
+              "/wf research [主题]    builtin researcher 生成外部研究(advisory)",
               "/wf prd                 调用 fork 的 prd-writer(GLM-5.2)生成并展示 PRD",
+              "/wf oracle              builtin oracle 可选审查 PRD 一致性(advisory)",
               "/execute [prd路径]      进入 build;要求非空验证命令",
               "/execute --dry-run      只拆 task + 汇报计划,不派 dev",
               "/wf status              查看当前 epic 任务和 token/cache 用量",

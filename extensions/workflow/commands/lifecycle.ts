@@ -19,7 +19,8 @@ import {
   sha256File, ensureRequirementDirs, preservedBaseline, splitDecision,
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
-  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed, renderedToolName
+  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
+  activeModelProfile, assertActiveProfileModelsAvailable, renderedToolName
 } from "../runtime.ts";
 
 export function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
@@ -88,7 +89,7 @@ export function cmdStatus(ctx: ExtensionCommandContext): void {
   const usage = readRunSummary(wf);
   const usageLine = usage ? `\n用量 ${formatUsageLine(usage)}` : "";
   ctx.ui.notify(
-    `需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}` +
+    `需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}\n模型 profile ${CONFIG.activeModelProfile} (main=${activeModelProfile().main}, dev=${activeModelProfile().dev}, review=${activeModelProfile().reviewer})` +
     (bdFailed ? "  (bd 不可用,降级模式)" : "") +
     (summary ? `\n${summary}` : "") + usageLine + `\n${lines.join("\n")}`,
     bdFailed ? "warning" : "info",
@@ -97,6 +98,8 @@ export function cmdStatus(ctx: ExtensionCommandContext): void {
 
 /** /wf resume — select any Beads epic; reconstruct missing local state. */
 export async function cmdResume(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  try { await assertActiveProfileModelsAvailable(ctx); }
+  catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   const arg = args.trim().replace(/["']/g, "");
   if (wf?.mode === "build") {
     ctx.ui.notify(`需求 ${wf.reqId} 正在 build,先 /wf done 或 /wf abort。`, "error");
@@ -161,16 +164,16 @@ export async function cmdResume(pi: ExtensionAPI, ctx: ExtensionCommandContext, 
     };
     fs.mkdirSync(reqPath(target, "subtasks"), { recursive: true });
     fs.mkdirSync(reqPath(target, "results"), { recursive: true });
-    saveState(target);
   }
 
   // Normalize historical idle states from older versions.
   if ((target as any).mode === "idle") target.mode = "plan";
+  if (!(await useRole(pi, ctx, target.mode === "build" ? CONFIG.roles.split : CONFIG.roles.discuss))) return;
   setWorkflow(target);
+  saveState(target);
   resetUsageByModel();
   setModeStatus(ctx);
   applyModeTools(pi, ctx);
-  await useRole(pi, ctx, target.mode === "build" ? CONFIG.roles.split : CONFIG.roles.discuss);
 
   const kids = bd.children(target.repo, chosen.epic.id).filter((i) => i.issue_type === "task" || i.issue_type === "bug");
   const summary = [

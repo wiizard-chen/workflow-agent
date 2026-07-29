@@ -1,8 +1,7 @@
 ---
 name: prd-writer
 package: pi-workflow
-description: 使用 GLM-5.2 根据主 session 的完整需求讨论生成专业 PRD。只返回 Markdown PRD 正文,不修改代码或 Beads。
-model: zai/glm-5.2
+description: 根据主 session 的完整需求讨论生成专业 PRD,模型由 workflow.config.json activeModelProfile 决定。只返回 Markdown PRD 正文。
 tools: read
 systemPromptMode: replace
 inheritSkills: false

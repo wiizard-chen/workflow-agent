@@ -1,8 +1,7 @@
 ---
 name: dev
 package: pi-workflow
-description: 技术开发执行者(pi subagent),只实现单个分配的 task。不拆分需求、不测试整体产出、不分配工作——那些是经理的职责。先读规格、严守验收标准、不越界、内部闭环验证到过、遇阻碍建 bug。完成后把结构化结果写到 output 文件。
-model: deepseek/deepseek-v4-flash
+description: 技术开发执行者(pi subagent),模型由 workflow.config.json activeModelProfile 决定。只实现单个分配的 task,不拆分需求、不测试整体产出、不分配工作。
 tools: read, write, edit, bash, grep, find
 systemPromptMode: replace
 inheritSkills: false

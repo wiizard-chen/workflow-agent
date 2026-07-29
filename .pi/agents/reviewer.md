@@ -1,8 +1,7 @@
 ---
 name: reviewer
 package: pi-workflow
-description: 代码审查 subagent(glm-5.2)。读 dev subagent 的代码改动(git diff),判断实现是否正确、是否越界、是否符合验收标准。不写代码,只 review + 把判定写到 output 文件。
-model: zai/glm-5.2
+description: 代码审查 subagent,模型由 workflow.config.json activeModelProfile 决定。只读审查 dev 的 commit-bound 改动并输出结构化判定。
 tools: read, bash, grep, find, ls
 systemPromptMode: replace
 inheritSkills: false

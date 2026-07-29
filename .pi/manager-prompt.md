@@ -16,9 +16,9 @@
 
 ## 角色
 
-- `pi-workflow.dev`：DeepSeek，读规格、实现、运行 task 验证、commit、返回结构化结果。
-- `pi-workflow.reviewer`：GLM，只读审查一个 task 的 commit range，返回 pass/fail JSON。
-- `pi-workflow.final-reviewer`：GLM，只读读取 PRD、`verify.json` 与 `cumulative.diff`，返回最终验收 JSON。
+- `pi-workflow.dev`：使用运行上下文中的 dev model，读规格、实现、运行 task 验证、commit、返回结构化结果。
+- `pi-workflow.reviewer`：使用运行上下文中的 reviewer model，只读审查一个 task 的 commit range，返回 pass/fail JSON。
+- `pi-workflow.final-reviewer`：使用运行上下文中的 final reviewer model，只读读取 PRD、`verify.json` 与 `cumulative.diff`，返回最终验收 JSON。
 - manager：拆分、选择下一任务、读取结果、调用受控状态工具，不写代码。
 
 ## 恢复检查
@@ -73,6 +73,7 @@ claim 会拒绝空验证命令，并将当前 HEAD 写入：
 ```ts
 subagent({
   agent: "pi-workflow.dev",
+  model: "<运行上下文中的 dev model,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.json",
@@ -87,6 +88,7 @@ subagent({
 ```ts
 subagent({
   agent: "pi-workflow.reviewer",
+  model: "<运行上下文中的 reviewer model,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.review.json",
@@ -118,11 +120,12 @@ extension 只运行 `/wf verify` 或配置中的预设命令，写出：
 
 manager 和 final-reviewer 都不能自行构造 shell 命令。
 
-### B. GLM 最终审查
+### B. 最终审查
 
 ```ts
 subagent({
   agent: "pi-workflow.final-reviewer",
+  model: "<运行上下文中的 final reviewer model,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/final-review.json",

@@ -19,7 +19,8 @@ import {
   sha256File, ensureRequirementDirs, preservedBaseline, splitDecision,
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
-  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed, renderedToolName
+  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
+  activeModelProfile, assertActiveProfileModelsAvailable, workflowAgentModel, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
   if (!epicId) throw new Error("缺少 bd epic id");
   let existingTaskCount = 0;
   try { existingTaskCount = bd.children(wf.repo, epicId).filter((i) => i.issue_type === "task").length; } catch { /* tool will report bd errors */ }
+  const profile = activeModelProfile();
   const context = [
     ``,
     `--- 运行上下文 ---`,
@@ -57,6 +59,11 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
     `目标仓库:${wf.repo}`,
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
+    `模型 profile:${CONFIG.activeModelProfile}`,
+    `主 session:${profile.main}`,
+    `dev model:${profile.dev}`,
+    `reviewer model:${profile.reviewer}`,
+    `final reviewer model:${profile.finalReviewer}`,
     `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
     `writer 并行上限:1(安全硬限制;禁止 tasks:[...] 和 worktree:true)`,
     `------------------`,
@@ -87,6 +94,8 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
  *  itself (interactive, user can watch + intervene via /wf status).
  *  Optional prdPath arg points at a specific PRD (auto-creates a fresh epic). */
 export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
+  try { await assertActiveProfileModelsAvailable(ctx); }
+  catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (!wf.epicId) { ctx.ui.notify("缺少 bd epic id。", "error"); return; }
   try { assertWorkflowAgentsUnshadowed(wf.repo); }
@@ -96,6 +105,7 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
     ctx.ui.notify("无法进入 build:未配置验证命令。请先执行 /wf verify <cmd>。空命令不允许跳过。", "error");
     return;
   }
+  if (!(await useRole(pi, ctx, CONFIG.roles.split))) return;
 
   // Parse args: optional `--dry-run` flag + optional PRD path.
   // dry-run (P1) = split the PRD into bd tasks and report the plan, but never
@@ -133,9 +143,11 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
     prdPath = reqPath(wf, "prd.md");
     if (!fs.existsSync(prdPath)) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
     const audit = readJson(reqPath(wf, "results", "prd-generation.json"));
-    if (!audit || audit.status !== "completed" || audit.resolvedModel !== "zai/glm-5.2"
+    const expectedPrdModel = workflowAgentModel("pi-workflow.prd-writer");
+    if (!audit || audit.status !== "completed" || audit.resolvedModel !== expectedPrdModel
+      || audit.profile !== CONFIG.activeModelProfile
       || audit.context !== "fork" || audit.outputSha256 !== sha256File(prdPath)) {
-      ctx.ui.notify("PRD 缺少有效的 prd-writer GLM 审计,或生成后已被修改。请重新 /wf prd；外部 PRD 请显式传路径给 /execute。", "error");
+      ctx.ui.notify(`PRD 缺少有效的 prd-writer 审计(${expectedPrdModel},profile=${CONFIG.activeModelProfile}),或生成后已被修改。请重新 /wf prd；外部 PRD 请显式传路径给 /execute。`, "error");
       return;
     }
   }
@@ -160,15 +172,12 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
     }
   }
 
-  // Switch to the split/reasoning model for orchestration, then inject the
-  // manager prompt as a user message — the main session LLM picks it up and
-  // starts running the pipeline (split → pi-workflow.dev → pi-workflow.reviewer → ...).
-  await useRole(pi, ctx, CONFIG.roles.split);
+  // The configured main model was selected before any BUILD state mutation.
   const prompt = loadManagerPrompt(prdPath || undefined, wf.epicId, dryRun);
   ctx.ui.notify(
     dryRun
       ? `EXECUTE --dry-run:只拆分 + 汇报计划,不派 dev、不改代码。\n拆分结果会真的建成 bd task(方便审阅依赖图),确认无误后跑 /execute 正式执行;不满意可 /wf abort 清理。`
-      : `EXECUTE:主 session 进入 build 模式,开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式,跑歪了可 /wf abort 回滚到 baseline。`,
+      : `EXECUTE:主 session 进入 build 模式(profile=${CONFIG.activeModelProfile},manager=${activeModelProfile().main}),开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式,跑歪了可 /wf abort 回滚到 baseline。`,
     "info",
   );
   pi.sendUserMessage(prompt);

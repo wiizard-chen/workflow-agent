@@ -37,6 +37,12 @@ import {
 } from "../extensions/bd.ts";
 import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
+  activeModelProfile, advisoryOutputPath, assertActiveProfileModelsAvailable,
+  configuredActiveProfileName, loadConfig, setWorkflow,
+  validateSubagentCall, workflowAgentModel,
+} from "../extensions/workflow/runtime.ts";
+import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
+import {
   addUsage,
   buildRunSummary,
   cacheHitRate,
@@ -56,7 +62,7 @@ import {
 
 function workflowSource(): string {
   return [
-    "runtime.ts",
+    "runtime.ts", "capabilities.ts",
     "commands/plan.ts", "commands/lifecycle.ts", "commands/issues.ts", "commands/build.ts",
     "tools/split.ts", "tools/beads.ts", "tools/verification.ts",
     "manager-tools.ts", "index.ts",
@@ -219,6 +225,80 @@ check("splitDecision rejects complete manifest with missing Beads tasks", splitD
     ensureRequirementDirs({ reqId: "external", name: "x", repo: root, mode: "plan", createdAt: "now", epicId: "e", subtaskIds: [] });
     check("ensureRequirementDirs initializes external PRD results/subtasks", fs.existsSync(path.join(root, ".workflow", "external", "results")) && fs.existsSync(path.join(root, ".workflow", "external", "subtasks")));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+
+console.log("\nmodel profile availability guard:");
+{
+  const profile = activeModelProfile(loadConfig());
+  const models = Object.values(profile)
+    .filter((value): value is string => typeof value === "string" && value.includes("/"))
+    .map((qualified) => { const [provider, ...rest] = qualified.split("/"); return { provider, id: rest.join("/") }; });
+  const find = (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id);
+  let rejected = false;
+  try {
+    await assertActiveProfileModelsAvailable({ modelRegistry: { find, getAvailable: async () => [] } } as any);
+  } catch { rejected = true; }
+  check("registered but unauthenticated/unavailable profile model is rejected", rejected);
+  let accepted = true;
+  try {
+    await assertActiveProfileModelsAvailable({ modelRegistry: { find, getAvailable: async () => models } } as any);
+  } catch { accepted = false; }
+  check("fully available active profile is accepted", accepted);
+}
+
+console.log("\nPLAN builtin advisory capability guard:");
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-advisory-"));
+  const state: WorkflowState = { reqId: "req", name: "x", repo, mode: "plan", createdAt: "now", epicId: "e", subtaskIds: [] };
+  try {
+    const sessionId = "wf-advisory-capability-test";
+    const ceilingCtx = { sessionManager: { getSessionId: () => sessionId } };
+    syncSubagentCapabilityCeiling(ceilingCtx, "plan");
+    const registry = (globalThis as any)[Symbol.for("pi-subagents.capability-ceiling.v1")] as Map<string, Map<symbol, any>>;
+    const registration = [...(registry.get(sessionId)?.values() || [])][0]?.ceiling;
+    check("PLAN capability ceiling is registered out-of-band", registration?.sources?.includes("pi-workflow-plan"));
+    check("PLAN capability ceiling removes bash/write/edit", !PLAN_ADVISORY_TOOLS.some((tool) => ["bash", "write", "edit"].includes(tool)));
+    check("PLAN capability ceiling preserves researcher web tools", PLAN_ADVISORY_TOOLS.includes("web_search"));
+    setWorkflow(state);
+    ensureRequirementDirs(state);
+    const call = (agent: string, context: string, output: string, model?: string) => validateSubagentCall({
+      toolCallId: "advisory-test",
+      input: { agent, context, cwd: state.repo, output, ...(model ? { model } : {}) },
+    });
+    check("researcher exact fresh/output call is allowed", call("researcher", "fresh", advisoryOutputPath("researcher")) === undefined);
+    check("scout exact fresh/output call is allowed", call("scout", "fresh", advisoryOutputPath("scout")) === undefined);
+    check("oracle exact fork/output call is allowed", call("oracle", "fork", advisoryOutputPath("oracle")) === undefined);
+    check("advisory wrong context is rejected", /context=fresh/.test(call("researcher", "fork", advisoryOutputPath("researcher")) || ""));
+    check("advisory wrong output is rejected", /output 路径错误/.test(call("scout", "fresh", path.join(repo, "wrong.md")) || ""));
+    const prdOutput = path.join(repo, ".workflow", "req", "prd.md");
+    const prdModel = workflowAgentModel("pi-workflow.prd-writer");
+    check("PRD writer exact active-profile model is allowed", call("pi-workflow.prd-writer", "fork", prdOutput, prdModel) === undefined);
+    check("PRD writer model drift is rejected", /active profile 配置/.test(call("pi-workflow.prd-writer", "fork", prdOutput, "zai/glm-5.2") || ""));
+    fs.mkdirSync(path.join(repo, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".pi", "settings.json"), JSON.stringify({ subagents: { agentOverrides: { researcher: { model: "test/model", thinking: "low" } } } }));
+    check("model/thinking-only builtin override remains allowed", call("researcher", "fresh", advisoryOutputPath("researcher")) === undefined);
+    fs.writeFileSync(path.join(repo, ".pi", "settings.json"), JSON.stringify({ subagents: { agentOverrides: { researcher: { tools: ["bash"] } } } }));
+    check("capability-changing builtin override is rejected", /不安全 settings override/.test(call("researcher", "fresh", advisoryOutputPath("researcher")) || ""));
+    fs.rmSync(path.join(repo, ".pi", "settings.json"), { force: true });
+    const nestedRepo = path.join(repo, "packages", "target");
+    fs.mkdirSync(nestedRepo, { recursive: true });
+    state.repo = nestedRepo;
+    fs.writeFileSync(path.join(repo, ".pi", "settings.json"), JSON.stringify({ subagents: { defaultExtensions: ["unsafe-extension"] } }));
+    check("nearest ancestor defaultExtensions is rejected", /禁止 subagents.defaultExtensions/.test(call("scout", "fresh", advisoryOutputPath("scout")) || ""));
+    fs.rmSync(path.join(repo, ".pi", "settings.json"), { force: true });
+    state.repo = repo;
+    state.mode = "build";
+    check("builtin advisory agents cannot enter BUILD", /build 模式只允许/.test(call("oracle", "fresh", path.join(repo, ".workflow", "req", "results", "x.md")) || ""));
+    fs.writeFileSync(path.join(repo, ".workflow", "req", "results", "verify.json"), "{}\n");
+    const finalOutput = path.join(repo, ".workflow", "req", "results", "final-review.json");
+    const finalModel = workflowAgentModel("pi-workflow.final-reviewer");
+    check("final reviewer exact active-profile model is allowed", call("pi-workflow.final-reviewer", "fresh", finalOutput, finalModel) === undefined);
+    check("final reviewer model drift is rejected", /active profile 配置/.test(call("pi-workflow.final-reviewer", "fresh", finalOutput, "zai/glm-5.2") || ""));
+  } finally {
+    syncSubagentCapabilityCeiling({ sessionManager: { getSessionId: () => "wf-advisory-capability-test" } }, undefined);
+    setWorkflow(undefined);
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 }
 
 // ===========================================================================
@@ -423,7 +503,7 @@ console.log("\nregression guard — modular workflow layout:");
 {
   const entry = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
   const requiredModules = [
-    "runtime.ts", "index.ts", "commands.ts", "manager-tools.ts",
+    "runtime.ts", "capabilities.ts", "index.ts", "commands.ts", "manager-tools.ts",
     "commands/plan.ts", "commands/lifecycle.ts", "commands/issues.ts", "commands/build.ts",
     "tools/split.ts", "tools/beads.ts", "tools/verification.ts",
   ];
@@ -512,6 +592,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("loadManagerPrompt() exists", !!loadMgr);
   if (loadMgr) {
     check("loadManagerPrompt() injects writer ceiling 1", /writer 并行上限:1/.test(loadMgr[0]));
+    check("loadManagerPrompt() injects active profile role models", /模型 profile:[\s\S]*dev model:[\s\S]*reviewer model:[\s\S]*final reviewer model:/.test(loadMgr[0]));
     check("loadManagerPrompt() supports a dryRun branch", /dryRun/.test(loadMgr[0]));
     check("dry-run branch forbids dispatching dev", /不要派 dev|绝对不要派 dev/.test(loadMgr[0]));
   }
@@ -523,6 +604,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check('manager-prompt.md no longer says the placeholder "N 个开发"', !/N 个开发/.test(mgrPrompt));
   check("manager-prompt.md documents writer ceiling", /writer 上限固定为 1/.test(mgrPrompt));
   check("manager-prompt.md forbids worktree writers", /禁止 `tasks:\[\.\.\.\]`、`worktree:true`/.test(mgrPrompt));
+  check("manager-prompt.md requires configured model on every authoritative child", (mgrPrompt.match(/model: "<运行上下文中的/g) || []).length === 3);
   check("manager-prompt.md uses deterministic verify + final reviewer", /run_verify[\s\S]*final-reviewer[\s\S]*finalize_test/.test(mgrPrompt));
   check("manager-prompt.md does not grant bash", !/开放[^\n]*bash|工具集[^\n]*bash/.test(mgrPrompt));
   check("bd_task close validates a claim-bound integrated commit range", /validateIntegratedCommitRange/.test(src) && /\.claim\.json/.test(src));
@@ -537,19 +619,30 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("resume uses Beads epic picker and reconstructs state", /bd\.list\(ctx\.cwd, \{ type: "epic", all: true, limit: 0 \}\)/.test(src) && /ui\.select\("选择要恢复的 Beads epic"/.test(src) && /重建 workflow 上下文/.test(src));
   check("idle command is removed", !/case "idle"|cmdIdle|\/wf idle/.test(src));
   check("PRD command delegates to forked namespaced prd-writer", /agent: "pi-workflow\.prd-writer"[\s\S]*context: "fork"[\s\S]*cwd:/.test(src));
-  check("subagent capability guard rejects parallel/worktree/async and model overrides", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*input\.model/.test(src));
-  check("subagent capability guard restricts plan/build roles", /plan 模式只允许 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
+  check("subagent capability guard rejects parallel/worktree/async and binds model to active profile", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*workflowAgentModel\(agent\)/.test(src));
+  check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
+  check("PLAN builtin advisory calls are context/output bound", /ADVISORY_AGENTS[\s\S]*agent === "oracle" \? "fork" : "fresh"[\s\S]*advisoryOutputPath\(agent\)/.test(src));
+  check("PLAN advisory children have an out-of-band capability ceiling", /pi-subagents\.capability-ceiling\.v1[\s\S]*PLAN_ADVISORY_TOOLS[\s\S]*validateAdvisoryLaunchContract/.test(src));
+  check("advisory call arguments use a strict allowlist", /allowedKeys = new Set\(\["agent", "task", "context", "cwd", "output"\]\)/.test(src));
+  check("research/scout/oracle commands are wired", /case "research": await cmdResearch/.test(src) && /case "oracle": await cmdOracle/.test(src) && /agent: "scout"/.test(src));
+  check("advisory evidence is explicitly non-authoritative and detects repo mutation", /authority: "advisory"[\s\S]*repoUnchanged[\s\S]*excludedFromAuthoritativeEvidence: true/.test(src));
+  check("builtin advisory shadow/override fails closed", /function assertAdvisoryAgentsUnshadowed[\s\S]*builtin advisory agent 被高优先级定义覆盖[\s\S]*settings override/.test(src));
   check("subagent capability guard enforces workflow cwd and serial dev lease", /cwd 必须精确[\s\S]*activeDevToolCallId/.test(src));
   check("workflow fails closed on higher-precedence agent shadow/override", /function assertWorkflowAgentsUnshadowed[\s\S]*workflow agent 被高优先级定义覆盖[\s\S]*settings override/.test(src));
   check("PRD child model/usage is persisted from subagent tool details", /pi\.on\("tool_result"[\s\S]*prd-generation\.json[\s\S]*resolvedModel[\s\S]*usage/.test(src));
   check("final reviewer has a separate actual-model audit envelope", /final-review\.audit\.json/.test(src));
-  check("final evidence is bound to runId/head/command/hashes and exact GLM audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*resolvedModel !== "zai\/glm-5\.2"[\s\S]*verifyRunId/.test(src));
+  check("final evidence is bound to runId/head/command/hashes and configured reviewer audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*expectedFinalModel[\s\S]*verifyRunId/.test(src));
   check("bd_task mutations are scoped to active epic children", /assertActiveChildIssue\(taskId\)/.test(src));
   check("task close requires commit-bound reviewer pass + audit", /review\?\.taskId === taskId[\s\S]*review\?\.baseline === baseline[\s\S]*review\?\.commitSha === commitSha/.test(src));
   check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*resetUsageByModel\(\)[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
   check("split ignores env overrides and only uses active epic/canonical PRD", !/WF_EPIC_ID|WF_PRD_PATH/.test(src) && /parent: wf\.epicId/.test(src) && /split 只允许当前 canonical PRD/.test(src));
   check("split is manifest-backed and fails closed on partial creation", /manifestPath = reqPath\(wf, "results", "split\.json"\)/.test(src) && /status: "creating"[\s\S]*status: "complete"[\s\S]*status: "failed"/.test(src) && /拒绝自动重试以避免重复/.test(src));
   check("split tool no longer recursively calls the parent model", !/const splitPromptText = withBrief\(wf!\.repo/.test(src));
+  check("main-model selection fails closed before workflow state mutation",
+    /function cmdNew[\s\S]*?if \(!\(await useRole[\s\S]*?bd\.init/.test(src)
+    && /function cmdPlan[\s\S]*?if \(!\(await useRole[\s\S]*?wf\.mode = "plan"/.test(src)
+    && /function cmdResume[\s\S]*?if \(!\(await useRole[\s\S]*?setWorkflow\(target\)/.test(src)
+    && /function cmdExecute[\s\S]*?if \(!\(await useRole[\s\S]*?wf\.mode = "build"/.test(src));
   check("execute preserves the original baseline across resume", /wf\.baseline = preservedBaseline\(wf\.baseline, gitHead/.test(src));
 
   // P1-7: /execute --dry-run parsing.
@@ -600,10 +693,8 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   const finalReviewerAgent = fs.readFileSync(new URL("../.pi/agents/final-reviewer.md", import.meta.url), "utf8");
   const prdWriterAgent = fs.readFileSync(new URL("../.pi/agents/prd-writer.md", import.meta.url), "utf8");
   check("provider bridge maps GLM5_2_API_KEY for builtin Z.AI children", /ZAI_API_KEY[\s\S]*GLM5_2_API_KEY/.test(providerSource));
-  check("dev model is provider-qualified", /package:\s*pi-workflow[\s\S]*model:\s*deepseek\/deepseek-v4-flash/.test(devAgent));
-  check("reviewer model is provider-qualified", /package:\s*pi-workflow[\s\S]*model:\s*zai\/glm-5\.2/.test(reviewerAgent));
-  check("prd-writer uses namespaced GLM-5.2", /package:\s*pi-workflow[\s\S]*model:\s*zai\/glm-5\.2/.test(prdWriterAgent));
-  check("final-reviewer uses GLM-5.2 without bash", /model:\s*zai\/glm-5\.2/.test(finalReviewerAgent) && !/tools:.*bash/.test(finalReviewerAgent));
+  check("workflow agents leave model selection to workflow.config.json", [devAgent, reviewerAgent, prdWriterAgent, finalReviewerAgent].every((text) => !/^model:/m.test(text)));
+  check("final-reviewer remains shell-free", !/tools:.*bash/.test(finalReviewerAgent));
   for (const [name, text] of [["dev", devAgent], ["reviewer", reviewerAgent], ["prd-writer", prdWriterAgent], ["final-reviewer", finalReviewerAgent]] as const) {
     check(`${name} disables inferred acceptance for raw artifact output`, /acceptance:\s*\{level:\s*none/.test(text));
   }
@@ -614,6 +705,32 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   // omp-subprocess architecture or the wrong .omp/agents path.
   const cfgRaw = fs.readFileSync(new URL("../workflow.config.json", import.meta.url), "utf8");
   check("workflow.config.json is valid JSON", (() => { try { JSON.parse(cfgRaw); return true; } catch { return false; } })());
+  const parsed = JSON.parse(cfgRaw);
+  check("gpt56 profile maps Sol/Terra/Luna roles", parsed.activeModelProfile === "gpt56"
+    && parsed.modelProfiles?.gpt56?.main === "codex2api/gpt-5.6-sol"
+    && parsed.modelProfiles?.gpt56?.prd === "codex2api/gpt-5.6-sol"
+    && parsed.modelProfiles?.gpt56?.dev === "codex2api/gpt-5.6-terra"
+    && parsed.modelProfiles?.gpt56?.reviewer === "codex2api/gpt-5.6-luna"
+    && parsed.modelProfiles?.gpt56?.finalReviewer === "codex2api/gpt-5.6-luna");
+  check("legacy DeepSeek/GLM profile remains available", parsed.modelProfiles?.["deepseek-glm"]?.main === "deepseek/deepseek-v4-pro"
+    && parsed.modelProfiles?.["deepseek-glm"]?.dev === "deepseek/deepseek-v4-flash"
+    && parsed.modelProfiles?.["deepseek-glm"]?.prd === "zai/glm-5.2");
+  const loaded = loadConfig();
+  check("runtime resolves active profile centrally", activeModelProfile(loaded).dev === "codex2api/gpt-5.6-terra"
+    && workflowAgentModel("pi-workflow.reviewer", loaded) === "codex2api/gpt-5.6-luna");
+  check("unknown active profile fails closed", (() => {
+    try { activeModelProfile({ ...loaded, activeModelProfile: "missing" }); return false; } catch { return true; }
+  })());
+  check("missing profile selector uses the default", configuredActiveProfileName({}, "gpt56") === "gpt56");
+  check("explicit empty/non-string profile selectors fail closed", ["", false, null].every((value) => {
+    try { configuredActiveProfileName({ activeModelProfile: value }, "gpt56"); return false; } catch { return true; }
+  }));
+  check("unqualified profile model fails closed", (() => {
+    try {
+      activeModelProfile({ ...loaded, modelProfiles: { ...loaded.modelProfiles, broken: { ...activeModelProfile(loaded), dev: "gpt-5.6-terra" } }, activeModelProfile: "broken" });
+      return false;
+    } catch { return true; }
+  })());
   check("workflow.config.json no longer references .omp/agents", !/\.omp\/agents/.test(cfgRaw));
   check("workflow.config.json no longer claims /execute spawns an omp process", !/启动经理 omp 进程/.test(cfgRaw));
   check("workflow.config.json marks pollIntervalMs as dead config", /死字段/.test(cfgRaw));
@@ -623,7 +740,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   // P0-2: README must not advertise the nonexistent `dev: {model, timeoutMs}`
   // config field as currently settable.
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  check("README states subagent models live in .pi/agents/*.md", /dev \/ reviewer \/ prd-writer \/ final-reviewer 的模型不在这里配/.test(readme));
+  check("README documents centralized activeModelProfile switching", /activeModelProfile[\s\S]*modelProfiles/.test(readme));
   check("README no longer shows the removed NN.metrics.json artifact", !/NN\.metrics\.json/.test(readme));
   check("README documents /execute --dry-run", /--dry-run/.test(readme));
   check("README documents /wf abort", /\/wf abort/.test(readme));

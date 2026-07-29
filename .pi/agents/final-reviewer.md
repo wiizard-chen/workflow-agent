@@ -1,8 +1,7 @@
 ---
 name: final-reviewer
 package: pi-workflow
-description: 使用 GLM-5.2 读取确定性验证结果、完整 diff 与 PRD,执行最终验收审查。只读,返回结构化 JSON。
-model: zai/glm-5.2
+description: 读取确定性验证结果、完整 diff 与 PRD 执行最终验收,模型由 workflow.config.json activeModelProfile 决定。只读,返回结构化 JSON。
 tools: read, grep, find, ls
 systemPromptMode: replace
 inheritSkills: false
