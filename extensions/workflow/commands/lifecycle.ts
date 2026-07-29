@@ -89,7 +89,7 @@ export function cmdStatus(ctx: ExtensionCommandContext): void {
   const usage = readRunSummary(wf);
   const usageLine = usage ? `\n用量 ${formatUsageLine(usage)}` : "";
   ctx.ui.notify(
-    `需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}\n模型 profile ${CONFIG.activeModelProfile} (main=${activeModelProfile().main}, dev=${activeModelProfile().dev}, review=${activeModelProfile().reviewer})` +
+    `需求 ${wf.reqId}  模式 ${wf.mode}\nepic ${wf.epicId}\n模型 profile ${CONFIG.activeModelProfile} (main=${activeModelProfile().main.model}@${activeModelProfile().main.effort}, dev=${activeModelProfile().dev.model}@${activeModelProfile().dev.effort}, review=${activeModelProfile().reviewer.model}@${activeModelProfile().reviewer.effort})` +
     (bdFailed ? "  (bd 不可用,降级模式)" : "") +
     (summary ? `\n${summary}` : "") + usageLine + `\n${lines.join("\n")}`,
     bdFailed ? "warning" : "info",

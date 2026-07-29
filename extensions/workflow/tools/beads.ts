@@ -21,7 +21,7 @@ import {
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
-  workflowAgentModel, renderedToolName
+  workflowAgentConfig, workflowAgentModel, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -137,8 +137,10 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
             const resultAudit = readJson(reqPath(wf, "results", `${taskId}.audit.json`));
             const claim = readJson(claimPath);
             if (!result || !resultAudit || !claim) throw new Error("JSON artifact 无法解析");
-            const expectedDevModel = workflowAgentModel("pi-workflow.dev");
-            if (resultAudit.status !== "completed" || resultAudit.resolvedModel !== expectedDevModel
+            const expectedDev = workflowAgentConfig("pi-workflow.dev");
+            if (resultAudit.status !== "completed" || resultAudit.requestedModel !== expectedDev.model
+              || resultAudit.requestedEffort !== expectedDev.effort || resultAudit.resolvedModel !== expectedDev.model
+              || resultAudit.resolvedEffort !== expectedDev.effort
               || resultAudit.profile !== CONFIG.activeModelProfile
               || resultAudit.context !== "fresh" || resultAudit.outputSha256 !== sha256File(resultPath) || resultAudit.toolsSafe !== true) {
               throw new Error("dev agent/model/tool/output audit 无效");
@@ -161,11 +163,13 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
             if (!review || !audit) throw new Error("review JSON artifact 无法解析");
             const reviewBound = review?.verdict === "pass" && review?.taskId === taskId
               && review?.baseline === baseline && review?.commitSha === commitSha;
-            const expectedReviewerModel = workflowAgentModel("pi-workflow.reviewer");
-            const auditValid = audit?.status === "completed" && audit?.resolvedModel === expectedReviewerModel
+            const expectedReviewer = workflowAgentConfig("pi-workflow.reviewer");
+            const auditValid = audit?.status === "completed" && audit?.requestedModel === expectedReviewer.model
+              && audit?.requestedEffort === expectedReviewer.effort && audit?.resolvedModel === expectedReviewer.model
+              && audit?.resolvedEffort === expectedReviewer.effort
               && audit?.profile === CONFIG.activeModelProfile
               && audit?.context === "fresh" && audit?.outputSha256 === sha256File(reviewPath);
-            if (!reviewBound || !auditValid) throw new Error(`review verdict 未通过、未绑定 task/commit,或 ${expectedReviewerModel} audit 无效`);
+            if (!reviewBound || !auditValid) throw new Error(`review verdict 未通过、未绑定 task/commit,或 ${expectedReviewer.model} effort=${expectedReviewer.effort} audit 无效`);
           } catch (e) {
             bd.reopen(repo, taskId);
             track(`✗ close 被拒:review 证据缺失/无效,已自动 reopen。`);

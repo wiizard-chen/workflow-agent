@@ -21,7 +21,7 @@ import {
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
   assertAdvisoryAgentsUnshadowed, advisoryOutputPath, advisoryRepoSnapshot,
-  assertActiveProfileModelsAvailable, workflowAgentModel, renderedToolName
+  assertActiveProfileModelsAvailable, workflowAgentEffort, workflowAgentModel, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -122,23 +122,26 @@ export async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
   const auditPath = reqPath(wf, "results", "prd-generation.json");
   const briefPath = repoBriefPath(wf.repo);
   const prdModel = workflowAgentModel("pi-workflow.prd-writer");
+  const prdEffort = workflowAgentEffort("pi-workflow.prd-writer");
   fs.writeFileSync(auditPath, JSON.stringify({
     status: "launched",
     agent: "pi-workflow.prd-writer",
     profile: CONFIG.activeModelProfile,
     requestedModel: prdModel,
+    requestedEffort: prdEffort,
     context: "fork",
     output: outputPath,
     launchedAt: new Date().toISOString(),
   }, null, 2) + "\n");
-  ctx.ui.notify(`将由独立 prd-writer subagent(${prdModel},profile=${CONFIG.activeModelProfile})生成 PRD…`, "info");
+  ctx.ui.notify(`将由独立 prd-writer subagent(${prdModel},effort=${prdEffort},profile=${CONFIG.activeModelProfile})生成 PRD…`, "info");
   pi.sendUserMessage([
     `请使用 subagent 工具生成当前需求的 PRD。`,
     `必须调用:`,
     `subagent({`,
     `  agent: "pi-workflow.prd-writer",`,
     `  model: ${JSON.stringify(prdModel)},`,
-    `  context: "fork",`,
+    `  thinking: ${JSON.stringify(prdEffort)},`,
+    `  context: "fork",`,,
     `  cwd: ${JSON.stringify(wf.repo)},`,
     `  output: ${JSON.stringify(outputPath)},`,
     `  task: ${JSON.stringify(`为需求 ${wf.name} 生成完整 PRD。读取仓库简报:${briefPath}。基于 fork 上下文中的完整需求讨论,只返回 Markdown PRD 正文。`)}`,

@@ -21,7 +21,7 @@ import {
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
-  advisoryOutputPath, advisoryRepoSnapshot, workflowAgentModel, renderedToolName
+  advisoryOutputPath, advisoryRepoSnapshot, workflowAgentConfig, renderedToolName
 } from "./runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -158,6 +158,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       const exactOutput = !!inputOutput && path.resolve(inputOutput) === path.resolve(expectedOutput)
         && (!result?.savedOutputPath || path.resolve(result.savedOutputPath) === path.resolve(expectedOutput));
       const resolvedModel = result?.model ?? null;
+      const resolvedEffort = result?.thinking ?? null;
       const context = result?.context ?? event?.details?.context ?? null;
       const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
       const allowedTools = agent === "pi-workflow.dev"
@@ -170,16 +171,19 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         return allowedTools.has(toolName);
       });
       const verify = agent === "pi-workflow.final-reviewer" ? readJson(reqPath(wf, "results", "verify.json")) : undefined;
-      const expectedModel = workflowAgentModel(agent);
+      const expected = workflowAgentConfig(agent);
       const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
-        && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expectedModel
+        && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expected.model
+        && resolvedEffort === expected.effort
         && context === expectedContext && !!usage && toolsSafe;
       fs.writeFileSync(auditPath, JSON.stringify({
         status: ok ? "completed" : "failed",
         agent,
-        requestedModel: expectedModel,
+        requestedModel: expected.model,
+        requestedEffort: expected.effort,
         profile: CONFIG.activeModelProfile,
         resolvedModel,
+        resolvedEffort,
         attemptedModels: result?.attemptedModels ?? [],
         context,
         usage,

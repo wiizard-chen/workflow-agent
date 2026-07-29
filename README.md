@@ -271,11 +271,8 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 | 字段 | 作用 |
 |---|---|
 | `activeModelProfile` | 当前启用的整套模型分工；默认 `gpt56` |
-| `modelProfiles.<name>.main` | 主 session 的 PLAN 讨论、拆分和 BUILD manager |
-| `modelProfiles.<name>.prd` | `pi-workflow.prd-writer` |
-| `modelProfiles.<name>.dev` | `pi-workflow.dev` 单 task writer |
-| `modelProfiles.<name>.reviewer` | `pi-workflow.reviewer` task 审查 |
-| `modelProfiles.<name>.finalReviewer` | `pi-workflow.final-reviewer` 最终验收 |
+| `modelProfiles.<name>.<role>.model` | 该角色使用的 `provider/model`；role 为 `main/prd/dev/reviewer/finalReviewer` |
+| `modelProfiles.<name>.<role>.effort` | 该角色默认推理强度：`off/minimal/low/medium/high/xhigh/max` |
 | `providers.*` | DeepSeek/Z.AI 等非 builtin provider endpoint 与 API key 环境变量 |
 | `build.verifyCommand` | 默认验证命令(`/wf verify <cmd>` 可按需求覆盖) |
 | `execute.maxParallel` | 当前安全上限固定为 1 |
@@ -286,7 +283,7 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 "activeModelProfile": "deepseek-glm"
 ```
 
-也可以复制一个 profile 创建自己的组合。所有模型必须使用 `provider/model` 格式；profile 缺字段、名称不存在、subagent 调用模型与 profile 不一致时都会 fail closed。`.pi/agents/*.md` 只定义角色能力和 prompt，不再写死模型。
+也可以复制一个 profile 创建自己的组合。默认 `gpt56` 为 main=`xhigh`、PRD/dev=`high`、task/final reviewer=`xhigh`；legacy `deepseek-glm` 默认均为 `high`。旧版字符串写法仍可读取：`deepseek-glm` 字符串项统一归一化为 `high`，其他字符串 profile 使用上述按角色默认值；建议新配置显式写 `{ "model": "provider/model", "effort": "..." }`。所有模型必须使用 `provider/model` 格式；profile 缺字段、名称不存在、effort 无效、subagent 调用模型或 effort 与 profile 不一致时都会 fail closed。`.pi/agents/*.md` 只定义角色能力和 prompt，不再写死模型/effort。
 
 `execute.driver` 只实现了 `"bd"`;`execute.pollIntervalMs` 是死字段。改完 `/reload` 或重启 Pi。
 

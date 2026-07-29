@@ -1,22 +1,22 @@
 {
-  "$comment": "workflow 扩展配置。修改 activeModelProfile 后重启 pi 或 /reload 生效。所有模型统一使用 provider/model 格式。",
+  "$comment": "workflow 扩展配置。修改 activeModelProfile 后重启 pi 或 /reload 生效。每个角色统一配置 model(provider/model)与 effort。",
   "activeModelProfile": "gpt56",
   "modelProfiles": {
     "gpt56": {
-      "$comment": "GPT-5.6 分工:Sol 主 session/PRD,Terra 单 task 编码,Luna 代码与最终审查。",
-      "main": "codex2api/gpt-5.6-sol",
-      "prd": "codex2api/gpt-5.6-sol",
-      "dev": "codex2api/gpt-5.6-terra",
-      "reviewer": "codex2api/gpt-5.6-luna",
-      "finalReviewer": "codex2api/gpt-5.6-luna"
+      "$comment": "GPT-5.6 分工:Sol 主 session/PRD,Terra 单 task 编码,Luna 代码与最终审查；main=xhigh,PRD/dev=high,审查=xhigh。",
+      "main": { "model": "codex2api/gpt-5.6-sol", "effort": "xhigh" },
+      "prd": { "model": "codex2api/gpt-5.6-sol", "effort": "high" },
+      "dev": { "model": "codex2api/gpt-5.6-terra", "effort": "high" },
+      "reviewer": { "model": "codex2api/gpt-5.6-luna", "effort": "xhigh" },
+      "finalReviewer": { "model": "codex2api/gpt-5.6-luna", "effort": "xhigh" }
     },
     "deepseek-glm": {
       "$comment": "原有 DeepSeek + GLM 分工,切换 activeModelProfile 即可恢复。",
-      "main": "deepseek/deepseek-v4-pro",
-      "prd": "zai/glm-5.2",
-      "dev": "deepseek/deepseek-v4-flash",
-      "reviewer": "zai/glm-5.2",
-      "finalReviewer": "zai/glm-5.2"
+      "main": { "model": "deepseek/deepseek-v4-pro", "effort": "high" },
+      "prd": { "model": "zai/glm-5.2", "effort": "high" },
+      "dev": { "model": "deepseek/deepseek-v4-flash", "effort": "high" },
+      "reviewer": { "model": "zai/glm-5.2", "effort": "high" },
+      "finalReviewer": { "model": "zai/glm-5.2", "effort": "high" }
     }
   },
   "providers": {

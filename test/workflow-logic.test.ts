@@ -38,8 +38,8 @@ import {
 import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
   activeModelProfile, advisoryOutputPath, assertActiveProfileModelsAvailable,
-  configuredActiveProfileName, loadConfig, setWorkflow,
-  validateSubagentCall, workflowAgentModel,
+  configuredActiveProfileName, loadConfig, setWorkflow, useRole,
+  validateSubagentCall, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
 import {
@@ -231,8 +231,7 @@ console.log("\nmodel profile availability guard:");
 {
   const profile = activeModelProfile(loadConfig());
   const models = Object.values(profile)
-    .filter((value): value is string => typeof value === "string" && value.includes("/"))
-    .map((qualified) => { const [provider, ...rest] = qualified.split("/"); return { provider, id: rest.join("/") }; });
+    .map((entry) => { const [provider, ...rest] = entry.model.split("/"); return { provider, id: rest.join("/") }; });
   const find = (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id);
   let rejected = false;
   try {
@@ -244,6 +243,20 @@ console.log("\nmodel profile availability guard:");
     await assertActiveProfileModelsAvailable({ modelRegistry: { find, getAvailable: async () => models } } as any);
   } catch { accepted = false; }
   check("fully available active profile is accepted", accepted);
+
+  let selectedEffort = "off";
+  const fakeCtx = { model: undefined as any, modelRegistry: { find: () => ({ provider: "codex2api", id: "gpt-5.6-sol" }) }, ui: { notify: () => {} } } as any;
+  const fakePi = {
+    setModel: async (model: any) => { fakeCtx.model = model; return true; },
+    setThinkingLevel: (effort: string) => { selectedEffort = effort; },
+    getThinkingLevel: () => selectedEffort,
+  } as any;
+  check("main role applies configured xhigh effort", await useRole(fakePi, fakeCtx, { provider: "codex2api", model: "gpt-5.6-sol", effort: "xhigh" }) && selectedEffort === "xhigh");
+  const wrongModelCtx = { ...fakeCtx, model: { provider: "other", id: "wrong" } } as any;
+  const wrongModelPi = { ...fakePi, setModel: async () => true } as any;
+  check("main role fails closed when resolved model drifts", !(await useRole(wrongModelPi, wrongModelCtx, { provider: "codex2api", model: "gpt-5.6-sol", effort: "xhigh" })));
+  const clampedPi = { ...fakePi, getThinkingLevel: () => "high" } as any;
+  check("main role fails closed when effort is clamped", !(await useRole(clampedPi, fakeCtx, { provider: "codex2api", model: "gpt-5.6-sol", effort: "xhigh" })));
 }
 
 console.log("\nPLAN builtin advisory capability guard:");
@@ -261,9 +274,9 @@ console.log("\nPLAN builtin advisory capability guard:");
     check("PLAN capability ceiling preserves researcher web tools", PLAN_ADVISORY_TOOLS.includes("web_search"));
     setWorkflow(state);
     ensureRequirementDirs(state);
-    const call = (agent: string, context: string, output: string, model?: string) => validateSubagentCall({
+    const call = (agent: string, context: string, output: string, model?: string, thinking?: string) => validateSubagentCall({
       toolCallId: "advisory-test",
-      input: { agent, context, cwd: state.repo, output, ...(model ? { model } : {}) },
+      input: { agent, context, cwd: state.repo, output, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) },
     });
     check("researcher exact fresh/output call is allowed", call("researcher", "fresh", advisoryOutputPath("researcher")) === undefined);
     check("scout exact fresh/output call is allowed", call("scout", "fresh", advisoryOutputPath("scout")) === undefined);
@@ -272,8 +285,10 @@ console.log("\nPLAN builtin advisory capability guard:");
     check("advisory wrong output is rejected", /output 路径错误/.test(call("scout", "fresh", path.join(repo, "wrong.md")) || ""));
     const prdOutput = path.join(repo, ".workflow", "req", "prd.md");
     const prdModel = workflowAgentModel("pi-workflow.prd-writer");
-    check("PRD writer exact active-profile model is allowed", call("pi-workflow.prd-writer", "fork", prdOutput, prdModel) === undefined);
-    check("PRD writer model drift is rejected", /active profile 配置/.test(call("pi-workflow.prd-writer", "fork", prdOutput, "zai/glm-5.2") || ""));
+    const prdEffort = workflowAgentEffort("pi-workflow.prd-writer");
+    check("PRD writer exact active-profile model/effort is allowed", call("pi-workflow.prd-writer", "fork", prdOutput, prdModel, prdEffort) === undefined);
+    check("PRD writer model drift is rejected", /active profile 配置/.test(call("pi-workflow.prd-writer", "fork", prdOutput, "zai/glm-5.2", prdEffort) || ""));
+    check("PRD writer effort drift is rejected", /effort 必须/.test(call("pi-workflow.prd-writer", "fork", prdOutput, prdModel, "low") || ""));
     fs.mkdirSync(path.join(repo, ".pi"), { recursive: true });
     fs.writeFileSync(path.join(repo, ".pi", "settings.json"), JSON.stringify({ subagents: { agentOverrides: { researcher: { model: "test/model", thinking: "low" } } } }));
     check("model/thinking-only builtin override remains allowed", call("researcher", "fresh", advisoryOutputPath("researcher")) === undefined);
@@ -292,8 +307,10 @@ console.log("\nPLAN builtin advisory capability guard:");
     fs.writeFileSync(path.join(repo, ".workflow", "req", "results", "verify.json"), "{}\n");
     const finalOutput = path.join(repo, ".workflow", "req", "results", "final-review.json");
     const finalModel = workflowAgentModel("pi-workflow.final-reviewer");
-    check("final reviewer exact active-profile model is allowed", call("pi-workflow.final-reviewer", "fresh", finalOutput, finalModel) === undefined);
-    check("final reviewer model drift is rejected", /active profile 配置/.test(call("pi-workflow.final-reviewer", "fresh", finalOutput, "zai/glm-5.2") || ""));
+    const finalEffort = workflowAgentEffort("pi-workflow.final-reviewer");
+    check("final reviewer exact active-profile model/effort is allowed", call("pi-workflow.final-reviewer", "fresh", finalOutput, finalModel, finalEffort) === undefined);
+    check("final reviewer model drift is rejected", /active profile 配置/.test(call("pi-workflow.final-reviewer", "fresh", finalOutput, "zai/glm-5.2", finalEffort) || ""));
+    check("final reviewer effort drift is rejected", /effort 必须/.test(call("pi-workflow.final-reviewer", "fresh", finalOutput, finalModel, "low") || ""));
   } finally {
     syncSubagentCapabilityCeiling({ sessionManager: { getSessionId: () => "wf-advisory-capability-test" } }, undefined);
     setWorkflow(undefined);
@@ -604,7 +621,8 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check('manager-prompt.md no longer says the placeholder "N 个开发"', !/N 个开发/.test(mgrPrompt));
   check("manager-prompt.md documents writer ceiling", /writer 上限固定为 1/.test(mgrPrompt));
   check("manager-prompt.md forbids worktree writers", /禁止 `tasks:\[\.\.\.\]`、`worktree:true`/.test(mgrPrompt));
-  check("manager-prompt.md requires configured model on every authoritative child", (mgrPrompt.match(/model: "<运行上下文中的/g) || []).length === 3);
+  check("manager-prompt.md requires configured model/effort on every authoritative child", (mgrPrompt.match(/model: "<运行上下文中的/g) || []).length === 3
+    && (mgrPrompt.match(/thinking: "<运行上下文中的/g) || []).length === 3);
   check("manager-prompt.md uses deterministic verify + final reviewer", /run_verify[\s\S]*final-reviewer[\s\S]*finalize_test/.test(mgrPrompt));
   check("manager-prompt.md does not grant bash", !/开放[^\n]*bash|工具集[^\n]*bash/.test(mgrPrompt));
   check("bd_task close validates a claim-bound integrated commit range", /validateIntegratedCommitRange/.test(src) && /\.claim\.json/.test(src));
@@ -619,7 +637,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("resume uses Beads epic picker and reconstructs state", /bd\.list\(ctx\.cwd, \{ type: "epic", all: true, limit: 0 \}\)/.test(src) && /ui\.select\("选择要恢复的 Beads epic"/.test(src) && /重建 workflow 上下文/.test(src));
   check("idle command is removed", !/case "idle"|cmdIdle|\/wf idle/.test(src));
   check("PRD command delegates to forked namespaced prd-writer", /agent: "pi-workflow\.prd-writer"[\s\S]*context: "fork"[\s\S]*cwd:/.test(src));
-  check("subagent capability guard rejects parallel/worktree/async and binds model to active profile", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*workflowAgentModel\(agent\)/.test(src));
+  check("subagent capability guard rejects parallel/worktree/async and binds model/effort to active profile", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*workflowAgentConfig\(agent\)[\s\S]*input\.thinking/.test(src));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
   check("PLAN builtin advisory calls are context/output bound", /ADVISORY_AGENTS[\s\S]*agent === "oracle" \? "fork" : "fresh"[\s\S]*advisoryOutputPath\(agent\)/.test(src));
   check("PLAN advisory children have an out-of-band capability ceiling", /pi-subagents\.capability-ceiling\.v1[\s\S]*PLAN_ADVISORY_TOOLS[\s\S]*validateAdvisoryLaunchContract/.test(src));
@@ -631,7 +649,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("workflow fails closed on higher-precedence agent shadow/override", /function assertWorkflowAgentsUnshadowed[\s\S]*workflow agent 被高优先级定义覆盖[\s\S]*settings override/.test(src));
   check("PRD child model/usage is persisted from subagent tool details", /pi\.on\("tool_result"[\s\S]*prd-generation\.json[\s\S]*resolvedModel[\s\S]*usage/.test(src));
   check("final reviewer has a separate actual-model audit envelope", /final-review\.audit\.json/.test(src));
-  check("final evidence is bound to runId/head/command/hashes and configured reviewer audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*expectedFinalModel[\s\S]*verifyRunId/.test(src));
+  check("final evidence is bound to runId/head/command/hashes and configured reviewer audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*expectedFinal[\s\S]*resolvedEffort[\s\S]*verifyRunId/.test(src));
   check("bd_task mutations are scoped to active epic children", /assertActiveChildIssue\(taskId\)/.test(src));
   check("task close requires commit-bound reviewer pass + audit", /review\?\.taskId === taskId[\s\S]*review\?\.baseline === baseline[\s\S]*review\?\.commitSha === commitSha/.test(src));
   check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*resetUsageByModel\(\)[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
@@ -706,18 +724,36 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   const cfgRaw = fs.readFileSync(new URL("../workflow.config.json", import.meta.url), "utf8");
   check("workflow.config.json is valid JSON", (() => { try { JSON.parse(cfgRaw); return true; } catch { return false; } })());
   const parsed = JSON.parse(cfgRaw);
-  check("gpt56 profile maps Sol/Terra/Luna roles", parsed.activeModelProfile === "gpt56"
-    && parsed.modelProfiles?.gpt56?.main === "codex2api/gpt-5.6-sol"
-    && parsed.modelProfiles?.gpt56?.prd === "codex2api/gpt-5.6-sol"
-    && parsed.modelProfiles?.gpt56?.dev === "codex2api/gpt-5.6-terra"
-    && parsed.modelProfiles?.gpt56?.reviewer === "codex2api/gpt-5.6-luna"
-    && parsed.modelProfiles?.gpt56?.finalReviewer === "codex2api/gpt-5.6-luna");
-  check("legacy DeepSeek/GLM profile remains available", parsed.modelProfiles?.["deepseek-glm"]?.main === "deepseek/deepseek-v4-pro"
-    && parsed.modelProfiles?.["deepseek-glm"]?.dev === "deepseek/deepseek-v4-flash"
-    && parsed.modelProfiles?.["deepseek-glm"]?.prd === "zai/glm-5.2");
+  check("gpt56 profile maps Sol/Terra/Luna roles and confirmed efforts", parsed.activeModelProfile === "gpt56"
+    && parsed.modelProfiles?.gpt56?.main?.model === "codex2api/gpt-5.6-sol" && parsed.modelProfiles?.gpt56?.main?.effort === "xhigh"
+    && parsed.modelProfiles?.gpt56?.prd?.model === "codex2api/gpt-5.6-sol" && parsed.modelProfiles?.gpt56?.prd?.effort === "high"
+    && parsed.modelProfiles?.gpt56?.dev?.model === "codex2api/gpt-5.6-terra" && parsed.modelProfiles?.gpt56?.dev?.effort === "high"
+    && parsed.modelProfiles?.gpt56?.reviewer?.model === "codex2api/gpt-5.6-luna" && parsed.modelProfiles?.gpt56?.reviewer?.effort === "xhigh"
+    && parsed.modelProfiles?.gpt56?.finalReviewer?.model === "codex2api/gpt-5.6-luna" && parsed.modelProfiles?.gpt56?.finalReviewer?.effort === "xhigh");
+  check("legacy DeepSeek/GLM profile remains available with high effort", parsed.modelProfiles?.["deepseek-glm"]?.main?.model === "deepseek/deepseek-v4-pro"
+    && parsed.modelProfiles?.["deepseek-glm"]?.dev?.model === "deepseek/deepseek-v4-flash"
+    && parsed.modelProfiles?.["deepseek-glm"]?.prd?.model === "zai/glm-5.2"
+    && Object.values(parsed.modelProfiles?.["deepseek-glm"] || {}).filter((entry: any) => entry?.model).every((entry: any) => entry.effort === "high"));
   const loaded = loadConfig();
-  check("runtime resolves active profile centrally", activeModelProfile(loaded).dev === "codex2api/gpt-5.6-terra"
-    && workflowAgentModel("pi-workflow.reviewer", loaded) === "codex2api/gpt-5.6-luna");
+  check("runtime resolves active profile model and effort centrally", activeModelProfile(loaded).dev.model === "codex2api/gpt-5.6-terra"
+    && activeModelProfile(loaded).main.effort === "xhigh"
+    && workflowAgentModel("pi-workflow.reviewer", loaded) === "codex2api/gpt-5.6-luna"
+    && workflowAgentEffort("pi-workflow.reviewer", loaded) === "xhigh");
+  check("legacy string-form gpt56 receives confirmed role defaults", (() => {
+    const profile = activeModelProfile({ ...loaded, modelProfiles: { gpt56: {
+      main: "codex2api/gpt-5.6-sol", prd: "codex2api/gpt-5.6-sol", dev: "codex2api/gpt-5.6-terra",
+      reviewer: "codex2api/gpt-5.6-luna", finalReviewer: "codex2api/gpt-5.6-luna",
+    } }, activeModelProfile: "gpt56" });
+    return profile.main.effort === "xhigh" && profile.prd.effort === "high" && profile.dev.effort === "high"
+      && profile.reviewer.effort === "xhigh" && profile.finalReviewer.effort === "xhigh";
+  })());
+  check("legacy string-form deepseek-glm remains high for every role", (() => {
+    const profile = activeModelProfile({ ...loaded, modelProfiles: { "deepseek-glm": {
+      main: "deepseek/deepseek-v4-pro", prd: "zai/glm-5.2", dev: "deepseek/deepseek-v4-flash",
+      reviewer: "zai/glm-5.2", finalReviewer: "zai/glm-5.2",
+    } }, activeModelProfile: "deepseek-glm" });
+    return Object.values(profile).every((entry) => entry.effort === "high");
+  })());
   check("unknown active profile fails closed", (() => {
     try { activeModelProfile({ ...loaded, activeModelProfile: "missing" }); return false; } catch { return true; }
   })());
@@ -728,6 +764,12 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("unqualified profile model fails closed", (() => {
     try {
       activeModelProfile({ ...loaded, modelProfiles: { ...loaded.modelProfiles, broken: { ...activeModelProfile(loaded), dev: "gpt-5.6-terra" } }, activeModelProfile: "broken" });
+      return false;
+    } catch { return true; }
+  })());
+  check("invalid profile effort fails closed", (() => {
+    try {
+      activeModelProfile({ ...loaded, modelProfiles: { ...loaded.modelProfiles, broken: { ...loaded.modelProfiles.gpt56, main: { model: "codex2api/gpt-5.6-sol", effort: "ultra" as any } } }, activeModelProfile: "broken" });
       return false;
     } catch { return true; }
   })());

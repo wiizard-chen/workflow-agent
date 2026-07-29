@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { WorkflowConfig } from "./lib.ts";
-import { loadConfig, parseQualifiedModel } from "./workflow/runtime.ts";
+import { loadConfig, parseProfileEntry, parseQualifiedModel } from "./workflow/runtime.ts";
 
 function loadProviderConfig(): WorkflowConfig {
   return loadConfig();
@@ -30,9 +30,10 @@ export function registerWorkflowProviders(
   }
 
   const byProvider = new Map<string, Set<string>>();
-  for (const profile of Object.values(config.modelProfiles)) {
+  for (const [profileName, profile] of Object.entries(config.modelProfiles)) {
     for (const key of ["main", "prd", "dev", "reviewer", "finalReviewer"] as const) {
-      const role = parseQualifiedModel(profile[key]);
+      const entry = parseProfileEntry(profile[key], key, profileName);
+      const role = parseQualifiedModel(entry.model, entry.effort);
       if (!config.providers[role.provider]) continue; // builtin provider, e.g. codex2api
       if (!byProvider.has(role.provider)) byProvider.set(role.provider, new Set());
       byProvider.get(role.provider)!.add(role.model);

@@ -13,15 +13,26 @@ import * as path from "node:path";
 // Types
 // ---------------------------------------------------------------------------
 
-export interface RoleRef { provider: string; model: string; }
+export type ThinkingEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export interface RoleRef { provider: string; model: string; effort: ThinkingEffort; }
+export interface ModelProfileEntry { model: string; effort: ThinkingEffort; }
+export type ModelProfileValue = string | ModelProfileEntry;
 
 export interface ModelProfile {
   /** Main PLAN discussion, issue analysis, splitting, and BUILD manager model. */
-  main: string;
-  prd: string;
-  dev: string;
-  reviewer: string;
-  finalReviewer: string;
+  main: ModelProfileValue;
+  prd: ModelProfileValue;
+  dev: ModelProfileValue;
+  reviewer: ModelProfileValue;
+  finalReviewer: ModelProfileValue;
+}
+
+export interface ResolvedModelProfile {
+  main: ModelProfileEntry;
+  prd: ModelProfileEntry;
+  dev: ModelProfileEntry;
+  reviewer: ModelProfileEntry;
+  finalReviewer: ModelProfileEntry;
 }
 
 export interface WorkflowConfig {

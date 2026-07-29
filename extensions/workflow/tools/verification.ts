@@ -21,7 +21,7 @@ import {
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
-  workflowAgentModel, renderedToolName
+  workflowAgentConfig, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -81,10 +81,10 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
         diffSha256: sha256File(diffPath),
       };
       fs.writeFileSync(verifyPath, JSON.stringify(evidence, null, 2) + "\n");
-      const finalReviewerModel = workflowAgentModel("pi-workflow.final-reviewer");
+      const finalReviewer = workflowAgentConfig("pi-workflow.final-reviewer");
       return { content: [{ type: "text", text:
         `确定性验证${evidence.ok ? "通过" : "失败"}(exit ${v.code},runId ${runId})。\nverify:${verifyPath}\ndiff:${diffPath}\n` +
-        `下一步必须调用 subagent({agent:"pi-workflow.final-reviewer", model:${JSON.stringify(finalReviewerModel)}, context:"fresh", cwd:${JSON.stringify(wf.repo)}, output:${JSON.stringify(reqPath(wf, "results", "final-review.json"))}, task:"读取 PRD ${prdPath}、verify ${verifyPath}、diff ${diffPath},逐条验收并在 JSON 中原样返回 runId=${runId}"}),然后调用 finalize_test。`
+        `下一步必须调用 subagent({agent:"pi-workflow.final-reviewer", model:${JSON.stringify(finalReviewer.model)}, thinking:${JSON.stringify(finalReviewer.effort)}, context:"fresh", cwd:${JSON.stringify(wf.repo)}, output:${JSON.stringify(reqPath(wf, "results", "final-review.json"))}, task:"读取 PRD ${prdPath}、verify ${verifyPath}、diff ${diffPath},逐条验收并在 JSON 中原样返回 runId=${runId}"}),然后调用 finalize_test。`
       }], details: {} };
     },
   });
@@ -121,12 +121,14 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
           || typeof review.summary !== "string" || !review.summary.trim()) {
           throw new Error("final-review.json schema/runId 无效");
         }
-        const expectedFinalModel = workflowAgentModel("pi-workflow.final-reviewer");
-        if (audit?.status !== "completed" || audit?.resolvedModel !== expectedFinalModel
+        const expectedFinal = workflowAgentConfig("pi-workflow.final-reviewer");
+        if (audit?.status !== "completed" || audit?.requestedModel !== expectedFinal.model
+          || audit?.requestedEffort !== expectedFinal.effort || audit?.resolvedModel !== expectedFinal.model
+          || audit?.resolvedEffort !== expectedFinal.effort
           || audit?.profile !== CONFIG.activeModelProfile || audit?.context !== "fresh"
           || audit?.verifyRunId !== verify.runId || audit?.verifySha256 !== sha256File(verifyPath)
           || audit?.outputSha256 !== sha256File(reviewPath)) {
-          throw new Error(`final-reviewer audit 缺失、模型错误(${expectedFinalModel},profile=${CONFIG.activeModelProfile})或 evidence 已变化`);
+          throw new Error(`final-reviewer audit 缺失、模型/effort 错误(${expectedFinal.model},effort=${expectedFinal.effort},profile=${CONFIG.activeModelProfile})或 evidence 已变化`);
         }
         const blockingReviewIssues = review.issues.filter((i: any) => i && ["blocker", "major"].includes(i.severity));
         const failedChecks = review.acceptanceChecks.filter((c: any) => !c || c.status !== "pass" || !String(c.criterion || "").trim() || !String(c.evidence || "").trim());
@@ -136,7 +138,7 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
         if (review.verdict === "pass") {
           const committed = commitArtifacts(wf);
           if (!committed.committed) throw new Error("workflow 最终工件提交失败或没有可提交工件");
-          return { content: [{ type: "text", text: `✓ 最终验证与 ${expectedFinalModel} review 均通过。runId:${verify.runId}\n报告:${reviewPath}\n工件 commit:${committed.sha}` }], details: {} };
+          return { content: [{ type: "text", text: `✓ 最终验证与 ${expectedFinal.model} effort=${expectedFinal.effort} review 均通过。runId:${verify.runId}\n报告:${reviewPath}\n工件 commit:${committed.sha}` }], details: {} };
         }
 
         const issues = blockingReviewIssues;

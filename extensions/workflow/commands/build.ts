@@ -20,7 +20,7 @@ import {
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
-  activeModelProfile, assertActiveProfileModelsAvailable, workflowAgentModel, renderedToolName
+  activeModelProfile, assertActiveProfileModelsAvailable, renderedToolName
 } from "../runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -60,10 +60,10 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
     `模型 profile:${CONFIG.activeModelProfile}`,
-    `主 session:${profile.main}`,
-    `dev model:${profile.dev}`,
-    `reviewer model:${profile.reviewer}`,
-    `final reviewer model:${profile.finalReviewer}`,
+    `主 session:${profile.main.model} (effort=${profile.main.effort})`,
+    `dev model:${profile.dev.model} (effort=${profile.dev.effort})`,
+    `reviewer model:${profile.reviewer.model} (effort=${profile.reviewer.effort})`,
+    `final reviewer model:${profile.finalReviewer.model} (effort=${profile.finalReviewer.effort})`,
     `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
     `writer 并行上限:1(安全硬限制;禁止 tasks:[...] 和 worktree:true)`,
     `------------------`,
@@ -143,11 +143,13 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
     prdPath = reqPath(wf, "prd.md");
     if (!fs.existsSync(prdPath)) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
     const audit = readJson(reqPath(wf, "results", "prd-generation.json"));
-    const expectedPrdModel = workflowAgentModel("pi-workflow.prd-writer");
-    if (!audit || audit.status !== "completed" || audit.resolvedModel !== expectedPrdModel
+    const expectedPrd = activeModelProfile().prd;
+    if (!audit || audit.status !== "completed" || audit.requestedModel !== expectedPrd.model
+      || audit.requestedEffort !== expectedPrd.effort || audit.resolvedModel !== expectedPrd.model
+      || audit.resolvedEffort !== expectedPrd.effort
       || audit.profile !== CONFIG.activeModelProfile
       || audit.context !== "fork" || audit.outputSha256 !== sha256File(prdPath)) {
-      ctx.ui.notify(`PRD 缺少有效的 prd-writer 审计(${expectedPrdModel},profile=${CONFIG.activeModelProfile}),或生成后已被修改。请重新 /wf prd；外部 PRD 请显式传路径给 /execute。`, "error");
+      ctx.ui.notify(`PRD 缺少有效的 prd-writer 审计(${expectedPrd.model},effort=${expectedPrd.effort},profile=${CONFIG.activeModelProfile}),或生成后已被修改。请重新 /wf prd；外部 PRD 请显式传路径给 /execute。`, "error");
       return;
     }
   }
@@ -177,7 +179,7 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
   ctx.ui.notify(
     dryRun
       ? `EXECUTE --dry-run:只拆分 + 汇报计划,不派 dev、不改代码。\n拆分结果会真的建成 bd task(方便审阅依赖图),确认无误后跑 /execute 正式执行;不满意可 /wf abort 清理。`
-      : `EXECUTE:主 session 进入 build 模式(profile=${CONFIG.activeModelProfile},manager=${activeModelProfile().main}),开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式,跑歪了可 /wf abort 回滚到 baseline。`,
+      : `EXECUTE:主 session 进入 build 模式(profile=${CONFIG.activeModelProfile},manager=${activeModelProfile().main.model},effort=${activeModelProfile().main.effort}),开始跑流水线(拆 task → 派 dev/reviewer → 测试)。\n用 /wf status 看进度。跑完 /wf done 切回通用模式,跑歪了可 /wf abort 回滚到 baseline。`,
     "info",
   );
   pi.sendUserMessage(prompt);

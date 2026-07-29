@@ -21,6 +21,8 @@
 - `pi-workflow.final-reviewer`：使用运行上下文中的 final reviewer model，只读读取 PRD、`verify.json` 与 `cumulative.diff`，返回最终验收 JSON。
 - manager：拆分、选择下一任务、读取结果、调用受控状态工具，不写代码。
 
+所有权威 child 调用必须同时逐字复制运行上下文中的 `model` 和 `effort`；`effort` 通过 subagent 的 `thinking` 参数传入。缺失或漂移会被 runtime 拒绝。
+
 ## 恢复检查
 
 开始时先调用：
@@ -74,6 +76,7 @@ claim 会拒绝空验证命令，并将当前 HEAD 写入：
 subagent({
   agent: "pi-workflow.dev",
   model: "<运行上下文中的 dev model,逐字复制>",
+  thinking: "<运行上下文中的 dev effort,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.json",
@@ -89,6 +92,7 @@ subagent({
 subagent({
   agent: "pi-workflow.reviewer",
   model: "<运行上下文中的 reviewer model,逐字复制>",
+  thinking: "<运行上下文中的 reviewer effort,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.review.json",
@@ -126,6 +130,7 @@ manager 和 final-reviewer 都不能自行构造 shell 命令。
 subagent({
   agent: "pi-workflow.final-reviewer",
   model: "<运行上下文中的 final reviewer model,逐字复制>",
+  thinking: "<运行上下文中的 final reviewer effort,逐字复制>",
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/final-review.json",

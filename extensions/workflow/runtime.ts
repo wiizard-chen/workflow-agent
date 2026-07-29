@@ -9,7 +9,8 @@ import {
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
-  type ModelProfile, type RoleRef, type UsageTotals, type WorkflowConfig, type WorkflowState,
+  type ModelProfile, type ModelProfileEntry, type ResolvedModelProfile, type RoleRef, type ThinkingEffort,
+  type UsageTotals, type WorkflowConfig, type WorkflowState,
 } from "../lib.ts";
 import * as bd from "../bd.ts";
 import { syncSubagentCapabilityCeiling } from "./capabilities.ts";
@@ -20,47 +21,73 @@ import { syncSubagentCapabilityCeiling } from "./capabilities.ts";
 
 export const DEFAULT_MODEL_PROFILES: Record<string, ModelProfile> = {
   gpt56: {
-    main: "codex2api/gpt-5.6-sol",
-    prd: "codex2api/gpt-5.6-sol",
-    dev: "codex2api/gpt-5.6-terra",
-    reviewer: "codex2api/gpt-5.6-luna",
-    finalReviewer: "codex2api/gpt-5.6-luna",
+    main: { model: "codex2api/gpt-5.6-sol", effort: "xhigh" },
+    prd: { model: "codex2api/gpt-5.6-sol", effort: "high" },
+    dev: { model: "codex2api/gpt-5.6-terra", effort: "high" },
+    reviewer: { model: "codex2api/gpt-5.6-luna", effort: "xhigh" },
+    finalReviewer: { model: "codex2api/gpt-5.6-luna", effort: "xhigh" },
   },
   "deepseek-glm": {
-    main: "deepseek/deepseek-v4-pro",
-    prd: "zai/glm-5.2",
-    dev: "deepseek/deepseek-v4-flash",
-    reviewer: "zai/glm-5.2",
-    finalReviewer: "zai/glm-5.2",
+    main: { model: "deepseek/deepseek-v4-pro", effort: "high" },
+    prd: { model: "zai/glm-5.2", effort: "high" },
+    dev: { model: "deepseek/deepseek-v4-flash", effort: "high" },
+    reviewer: { model: "zai/glm-5.2", effort: "high" },
+    finalReviewer: { model: "zai/glm-5.2", effort: "high" },
   },
 };
 
-export function parseQualifiedModel(value: string): RoleRef {
+const THINKING_EFFORTS = new Set<ThinkingEffort>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const DEFAULT_ROLE_EFFORT: Record<keyof ResolvedModelProfile, ThinkingEffort> = {
+  main: "xhigh", prd: "high", dev: "high", reviewer: "xhigh", finalReviewer: "xhigh",
+};
+
+function defaultEffortForProfile(profileName: string | undefined, key: keyof ResolvedModelProfile): ThinkingEffort {
+  if (profileName === "deepseek-glm") return "high";
+  return DEFAULT_ROLE_EFFORT[key];
+}
+
+export function parseProfileEntry(value: unknown, key: keyof ResolvedModelProfile, profileName?: string): ModelProfileEntry {
+  const entry = typeof value === "string" ? { model: value, effort: defaultEffortForProfile(profileName, key) } : value as any;
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`模型 profile ${key} 必须是字符串或 {model,effort} 对象`);
+  const model = String(entry.model || "").trim();
+  parseQualifiedModel(model);
+  if (typeof entry.effort !== "string" || !THINKING_EFFORTS.has(entry.effort as ThinkingEffort)) {
+    throw new Error(`模型 profile ${key}.effort 无效:${String(entry.effort ?? "(空)")}`);
+  }
+  return { model, effort: entry.effort as ThinkingEffort };
+}
+
+export function parseQualifiedModel(value: string, effort: ThinkingEffort = "high"): RoleRef {
   const normalized = String(value || "").trim();
   const slash = normalized.indexOf("/");
   if (slash <= 0 || slash === normalized.length - 1) throw new Error(`模型必须是 provider/model 格式:${normalized || "(空)"}`);
-  return { provider: normalized.slice(0, slash), model: normalized.slice(slash + 1) };
+  return { provider: normalized.slice(0, slash), model: normalized.slice(slash + 1), effort };
 }
 
-export function activeModelProfile(config: WorkflowConfig = CONFIG): ModelProfile {
+export function activeModelProfile(config: WorkflowConfig = CONFIG): ResolvedModelProfile {
   const profile = config.modelProfiles?.[config.activeModelProfile];
   if (!profile) throw new Error(`未知 activeModelProfile:${config.activeModelProfile}`);
-  for (const key of ["main", "prd", "dev", "reviewer", "finalReviewer"] as const) parseQualifiedModel(profile[key]);
-  return profile;
+  return {
+    main: parseProfileEntry(profile.main, "main", config.activeModelProfile),
+    prd: parseProfileEntry(profile.prd, "prd", config.activeModelProfile),
+    dev: parseProfileEntry(profile.dev, "dev", config.activeModelProfile),
+    reviewer: parseProfileEntry(profile.reviewer, "reviewer", config.activeModelProfile),
+    finalReviewer: parseProfileEntry(profile.finalReviewer, "finalReviewer", config.activeModelProfile),
+  };
 }
 
 export async function assertActiveProfileModelsAvailable(ctx: ExtensionCommandContext, config: WorkflowConfig = CONFIG): Promise<void> {
   const profile = activeModelProfile(config);
   const available = await ctx.modelRegistry.getAvailable();
   const availableIds = new Set(available.map((model: any) => `${model.provider}/${model.id}`));
-  for (const qualified of new Set([profile.main, profile.prd, profile.dev, profile.reviewer, profile.finalReviewer])) {
-    const role = parseQualifiedModel(qualified);
-    if (!ctx.modelRegistry.find(role.provider, role.model)) throw new Error(`active profile 模型未注册:${qualified}`);
-    if (!availableIds.has(qualified)) throw new Error(`active profile 模型未配置认证或当前不可用:${qualified}`);
+  for (const entry of Object.values(profile)) {
+    const role = parseQualifiedModel(entry.model, entry.effort);
+    if (!ctx.modelRegistry.find(role.provider, role.model)) throw new Error(`active profile 模型未注册:${entry.model}`);
+    if (!availableIds.has(entry.model)) throw new Error(`active profile 模型未配置认证或当前不可用:${entry.model}`);
   }
 }
 
-export function workflowAgentModel(agent: string, config: WorkflowConfig = CONFIG): string {
+export function workflowAgentConfig(agent: string, config: WorkflowConfig = CONFIG): ModelProfileEntry {
   const profile = activeModelProfile(config);
   if (agent === "pi-workflow.prd-writer") return profile.prd;
   if (agent === "pi-workflow.dev") return profile.dev;
@@ -69,12 +96,29 @@ export function workflowAgentModel(agent: string, config: WorkflowConfig = CONFI
   throw new Error(`未知 workflow agent:${agent}`);
 }
 
-function derivedRoles(profile: ModelProfile): WorkflowConfig["roles"] {
+export function workflowAgentModel(agent: string, config: WorkflowConfig = CONFIG): string {
+  return workflowAgentConfig(agent, config).model;
+}
+
+export function workflowAgentEffort(agent: string, config: WorkflowConfig = CONFIG): ThinkingEffort {
+  return workflowAgentConfig(agent, config).effort;
+}
+
+function roleFromEntry(entry: ModelProfileEntry): RoleRef {
+  return parseQualifiedModel(entry.model, entry.effort);
+}
+
+function derivedRoles(profile: ModelProfile, profileName: string): WorkflowConfig["roles"] {
+  const resolved: ResolvedModelProfile = {
+    main: parseProfileEntry(profile.main, "main", profileName), prd: parseProfileEntry(profile.prd, "prd", profileName),
+    dev: parseProfileEntry(profile.dev, "dev", profileName), reviewer: parseProfileEntry(profile.reviewer, "reviewer", profileName),
+    finalReviewer: parseProfileEntry(profile.finalReviewer, "finalReviewer", profileName),
+  };
   return {
-    discuss: parseQualifiedModel(profile.main),
-    prd: parseQualifiedModel(profile.prd),
-    split: parseQualifiedModel(profile.main),
-    review: parseQualifiedModel(profile.reviewer),
+    discuss: roleFromEntry(resolved.main),
+    prd: roleFromEntry(resolved.prd),
+    split: roleFromEntry(resolved.main),
+    review: roleFromEntry(resolved.reviewer),
   };
 }
 
@@ -85,7 +129,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   },
   activeModelProfile: "gpt56",
   modelProfiles: DEFAULT_MODEL_PROFILES,
-  roles: derivedRoles(DEFAULT_MODEL_PROFILES.gpt56),
+  roles: derivedRoles(DEFAULT_MODEL_PROFILES.gpt56, "gpt56"),
   build: { verifyCommand: "", commitPrefix: "subtask" },
   // Worktree-isolated parallel children return patches/handoff manifests; they
   // do not auto-merge into the target repository. Until deterministic handoff
@@ -126,7 +170,7 @@ export function loadConfig(): WorkflowConfig {
     providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
     activeModelProfile: activeName,
     modelProfiles,
-    roles: derivedRoles(profile),
+    roles: derivedRoles(profile, activeName),
     build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
     execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
   };
@@ -443,8 +487,9 @@ export function validateSubagentCall(event: any): string | undefined {
       return undefined;
     }
     if (agent !== "pi-workflow.prd-writer") return "plan 模式只允许 researcher/scout/oracle advisory 或 pi-workflow.prd-writer";
-    const expectedModel = workflowAgentModel(agent);
-    if (input.model !== expectedModel) return `prd-writer model 必须是 active profile 配置:${expectedModel}`;
+    const expected = workflowAgentConfig(agent);
+    if (input.model !== expected.model) return `prd-writer model 必须是 active profile 配置:${expected.model}`;
+    if (input.thinking !== expected.effort) return `prd-writer effort 必须是 active profile 配置:${expected.effort}`;
     if (input.context !== "fork") return "prd-writer 必须 context=fork";
     if (output !== path.resolve(reqPath(wf, "prd.md"))) return "prd-writer output 必须是当前 prd.md";
     return undefined;
@@ -455,8 +500,9 @@ export function validateSubagentCall(event: any): string | undefined {
   if (!["pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) {
     return "build 模式只允许 pi-workflow.dev/reviewer/final-reviewer";
   }
-  const expectedModel = workflowAgentModel(agent);
-  if (input.model !== expectedModel) return `${agent} model 必须是 active profile 配置:${expectedModel}`;
+  const expected = workflowAgentConfig(agent);
+  if (input.model !== expected.model) return `${agent} model 必须是 active profile 配置:${expected.model}`;
+  if (input.thinking !== expected.effort) return `${agent} effort 必须是 active profile 配置:${expected.effort}`;
   if (input.context !== "fresh") return `${agent} 必须 context=fresh`;
   if (agent === "pi-workflow.dev") {
     if (activeDevToolCallId) return "已有 dev writer 在运行;writer 上限固定为 1";
@@ -574,8 +620,19 @@ export async function useRole(pi: ExtensionAPI, ctx: ExtensionCommandContext, ro
   const model = ctx.modelRegistry.find(role.provider, role.model);
   if (!model) { ctx.ui.notify(`模型未找到:${role.provider}/${role.model}`, "error"); return false; }
   const ok = await pi.setModel(model);
-  if (!ok) ctx.ui.notify(`无法切换到 ${role.provider}/${role.model}:缺少 API key`, "error");
-  return ok;
+  if (!ok) { ctx.ui.notify(`无法切换到 ${role.provider}/${role.model}:缺少 API key`, "error"); return false; }
+  const resolvedModel = ctx.model;
+  if (resolvedModel?.provider !== role.provider || resolvedModel?.id !== role.model) {
+    ctx.ui.notify(`模型切换结果不匹配:请求 ${role.provider}/${role.model},实际 ${resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : "(无)"}`, "error");
+    return false;
+  }
+  pi.setThinkingLevel(role.effort);
+  const resolvedEffort = pi.getThinkingLevel();
+  if (resolvedEffort !== role.effort) {
+    ctx.ui.notify(`无法应用 effort=${role.effort} 到 ${role.provider}/${role.model}:实际为 ${resolvedEffort}`, "error");
+    return false;
+  }
+  return true;
 }
 
 export async function runStageText(pi: ExtensionAPI, ctx: ExtensionCommandContext, role: RoleRef, prompt: string, attempts = 3): Promise<string | null> {
