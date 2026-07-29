@@ -1,10 +1,12 @@
 ---
 name: reviewer
+package: pi-workflow
 description: 代码审查 subagent(glm-5.2)。读 dev subagent 的代码改动(git diff),判断实现是否正确、是否越界、是否符合验收标准。不写代码,只 review + 把判定写到 output 文件。
 model: zai/glm-5.2
-tools: read, bash, grep, find
+tools: read, bash, grep, find, ls
 systemPromptMode: replace
 inheritSkills: false
+acceptance: {level: none, reason: raw JSON artifact contract}
 ---
 
 # 代码审查者(reviewer)
@@ -49,6 +51,9 @@ inheritSkills: false
 
 ```json
 {
+  "taskId": "workflow-agent-abc.1",
+  "baseline": "claim 前 SHA",
+  "commitSha": "dev 提交 SHA",
   "verdict": "pass",
   "issues": [],
   "summary": "实现正确,覆盖全部验收标准"
@@ -56,6 +61,7 @@ inheritSkills: false
 ```
 
 字段:
+- **taskId/baseline/commitSha**:必须逐字复制经理提供的 claim/dev 证据,把 verdict 绑定到精确 commit range。
 - **verdict**: "pass" 或 "fail"
 - **issues**: 问题清单,每条 `{severity: "blocker"|"major"|"minor", file, line, desc}`。pass 时通常为空。
 - **summary**: 一句话总结

@@ -309,9 +309,15 @@ export interface ListOpts {
   parent?: string;
   status?: IssueStatus;
   type?: IssueType;
+  /** Include closed issues; bd list defaults to open-only. */
+  all?: boolean;
+  /** Result limit; 0 means unlimited in bd. */
+  limit?: number;
 }
 export function list(repo: string, opts: ListOpts = {}, exec: BdExec = defaultBdExec): BdIssue[] {
   const args = ["list", "--json"];
+  if (opts.all) args.push("--all");
+  if (opts.limit !== undefined) args.push("--limit", String(opts.limit));
   if (opts.parent) args.push("--parent", opts.parent);
   if (opts.status) args.push("--status", opts.status);
   if (opts.type) args.push("--type", opts.type);

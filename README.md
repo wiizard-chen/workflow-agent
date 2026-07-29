@@ -1,44 +1,47 @@
 # pi-workflow
 
-一个 [pi coding-agent](https://pi.dev) 扩展,把"需求 → PRD → 拆 task → 分配 dev → 测试"做成 **idle / plan / build 三模式**流水线。plan 模式(只读)你和 pi 讨论需求;build 模式下**主 session 自己就是技术经理**(不再 spawn 独立经理进程)——它把 PRD 拆成 task、用 [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) 的 `subagent` 工具分配给 **pi dev subagent**(定义在 `.pi/agents/dev.md`,在专属 worktree 里跑)、最后让 glm-5.2 测试,失败自动建 bd bug。idle 模式 pi 退回成普通编码 agent(完整工具集)。
+一个 [pi coding-agent](https://pi.dev) 扩展,把“需求讨论 → GLM PRD → Beads task → dev/reviewer → 确定性验证 → GLM 最终审查”做成 **plan / build 两模式**流水线。没有 active epic 时就是普通 Pi；`/wf resume` 从全部 Beads epic 中选择或重建上下文。build 模式的主 session 是**对代码只读的经理**,所有代码写入只由串行 dev subagent 完成。
 
 > 历史注记:本项目早期基于 omp(opencode fork)构建,后随上游迁移到 pi(`@earendil-works/pi-coding-agent`)。文档里如出现 omp 字样均指这段历史。
 
-## 架构(v4:主 session 即经理)
+## 架构（主 session 是只读经理）
 
+```text
+普通 Pi（无 active epic）
+  /wf new 或 /wf resume → plan
+
+plan（代码只读）:
+  需求讨论                    → deepseek-pro
+  /wf prd                     → fork 的 prd-writer(GLM-5.2)生成并回显 prd.md
+  /execute                    → 要求 verifyCommand 非空,进入 build
+
+build（manager 对代码只读）:
+  split_prd_to_tasks          → 受控写规格 + Beads task
+  bd_task(claim)
+  subagent(pi-workflow.dev)               → 串行实现/验证/commit
+  subagent(pi-workflow.reviewer)          → GLM task review
+  bd_task(close/reopen)       → commit-range + verify 硬门
+  run_verify                  → extension 只运行预配置命令,写 verify.json/diff
+  subagent(pi-workflow.final-reviewer)    → GLM 对 PRD/verify/diff 做最终验收
+  finalize_test               → 结构化 pass 或受控创建 Beads bug
+  /wf done                    → 清除 active epic,恢复普通 Pi
 ```
-plan 模式(你和主 pi 讨论,只读):
-  /wf new <需求>   → bd init + bd create epic,进入 plan 模式
-  讨论              → deepseek-pro
-  /wf prd           → glm-5.2 生成 prd.md
 
-build 模式(/execute):
-  主 session 本身就是经理(无独立进程,manager-prompt.md 注入主 session 的 system prompt):
-    1. 读 prd.md
-    2. split_prd_to_tasks  → bd create tasks + dep add(拆分原则:尽量独立)
-    3. bd_task(claim) → subagent({agent:"dev",...}) → subagent({agent:"reviewer",...})
-       pi-subagents 的 subagent 工具每次 spawn 一个 fresh dev subagent(定义在 .pi/agents/dev.md,
-       当前采用单 writer 串行模式,直接在目标仓库实现并 commit;禁用 worktree:true 并行 writer),
-       dev 内部闭环验证(write→verify→fix 直到通过),
-       把结构化结果写进一个 output JSON 文件,经理读这个文件决定 close/reopen
-    4. run_test → glm-5.2 测试产出,blocker 创建为 bd bug
-    5. bug 再走 claim→subagent(dev)→subagent(reviewer) 循环修复 → 重测,直到无 bug
-  /wf done → 回到 idle 模式(保留 wf 上下文)
-```
-
-**核心设计**:调度是经理 LLM 的判断(不是代码循环);每个 task 由一个 fresh pi-subagents dev subagent 串行实现。跨 task 的上下文不靠 session 续跑,而是靠:(a) `cache.ts` 冻结 system-prompt 的 date,让 DeepSeek 服务端前缀缓存跨 task 保持热度;(b) bd comments 显式携带跨 task 状态。当前禁止 `worktree:true` 并行 writer:pi-subagents 只返回 patch/handoff,不会自动合并目标仓库;`bd_task(close)` 会拒绝任何尚未进入目标仓库 HEAD 的 dev commit。
+manager 没有 `bash`/`write`/`edit`;只开放只读工具、`subagent` 和窄化的 workflow tools。当前 writer 上限固定为 1,禁止 `worktree:true` 并行 writer。`tool_call` hook 进一步强制 namespaced agent、精确 cwd/output/context、单 writer lease，并在每次调用前拒绝 target/user agent shadow 或 settings override。
 
 ## 模型分工
 
 | 阶段 | 执行方 | 模型 |
 |---|---|---|
 | 讨论需求 | 主 pi | deepseek-pro (`deepseek-v4-pro`) |
-| 写 PRD | 主 pi | glm-5.2 |
-| 技术经理(拆 task/分配/测试) | **主 session(build 模式)** | deepseek-pro |
-| 实现每个 task | **pi dev subagent**(由 `subagent` 工具 spawn) | deepseek-flash |
-| 测试产出 | 主 session 调 glm-5.2 | glm-5.2 |
+| 写 PRD | `pi-workflow.prd-writer` subagent | GLM-5.2 |
+| 技术经理 | 主 session（代码只读） | deepseek-pro |
+| 实现每个 task | `pi-workflow.dev` subagent（串行 writer） | deepseek-flash |
+| task 审查 | `pi-workflow.reviewer` subagent | GLM-5.2 |
+| 运行验证命令 | extension `run_verify` | 确定性代码 |
+| 最终验收 | `pi-workflow.final-reviewer` subagent | GLM-5.2 |
 
-build 模式时 manager-prompt.md 注入主 session 的 system prompt,主 session 据此使用 `split_prd_to_tasks` / `bd_task` / `run_test` + pi-subagents 的 `subagent` 工具。provider 由扩展注册(用 `$DEEPSEEK_API_KEY`、`$GLM5_2_API_KEY`)。
+build 模式时 manager-prompt.md 注入主 session。manager 使用 `split_prd_to_tasks` / `bd_query` / `bd_task` / `run_verify` / `finalize_test` 和 `subagent`,没有通用 shell 权限。四个 agent 使用 `pi-workflow.*` 命名空间，package 通过 `pi.subagents.agents` 暴露；`wfpi` 本地源码模式通过 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 暴露，避免任意目标仓库中找不到 agent 或误解析同名 user agent。provider 使用 `$DEEPSEEK_API_KEY`、`$GLM5_2_API_KEY`（扩展会为 child bridge 到 `ZAI_API_KEY`）。
 
 ## 前置
 
@@ -101,21 +104,22 @@ WF_AGENT_HOME=/path wfpi      # 自定义 workflow-agent 路径
 
 ## 用法
 
-三个模式(idle / plan / build),核心切换点是 build 与 plan 之间:
+两种 workflow 状态是 plan / build；没有 active epic 时是普通 Pi：
 
-1. `/wf new <需求名> [目标repo路径]` — 新建需求:`bd init`(若未初始化)+ `bd create` 父 epic,进入 **plan 模式**(对代码只读)。省略路径则用当前目录。
-2. 自由对话讨论需求。
-3. `/wf prd` — 生成 `prd.md`(glm-5.2,基于讨论;缺仓库简报会先自动分析)。
-4. 审阅 `.workflow/<reqId>/prd.md`。不满意继续讨论后再 `/wf prd`。
-5. `/execute` — 进入 **build 模式**:**主 session 自己就是经理**(无独立进程)。`/execute` 通过 `sendUserMessage` 把 manager-prompt.md 注入主 session,主 session 读 PRD → 拆 task 进 bd → `subagent(dev)` / `subagent(reviewer)` → 测试。失败自动建 bd bug,主 session 继续分配修复,直到全过。整个过程用户可直接观察并插话。
-6. `/wf done` — 结束 build,回到 **idle 模式**(保留 wf 上下文)。`/wf idle` 可随时切到通用编码模式(完整工具集)。
-7. `/wf status` 查看 bd 子任务状态 + 本需求 token/cache 用量;需修订 `/plan` 回到讨论。
+1. `/wf new <需求名> [目标repo路径]` — 创建 Beads epic 并进入 plan。
+2. 自由讨论需求。
+3. `/wf prd` — fork 当前讨论,由 `pi-workflow.prd-writer`（GLM-5.2）生成 `prd.md`,主 session 展示正文。
+4. `/wf verify <cmd>` — 设置不可为空的验证命令。
+5. `/execute` — 主 session 作为代码只读经理,串行委派 dev/reviewer。
+6. 全部 task closed 后执行 `run_verify → final-reviewer → finalize_test`。
+7. `/wf done` — 清除 active epic,恢复普通 Pi。
+8. `/wf resume` — UI 展示全部 Beads epic；缺 state 的 epic 可确认重建。
 
-**先看计划再动手**:`/execute --dry-run` 只让经理拆 task + 汇报计划(拆分结果会真的建成 bd task 方便审阅依赖图),**不派 dev、不改代码**。确认无误后再跑 `/execute` 正式执行。
+**先看计划再动手**:`/execute --dry-run` 只让经理拆 task + 汇报计划(拆分结果会真的建成 bd task 方便审阅依赖图),**不派 dev、不改代码**。确认后再跑 `/execute`；split 工具会检测当前 epic 已有 task 并复用，避免 dry-run→execute 或 resume 时重复创建任务图。
 
 **跑歪了回滚**:`/wf abort` 把目标 repo `git reset --hard` 回 `/execute` 时记录的 baseline,并把 epic 下的 task 全部 reopen。执行前会列出将丢弃的 commit / 改动统计 / 未提交改动并要求确认,`.workflow/` 工件会先提交一次保留作审计记录。**不可逆,谨慎使用。**
 
-辅助命令:`/wf analyze [--refresh]`、`/wf verify <cmd>`(设置验证命令,如 `npm test`)、`/plan`、`/wf idle`(切到通用编码模式)、`/wf abort`(回滚)。
+辅助命令:`/wf analyze [--refresh]`、`/wf status`、`/plan`、`/wf abort`。`/wf verify` 的命令不能为空；没有验证命令时 `/execute` 直接报错。
 
 ## 经理 prompt(可编辑)
 
@@ -182,7 +186,7 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 
 ## 验证门(P0 安全)
 
-`/execute`(build 模式)默认**严格验证**:如果没有设置验证命令(`/wf verify <cmd>` 或配置 `build.verifyCommand`),每个子任务会因验证门为空而失败。这避免了 pi dev subagent 自主写入无任何校验直接 commit 的安全风险(dev 内部已做闭环 verify→fix,P0 门控兜底)。首次 build 会在无验证命令时弹出确认,允许你显式接受"无验证"或先去设置。
+`/execute` 在进入 build 前强制要求非空验证命令。`bd_task(claim)`、`bd_task(close)` 和最终 `run_verify` 会重复检查；不存在“显式接受无验证”或静默跳过路径。dev 自己先跑同一命令，extension 再做确定性复验。
 
 ## 产物布局(在目标 repo 内)
 
@@ -196,11 +200,16 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
     │   ├── NN-*.md             # 子任务规格(deepseek-pro);bd issue notes 指向这里
     │   └── bug-*.md            # /wf bug 生成的 bug 规格
     ├── results/
-    │   ├── <taskId>.json        # 每个 dev subagent 的结构化结果(verifyPassed/commitSha/…)
-    │   ├── <taskId>.review.json # 每个 reviewer subagent 的判定(verdict/issues/…)
-    │   ├── cumulative.diff      # 全量累积改动(run_test 写,供整体 review)
-    │   └── summary.json         # token / cache 命中 / cost 汇总(按模型分组,每轮实时落盘)
-    └── review.md               # 整体 review(glm-5.2,建议性)
+    │   ├── split.json            # PRD hash + creating/complete/failed split manifest
+    │   ├── prd-generation.json   # prd-writer 调用审计(model/usage/result path)
+    │   ├── <taskId>.claim.json   # claim 时的 baseline
+    │   ├── <taskId>.json         # dev 结构化结果
+    │   ├── <taskId>.review.json  # reviewer 结构化判定
+    │   ├── cumulative.diff       # baseline..HEAD 全量改动(run_verify 写)
+    │   ├── verify.json           # 确定性验证命令/code/output
+    │   ├── final-review.json     # final-reviewer 的严格 JSON verdict
+    │   ├── final-review.audit.json # extension 记录实际 child model/usage
+    │   └── summary.json          # token/cache/cost 汇总
 
 <repo>/.beads/                 # bd 数据(bd init 创建)
 ├── config.yaml                # bd 配置(进 git)
@@ -233,7 +242,7 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 | `build.commitPrefix` | 子任务 commit 消息前缀 |
 | `execute.maxParallel` | 当前安全上限固定为 1;确定性 worktree handoff 集成完成前禁止并行 writer |
 
-**dev / reviewer 的模型不在这里配**——它们是 pi-subagents 的 subagent,模型写在 `.pi/agents/dev.md` / `.pi/agents/reviewer.md` 的 frontmatter(`model:` 字段)里。(历史字段 `reasonix: {bin, model, maxSteps, timeoutMs}` 和后来的 `dev: {model, timeoutMs}` 都已移除,不再读取。)
+**dev / reviewer / prd-writer / final-reviewer 的模型不在这里配**——它们是 pi-subagents agent,模型写在 `.pi/agents/*.md` 的 frontmatter(`model:` 字段)里。
 
 `execute.driver` 只实现了 `"bd"`;`execute.pollIntervalMs` 是死字段(当前实现不轮询),保留仅为兼容旧配置。
 
@@ -241,7 +250,7 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 
 ## 缓存说明
 
-- 每个子任务由一个独立的 pi dev subagent run 承担(`subagent({agent:"dev"})`),命中 DeepSeek **服务端前缀热缓存**(成本大头)。
+- 每个子任务由一个独立的 pi dev subagent run 承担(`subagent({agent:"pi-workflow.dev"})`),命中 DeepSeek **服务端前缀热缓存**(成本大头)。
 - **worktree 并行不击穿缓存**(实测):worktree 的 cwd 差异不注入 pi system prompt,前缀缓存跨 worktree 共享。详见 `DECISION_LOG.md`。
 - pi 侧多模型切换(pro/glm)天然会各走各的缓存桶,属于预期,量小无碍。
 
@@ -249,7 +258,7 @@ PLAN 模式的只读工具锁(`lockReadonly`)会自动放行所有 `playwright_*
 
 pi 的 system prompt 里有动态 date 字段(`Today is YYYY-MM-DD,`),每天午夜变一次,击穿 DeepSeek 前缀缓存。本扩展用 `before_agent_start` hook,**只对 DeepSeek 模型**把 date 冻结成固定常量,让讨论/拆分/PRD/review 阶段的前缀字节稳定:
 
-- **dev subagent 执行层**:cache.ts 同样覆盖——每次 `subagent({agent:"dev"})` spawn 的 pi dev subagent 启动时 system-prompt 的 date 被冻结成同一常量,前缀缓存跨 task / 跨 dev 保持热度(取代了原 reasonix 执行层自带的字节级缓存优化,~99.8% 命中率被保留)。
+- **dev subagent 执行层**:cache.ts 同样覆盖——每次 `subagent({agent:"pi-workflow.dev"})` spawn 的 pi dev subagent 启动时 system-prompt 的 date 被冻结成同一常量,前缀缓存跨 task / 跨 dev 保持热度(取代了原 reasonix 执行层自带的字节级缓存优化,~99.8% 命中率被保留)。
 - **pi 讨论层**:`cache.ts` 冻结 date → 前缀跨 turn/midnight 稳定 → 缓存命中。
 - **telemetry**:`message_end` hook 累计 DeepSeek 的 `prompt_cache_hit_tokens`,每 5 turn 通知一次命中率。
 - 只对 DeepSeek 生效(glm/zai 不用前缀缓存,冻结无益)。
@@ -259,19 +268,20 @@ pi 的 system prompt 里有动态 date 字段(`Today is YYYY-MM-DD,`),每天午�
 ## 安全 / 边界
 
 - pi dev subagent autonomous(不卡审批)但仍遵守 pi 的 `deny`(默认已拦 `git push`、`rm -rf`),sandbox 限写在目标 repo 内。
-- plan 模式下扩展会拦截 pi 对 `.workflow/` 以外文件的 `write`/`edit`(对真实代码只读)。
-- **验证门默认严格**:无验证命令 = 失败,而非静默通过(修了 KNOWN_ISSUES P0 #1)。
-- BUILD 中拒绝 `/wf new`(单例锁,修了 KNOWN_ISSUES P1 #2)。
-- 子任务拆分的 JSON 解析严格校验,失败响亮报错(修了 KNOWN_ISSUES P1 #3)。
-- review 为建议性,不自动改代码、不自动回环。
+- plan 模式只开放只读工具和 `subagent`(用于 PRD writer);build manager 也没有 `bash`/`write`/`edit`,代码写入只能委派给单个 dev writer。
+- **验证门无绕过**:无验证命令时 `/execute` 直接失败；task close 和 final verify 会重跑预配置命令。
+- final-reviewer 没有 shell,只读 PRD、diff 和 verify evidence；`finalize_test` 只接受绑定当前 command/HEAD/PRD hash/diff hash/runId/实际 GLM audit 的结构化 JSON,失败时确定性创建 blocker/major bug。
+- BUILD 中拒绝 `/wf new`；`/wf done` 清除 active epic 并恢复普通 Pi。
+- 子任务拆分的 JSON 解析严格校验,失败响亮报错。
 
 ## 测试
 
 ```bash
-node --experimental-strip-types test/build.test.ts
+npm test
+npx tsc --noEmit
 ```
 
-用 in-memory fake bd + 真实临时 git repo 端到端验证 build 流水线(串行 fail-fast、并行 fan-in、无改动、断点续跑、worktree 清理、merge),无需 API、无需真实 bd。
+回归测试覆盖 Beads argv、空验证硬门、commit range 集成、manager 工具白名单（无 bash）、GLM agent 配置、PRD/final review wiring、resume 重建与 telemetry。
 
 ## 已验证(真实冒烟)
 
@@ -279,6 +289,6 @@ node --experimental-strip-types test/build.test.ts
 
 ## 备注
 
-- 每个 pi dev subagent 是独立的一次 `subagent({agent:"dev"})` run;若网络受限访问 z.ai,给 pi 配好代理可减少 `Connection error` 重试。
+- 每个 pi dev subagent 是独立的一次 `subagent({agent:"pi-workflow.dev"})` run;若网络受限访问 z.ai,给 pi 配好代理可减少 `Connection error` 重试。
 - glm-5.2 endpoint / 模型 id 默认 `https://api.z.ai/api/coding/paas/v4` + `glm-5.2`;版本不同在 `workflow.config.json` 调整。
 - bd 1.1.0 真实命令与官方文档有差异(用 `assign`/`comment`/`config.yaml`,无 `pin`/`hook`);以 `extensions/bd.ts` 封装为准。

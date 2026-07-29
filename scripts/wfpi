@@ -39,5 +39,19 @@ if [[ ! -f "$WORKFLOW_TS" ]]; then
 fi
 
 # --- 启动 pi ---
+# Local-source mode is not an installed Pi package, so expose this package's
+# bundled agents explicitly to pi-subagents without copying them into the
+# target repository or the user's global agent directory.
+AGENTS_DIR="$AGENT_HOME/.pi/agents"
+if [[ ! -d "$AGENTS_DIR" ]]; then
+  echo "❌ 找不到 workflow agents:$AGENTS_DIR" >&2
+  exit 1
+fi
+if [[ -n "${PI_SUBAGENT_EXTRA_AGENT_DIRS:-}" ]]; then
+  export PI_SUBAGENT_EXTRA_AGENT_DIRS="$AGENTS_DIR:$PI_SUBAGENT_EXTRA_AGENT_DIRS"
+else
+  export PI_SUBAGENT_EXTRA_AGENT_DIRS="$AGENTS_DIR"
+fi
+
 # 透传所有参数 $@。cwd 保持当前目录(让 workflow 操作当前仓库)
 exec pi -e "$WORKFLOW_TS" -e "$CACHE_TS" "$@"

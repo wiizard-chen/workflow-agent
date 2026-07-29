@@ -22,7 +22,7 @@ pi-workflow 有这些 session:
 
 | session | 宿主 | 生命周期 | 跨调用复用 |
 |---|---|---|---|
-| 主 pi session | pi | 整个交互(idle / plan / build 三模式) | 天然复用(就是当前对话) |
+| 主 pi session | pi | 普通 Pi + plan / build 两模式 | 天然复用(就是当前对话;active epic 可用 `/wf resume` 重建) |
 | dev pi subagent | pi-subagents `subagent` | 单个 task 的执行 | **不复用**(每次 subagent 调用都是 fresh spawn,上下文靠 bd + cache.ts) |
 
 **关键**:

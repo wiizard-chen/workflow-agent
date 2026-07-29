@@ -19,7 +19,7 @@ export interface WorkflowConfig {
   providers: Record<string, { baseUrl: string; apiKeyEnv: string; api: string; thinkingFormat?: string }>;
   roles: { discuss: RoleRef; prd: RoleRef; split: RoleRef; review: RoleRef };
   build: { verifyCommand: string; commitPrefix: string };
-  /** Execution layer config (omp-native). dev/reviewer models live in .omp/agents/*.md frontmatter, not here. */
+  /** Execution layer config. dev/reviewer models live in .pi/agents/*.md frontmatter. */
   execute?: {
     driver?: "bd";          // only "bd" supported; default "bd"
     maxParallel?: number;   // suggested parallel task(dev) calls for the manager prompt; default 1
@@ -27,7 +27,7 @@ export interface WorkflowConfig {
   };
 }
 
-export type Mode = "idle" | "plan" | "build";
+export type Mode = "plan" | "build";
 
 export interface WorkflowState {
   reqId: string;
@@ -137,18 +137,25 @@ export function resolvePiBin(): string {
   return "pi";
 }
 
+/** Resolve the mandatory verification command for a workflow. */
+export function getVerifyCommand(cfg: WorkflowConfig, s: WorkflowState): string {
+  return (s.verifyCommand ?? cfg.build.verifyCommand ?? "").trim();
+}
+
 /** Run the configured/per-requirement verify command in the repo.
- *  P0 #1 fix: if no verify command is configured, this is treated as a
- *  HARD FAIL (not a silent pass) — see KNOWN_ISSUES.md. Callers that
- *  genuinely want "no verify" must pass allowEmptyVerify=true. */
-export function runVerify(cfg: WorkflowConfig, s: WorkflowState, allowEmptyVerify = false): { ok: boolean; output: string } {
-  const cmd = (s.verifyCommand ?? cfg.build.verifyCommand ?? "").trim();
+ *  An empty command is always a hard configuration error. */
+export function runVerify(cfg: WorkflowConfig, s: WorkflowState): { ok: boolean; output: string; command: string; code: number } {
+  const cmd = getVerifyCommand(cfg, s);
   if (!cmd) {
-    if (allowEmptyVerify) return { ok: true, output: "(无验证命令,已显式允许跳过)" };
-    return { ok: false, output: "未配置验证命令。set /wf verify <cmd>,或在配置里设 allowEmptyVerify。这阻止了无验证的提交(P0 安全门)。" };
+    return {
+      ok: false,
+      command: "",
+      code: -1,
+      output: "未配置验证命令。请先执行 /wf verify <cmd>;空验证命令禁止进入或完成 build。",
+    };
   }
   const r = sh("bash", ["-lc", cmd], s.repo);
-  return { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-4000) };
+  return { ok: r.code === 0, command: cmd, code: r.code, output: (r.stdout + r.stderr).slice(-4000) };
 }
 
 // ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@
   },
   "build": {
     "verifyCommand": "",
-    "$comment_verify": "每个子任务实现后执行的验证命令(在目标 repo 内,如 'go build ./...' / 'npm test' / 'pytest -q')。留空则触发 P0 安全门:每个子任务会因无验证而失败,除非在 /build 时显式确认跳过。可用 /wf verify <cmd> 按需求覆盖。",
+    "$comment_verify": "每个子任务关闭及最终验收都会执行的唯一预配置命令(在目标 repo 内,如 'go build ./...' / 'npm test' / 'pytest -q')。留空是配置错误:/execute、claim、close、run_verify 都会直接拒绝。可用 /wf verify <cmd> 按需求覆盖。",
     "commitPrefix": "subtask"
   },
   "execute": {

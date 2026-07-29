@@ -1,12 +1,10 @@
 /**
- * workflow — a pi coding-agent extension implementing a three-mode pipeline:
+ * workflow — a pi coding-agent extension implementing a two-mode pipeline:
  *
- *   idle  mode:  pi is a normal coding agent (full toolset) — answer questions,
- *                write code, debug. Workflow context (wf) retained for /wf status.
- *   plan  mode:  readonly — you + pi discuss the requirement → glm-5.2 writes prd.md
- *   build mode:  the main session runs the pipeline itself (interactive, no subprocess):
- *                reads prd.md, splits into bd tasks, delegates to dev/reviewer
- *                subagents (via nicobailon/pi-subagents' `subagent` tool), tests the output.
+ *   no active epic: normal Pi session; use /wf new or /wf resume to enter workflow.
+ *   plan  mode: readonly discussion; a dedicated GLM subagent writes prd.md.
+ *   build mode: the main session is a code-readonly manager that delegates
+ *               implementation/review and uses narrow deterministic tools.
  *
  * The main session IS the manager — there's no separate manager process. The
  * manager prompt (.pi/manager-prompt.md) is injected as a user message on
@@ -14,7 +12,7 @@
  *
  * Dev/reviewer are pi-subagents subagents (defined in .pi/agents/*.md, discovered
  * via the package's standard `.pi/agents/**\/*.md` convention). The manager calls
- * `subagent({ agent: "dev", task: "...", output: "..." })`; dev writes code +
+ * `subagent({ agent: "pi-workflow.dev", task: "...", output: "..." })`; dev writes code +
  * commits + writes a structured result JSON to an output file; reviewer reads
  * git diff + writes a verdict JSON. The manager reads these files to decide bd
  * close/reopen.
@@ -27,6 +25,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -36,9 +36,9 @@ import {
   commitArtifacts,
   emptyUsageTotals,
   formatUsageLine,
+  getVerifyCommand,
   gitHead,
   isGitRepo,
-  type Mode,
   nowStamp,
   readRepoBrief,
   readRunSummary,
@@ -118,6 +118,8 @@ const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content", "
 
 let CONFIG = loadConfig();
 let wf: WorkflowState | undefined;
+let baseActiveTools: string[] = [];
+let activeDevToolCallId: string | undefined;
 // Tool-call tracking: detect "session did zero work" (no split, no bd_task) so we
 // can warn instead of reporting a false success.
 let mgrHasSplit = false;
@@ -165,27 +167,182 @@ function setModeStatus(ctx: ExtensionCommandContext): void {
   try { ctx.ui.setStatus("workflow", label); } catch (_e) { /* ignore */ }
 }
 
-/** Apply the tool set for the current mode.
- *  - idle:  full toolset (pi default) — pi is a normal coding agent, workflow context retained.
- *  - plan:  readonly (read/grep/find/ls + mcp) — discuss requirements, no code mutation.
- *  - build: executor set (split/bd_task/run_test/subagent + readonly + bash) — run the pipeline.
- *  Called on session_start and whenever mode changes. */
+/** Apply the capability boundary for the active workflow mode. */
 function applyModeTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
-  if (!wf) return;
+  if (!wf) {
+    if (baseActiveTools.length) pi.setActiveTools(baseActiveTools);
+    return;
+  }
+  if (wf.mode === "plan") {
+    lockReadonly(pi, true);
+    return;
+  }
+  pi.setActiveTools([
+    "split_prd_to_tasks", "bd_query", "bd_task", "run_verify", "finalize_test",
+    "subagent",
+    ...READONLY_TOOLS,
+  ]);
+  ctx.ui.notify?.("build 模式:manager 对代码只读;仅开放受控 workflow 工具 + subagent + 只读工具", "info");
+}
+
+function readJson(file: string): any | undefined {
+  try { return JSON.parse(stripFence(fs.readFileSync(file, "utf8"))); }
+  catch { return undefined; }
+}
+
+function sha256Text(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function sha256File(file: string): string | undefined {
+  return fs.existsSync(file) ? sha256Text(fs.readFileSync(file, "utf8")) : undefined;
+}
+
+function resolvedPath(value: unknown): string {
+  return path.resolve(String(value || ""));
+}
+
+function pathInside(child: string, parent: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/** Enforce delegation as a capability boundary, not a prompt convention. */
+export function ensureRequirementDirs(state: WorkflowState): void {
+  fs.mkdirSync(reqPath(state, "subtasks"), { recursive: true });
+  fs.mkdirSync(reqPath(state, "results"), { recursive: true });
+}
+
+export function renderedToolName(call: any): string {
+  const rendered = String(call?.toolName || call?.name || call?.text || call?.expandedText || "").trim();
+  if (rendered.startsWith("$ ")) return "bash";
+  return rendered.split(/\s+/, 1)[0] || "";
+}
+
+export function preservedBaseline(existing: string | undefined, current: string | undefined): string | undefined {
+  return existing || current;
+}
+
+export function splitDecision(existingTaskIds: string[], manifest: any, prdSha256: string): "create" | "reuse" | "reject" {
+  if (existingTaskIds.length > 0) {
+    if (manifest?.status !== "complete" || manifest?.prdSha256 !== prdSha256 || !Array.isArray(manifest?.created)) return "reject";
+    const recorded = manifest.created.map((item: any) => String(item?.id || "")).filter(Boolean).sort();
+    const actual = [...existingTaskIds].sort();
+    return recorded.length === actual.length && recorded.every((id: string, i: number) => id === actual[i]) ? "reuse" : "reject";
+  }
+  return manifest ? "reject" : "create";
+}
+
+function bundledAgentsDir(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".pi", "agents");
+}
+
+function agentRuntimeName(file: string): string | undefined {
   try {
-    if (wf.mode === "plan") {
-      lockReadonly(pi);   // readonly for requirement discussion
-    } else if (wf.mode === "build") {
-      pi.setActiveTools([
-        "split_prd_to_tasks", "bd_task", "run_test",
-        "subagent",                // nicobailon/pi-subagents: spawn dev/reviewer subagents
-        ...READONLY_TOOLS,
-        "bash",
-      ]);
-      ctx.ui.notify?.(`build 模式:工具集已锁定(split/bd_task/run_test/subagent + 只读 + bash)`, "info");
+    const text = fs.readFileSync(file, "utf8");
+    const fm = text.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (!fm) return undefined;
+    const name = fm[1].match(/^name:\s*([^\n#]+)/m)?.[1]?.trim();
+    const pkg = fm[1].match(/^package:\s*([^\n#]+)/m)?.[1]?.trim();
+    return name ? (pkg ? `${pkg}.${name}` : name) : undefined;
+  } catch { return undefined; }
+}
+
+function markdownFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...markdownFiles(full));
+    else if (entry.isFile() && entry.name.endsWith(".md")) out.push(full);
+  }
+  return out;
+}
+
+/** Fail closed if higher-precedence user/target definitions can shadow roles. */
+function assertWorkflowAgentsUnshadowed(repo: string): void {
+  const required = new Set([
+    "pi-workflow.dev", "pi-workflow.reviewer",
+    "pi-workflow.prd-writer", "pi-workflow.final-reviewer",
+  ]);
+  const bundled = bundledAgentsDir();
+  const dirs = [
+    path.join(repo, ".pi", "agents"), path.join(repo, ".agents"),
+    path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "agents"),
+    path.join(os.homedir(), ".agents"),
+    ...(process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS || "").split(path.delimiter).filter(Boolean),
+  ];
+  for (const dir of dirs) {
+    for (const file of markdownFiles(dir)) {
+      if (pathInside(file, bundled)) continue;
+      const runtime = agentRuntimeName(file);
+      if (runtime && required.has(runtime)) throw new Error(`workflow agent 被高优先级定义覆盖:${runtime} (${file})`);
     }
-    // idle: do nothing — leave the full default toolset active
-  } catch (_e) { /* best effort */ }
+  }
+  for (const settingsPath of [
+    path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "settings.json"),
+    path.join(repo, ".pi", "settings.json"),
+  ]) {
+    const settings = readJson(settingsPath);
+    const overrides = settings?.subagents?.agentOverrides;
+    if (!overrides || typeof overrides !== "object") continue;
+    for (const runtime of required) if (Object.prototype.hasOwnProperty.call(overrides, runtime)) {
+      throw new Error(`workflow agent 存在 settings override:${runtime} (${settingsPath})`);
+    }
+  }
+}
+
+function validateSubagentCall(event: any): string | undefined {
+  if (!wf) return undefined;
+  try { assertWorkflowAgentsUnshadowed(wf.repo); }
+  catch (e) { return (e as Error).message; }
+  const input = event?.input ?? {};
+  if (input.tasks || input.chain || input.worktree || input.async || input.count) {
+    return "workflow 禁止 parallel/chain/worktree/async subagent 调用";
+  }
+  if (input.model || input.acceptance || input.outputSchema) {
+    return "workflow 禁止覆盖 agent model/acceptance/output schema";
+  }
+  if (resolvedPath(input.cwd) !== path.resolve(wf.repo)) {
+    return `subagent cwd 必须精确为当前 workflow repo:${wf.repo}`;
+  }
+  const agent = String(input.agent || "");
+  const output = resolvedPath(input.output);
+
+  if (wf.mode === "plan") {
+    if (agent !== "pi-workflow.prd-writer") return "plan 模式只允许 pi-workflow.prd-writer subagent";
+    if (input.context !== "fork") return "prd-writer 必须 context=fork";
+    if (output !== path.resolve(reqPath(wf, "prd.md"))) return "prd-writer output 必须是当前 prd.md";
+    return undefined;
+  }
+
+  const resultsDir = reqPath(wf, "results");
+  if (!pathInside(output, resultsDir)) return `subagent output 必须位于 ${resultsDir}`;
+  if (!["pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) {
+    return "build 模式只允许 pi-workflow.dev/reviewer/final-reviewer";
+  }
+  if (input.context !== "fresh") return `${agent} 必须 context=fresh`;
+  if (agent === "pi-workflow.dev") {
+    if (activeDevToolCallId) return "已有 dev writer 在运行;writer 上限固定为 1";
+    if (!/\.json$/.test(output) || /\.review\.json$/.test(output)) return "dev output 必须是 results/<taskId>.json";
+    const taskId = path.basename(output, ".json");
+    try { assertActiveChildIssue(taskId); } catch (e) { return (e as Error).message; }
+    if (!fs.existsSync(reqPath(wf, "results", `${taskId}.claim.json`))) return `缺少 ${taskId}.claim.json;先 bd_task(claim)`;
+    activeDevToolCallId = String(event?.toolCallId || "dev-running");
+    return undefined;
+  }
+  if (agent === "pi-workflow.reviewer") {
+    if (!/\.review\.json$/.test(output)) return "reviewer output 必须是 results/<taskId>.review.json";
+    const taskId = path.basename(output).replace(/\.review\.json$/, "");
+    try { assertActiveChildIssue(taskId); } catch (e) { return (e as Error).message; }
+    if (!fs.existsSync(reqPath(wf, "results", `${taskId}.claim.json`)) || !fs.existsSync(reqPath(wf, "results", `${taskId}.json`))) {
+      return `reviewer 缺少 ${taskId} 的 claim/dev 证据`;
+    }
+    return undefined;
+  }
+  if (output !== path.resolve(reqPath(wf, "results", "final-review.json"))) return "final-reviewer output 路径错误";
+  if (!fs.existsSync(reqPath(wf, "results", "verify.json"))) return "先调用 run_verify 生成 verify.json";
+  return undefined;
 }
 
 /** Scan `<repo>/.workflow/<reqId>/state.json` files, return all parsed states
@@ -204,16 +361,7 @@ function listAllStates(repo: string): WorkflowState[] {
   return states.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
 }
 
-/** Restore the most recent requirement's wf from disk. Returns true if restored.
- *  Used by session_start (main) so a new session picks up the last active req. */
-function restoreLatestWf(ctx: ExtensionCommandContext): boolean {
-  const states = listAllStates(ctx.cwd);
-  if (states.length === 0) return false;
-  wf = states[0];
-  return true;
-}
-
-function lockReadonly(pi: ExtensionAPI): void {
+function lockReadonly(pi: ExtensionAPI, allowSubagent = false): void {
   try {
     // Keep the read-only built-ins, plus any MCP-bridged tools registered by the
     // pi-mcp extension (server_toolName, e.g. playwright_browser_navigate) so
@@ -227,7 +375,7 @@ function lockReadonly(pi: ExtensionAPI): void {
     // by name, not by package presence — setActiveTools silently ignores
     // names that aren't registered, so this is a no-op when absent).
     const webAccessTools = WEB_ACCESS_TOOLS.filter((n) => allNames.includes(n));
-    pi.setActiveTools([...READONLY_TOOLS, ...mcpTools, ...webAccessTools]);
+    pi.setActiveTools([...READONLY_TOOLS, ...mcpTools, ...webAccessTools, ...(allowSubagent ? ["subagent"] : [])]);
   } catch (_e) { /* ignore */ }
 }
 
@@ -333,14 +481,6 @@ function extractSuggestedVerifyCommand(brief: string): string | undefined {
   return cmd;
 }
 
-function prdPrompt(repo: string): string {
-  return withBrief(repo, [
-    `你是资深产品经理。基于本会话上文的需求讨论,产出一份专业的 PRD。`,
-    `直接把 PRD 的 Markdown 正文作为你的回答输出(不要使用任何工具,不要用代码块包裹)。`,
-    `PRD 需包含:背景/目标、范围(含明确的非目标)、功能点/用户故事、可测试的验收标准、技术约束/依赖、风险。`,
-  ].join("\n"));
-}
-
 // ---------------------------------------------------------------------------
 // PRD mode commands
 // ---------------------------------------------------------------------------
@@ -367,8 +507,7 @@ async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
   const reqId = `${nowStamp()}-${slug(name)}`;
   wf = { reqId, name, repo, mode: "plan", createdAt: new Date().toISOString(), epicId, subtaskIds: [] };
   usageByModel = {};   // fresh telemetry for a fresh requirement
-  fs.mkdirSync(reqPath(wf, "subtasks"), { recursive: true });
-  fs.mkdirSync(reqPath(wf, "results"), { recursive: true });
+  ensureRequirementDirs(wf);
   saveState(wf);
   setModeStatus(ctx);
   applyModeTools(pi, ctx);
@@ -378,6 +517,7 @@ async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
 
 async function cmdPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
+  activeDevToolCallId = undefined;
   wf.mode = "plan"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx);
   await useRole(pi, ctx, CONFIG.roles.discuss);
   ctx.ui.notify(`已进入 PRD 模式(只读)。讨论需求,或 /wf prd 生成 PRD。`, "info");
@@ -396,47 +536,56 @@ async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext, opts: 
   return true;
 }
 
-/** /wf prd — generate prd.md from the discussion. */
+/** /wf prd — delegate PRD generation to a dedicated forked GLM subagent. */
 async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-  if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
-  if (wf.mode !== "plan") { ctx.ui.notify("只能在 PRD 模式生成。先 /plan。", "warning"); return; }
+  if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new 或 /wf resume。", "warning"); return; }
+  if (wf.mode !== "plan") { ctx.ui.notify("只能在 plan 模式生成。先 /plan。", "warning"); return; }
+  try { assertWorkflowAgentsUnshadowed(wf.repo); }
+  catch (e) { ctx.ui.notify(`拒绝启动 PRD writer:${(e as Error).message}`, "error"); return; }
   if (!readRepoBrief(wf.repo)) {
     ctx.ui.notify("尚无仓库简报,先自动分析一次…", "info");
     if (!(await cmdAnalyze(pi, ctx, { silent: true }))) return;
   }
-  ctx.ui.notify("生成 PRD(glm-5.2)…", "info");
-  const prd = await runStageText(pi, ctx, CONFIG.roles.prd, prdPrompt(wf.repo));
-  if (!prd) { ctx.ui.notify("PRD 生成失败。", "error"); return; }
-  fs.writeFileSync(reqPath(wf, "prd.md"), stripFence(prd) + "\n");
-  await useRole(pi, ctx, CONFIG.roles.discuss);
-  ctx.ui.notify(`PRD 已生成:${reqPath(wf, "prd.md")}\n审阅后 /execute 进入执行模式(经理拆 task + 分配 dev + 测试)。`, "info");
+  const outputPath = reqPath(wf, "prd.md");
+  const auditPath = reqPath(wf, "results", "prd-generation.json");
+  const briefPath = repoBriefPath(wf.repo);
+  fs.writeFileSync(auditPath, JSON.stringify({
+    status: "launched",
+    agent: "pi-workflow.prd-writer",
+    requestedModel: "zai/glm-5.2",
+    context: "fork",
+    output: outputPath,
+    launchedAt: new Date().toISOString(),
+  }, null, 2) + "\n");
+  ctx.ui.notify("将由独立 prd-writer subagent(zai/glm-5.2)生成 PRD…", "info");
+  pi.sendUserMessage([
+    `请使用 subagent 工具生成当前需求的 PRD。`,
+    `必须调用:`,
+    `subagent({`,
+    `  agent: "pi-workflow.prd-writer",`,
+    `  context: "fork",`,
+    `  cwd: ${JSON.stringify(wf.repo)},`,
+    `  output: ${JSON.stringify(outputPath)},`,
+    `  task: ${JSON.stringify(`为需求 ${wf.name} 生成完整 PRD。读取仓库简报:${briefPath}。基于 fork 上下文中的完整需求讨论,只返回 Markdown PRD 正文。`)}`,
+    `})`,
+    `不要由当前主模型代写,不要 fallback 到其他模型。subagent 完成后先读取 ${auditPath} 获取实际 resolved provider/model/usage,再读取 ${outputPath},在主 session 中展示实际模型和完整 PRD 正文;失败则原样报告错误。`,
+  ].join("\n"));
 }
 
-/** /wf done — end the current requirement's execute phase.
- *  Flips mode to "idle" (general coding mode, full toolset, wf retained).
- *  Use when a pipeline run finished, or you want to abort a stuck build mode.
- *  Releases the build lock without touching bd task states. */
+/** /wf done — detach the active epic and return to normal Pi. */
 function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   if (!wf) { ctx.ui.notify("无活动需求。", "info"); return; }
-  if (wf.mode !== "build") { ctx.ui.notify(`需求 ${wf.reqId} 不在执行模式(当前:${wf.mode}),无需结束。`, "info"); return; }
-  wf.mode = "idle";
-  saveState(wf);
+  const finished = wf;
+  // Persist a resumable non-executing mode before clearing the in-memory
+  // active context. Beads remains authoritative; /wf resume can select it.
+  finished.mode = "plan";
+  saveState(finished);
+  wf = undefined;
+  activeDevToolCallId = undefined;
+  usageByModel = {};
   setModeStatus(ctx);
   applyModeTools(pi, ctx);
-  ctx.ui.notify(`需求 ${wf.reqId} 已结束执行,切回通用模式(idle)。\n工具集已恢复全开。/wf status 仍可查 bd 进度。`, "info");
-}
-
-/** /wf idle — switch to general coding mode (full toolset, wf retained).
- *  pi becomes a normal coding agent — answer questions, write code, debug.
- *  Workflow context (wf) is kept so /wf status still works. */
-function cmdIdle(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
-  if (!wf) { ctx.ui.notify("无活动需求(/wf new 创建)。当前已是通用模式。", "info"); return; }
-  if (wf.mode === "idle") { ctx.ui.notify("已在通用模式。", "info"); return; }
-  wf.mode = "idle";
-  saveState(wf);
-  setModeStatus(ctx);
-  applyModeTools(pi, ctx);
-  ctx.ui.notify(`已切到通用模式(idle)。工具集全开,自由写代码/问问题。\n需求 ${wf.reqId} 保留,/wf status 可查进度,/execute 重回执行。`, "info");
+  ctx.ui.notify(`已退出需求 ${finished.epicId}(${finished.name})并恢复普通 Pi。需要继续时用 /wf resume 选择 epic。`, "info");
 }
 
 function cmdStatus(ctx: ExtensionCommandContext): void {
@@ -497,27 +646,96 @@ function cmdStatus(ctx: ExtensionCommandContext): void {
   );
 }
 
-/** /wf resume <reqId> — switch the active requirement to a previously-created
- *  one (loaded from its state.json). No arg = list available requirements. */
-function cmdResume(ctx: ExtensionCommandContext, args: string): void {
+/** /wf resume — select any Beads epic; reconstruct missing local state. */
+async function cmdResume(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
   const arg = args.trim().replace(/["']/g, "");
-  const states = listAllStates(ctx.cwd);
-  if (!arg) {
-    if (states.length === 0) { ctx.ui.notify("没有可恢复的需求。/wf new 新建。", "info"); return; }
-    const lines = states.map((s) => {
-      const cur = (wf && s.reqId === wf.reqId) ? " ← 当前" : "";
-      return `  ${s.reqId}  [${s.mode}] ${s.name}${cur}`;
-    });
-    ctx.ui.notify(`可恢复的需求(按创建时间倒序):\n${lines.join("\n")}\n\n用 /wf resume <reqId> 切换。`, "info");
+  if (wf?.mode === "build") {
+    ctx.ui.notify(`需求 ${wf.reqId} 正在 build,先 /wf done 或 /wf abort。`, "error");
     return;
   }
-  const target = states.find((s) => s.reqId === arg || s.reqId.includes(arg));
-  if (!target) { ctx.ui.notify(`找不到需求:${arg}\n/wf resume(无参)看列表。`, "error"); return; }
-  if (wf && wf.mode === "build") { ctx.ui.notify(`需求 ${wf.reqId} 正在执行中,不能切换。`, "error"); return; }
+
+  let epics: bd.BdIssue[];
+  try {
+    epics = bd.list(ctx.cwd, { type: "epic", all: true, limit: 0 });
+  } catch (e) {
+    ctx.ui.notify(`读取 Beads epic 失败:${(e as Error).message}`, "error");
+    return;
+  }
+  if (epics.length === 0) {
+    ctx.ui.notify("当前仓库没有 Beads epic。用 /wf new 创建。", "info");
+    return;
+  }
+
+  const states = listAllStates(ctx.cwd);
+  const byEpic = new Map(states.filter((s) => s.epicId).map((s) => [s.epicId!, s]));
+  const rows = epics.map((epic) => {
+    let progress = "尚未拆分";
+    try {
+      const kids = bd.children(ctx.cwd, epic.id).filter((i) => i.issue_type === "task" || i.issue_type === "bug");
+      if (kids.length) progress = `${kids.filter((i) => i.status === "closed").length}/${kids.length} 完成`;
+    } catch (_e) { progress = "进度未知"; }
+    const state = byEpic.get(epic.id);
+    const resumability = state ? `[${state.mode === "build" ? "build" : "plan"}]` : "[需重建]";
+    return { epic, state, label: `${resumability} ${epic.id}  ${epic.title}  (${progress}, ${epic.status})` };
+  });
+
+  let chosen = arg
+    ? rows.find((r) => r.epic.id === arg || r.epic.id.includes(arg) || r.epic.title.includes(arg))
+    : undefined;
+  if (!arg) {
+    const label = await ctx.ui.select("选择要恢复的 Beads epic", rows.map((r) => r.label));
+    if (!label) return;
+    chosen = rows.find((r) => r.label === label);
+  }
+  if (!chosen) {
+    ctx.ui.notify(`找不到 epic:${arg}`, "error");
+    return;
+  }
+
+  let target = chosen.state;
+  if (!target) {
+    const rebuild = await ctx.ui.confirm(
+      "重建 workflow 上下文?",
+      `Epic ${chosen.epic.id} 没有本地 state.json。将从 Beads 重建 plan 上下文和结果目录,不会修改代码。`,
+    );
+    if (!rebuild) return;
+    const reqId = `${nowStamp()}-${slug(chosen.epic.title)}`;
+    const kids = bd.children(ctx.cwd, chosen.epic.id).filter((i) => i.issue_type === "task" || i.issue_type === "bug");
+    target = {
+      reqId,
+      name: chosen.epic.title,
+      repo: fs.realpathSync(ctx.cwd),
+      mode: "plan",
+      createdAt: new Date().toISOString(),
+      epicId: chosen.epic.id,
+      subtaskIds: kids.map((i) => i.id),
+    };
+    fs.mkdirSync(reqPath(target, "subtasks"), { recursive: true });
+    fs.mkdirSync(reqPath(target, "results"), { recursive: true });
+    saveState(target);
+  }
+
+  // Normalize historical idle states from older versions.
+  if ((target as any).mode === "idle") target.mode = "plan";
   wf = target;
-  usageByModel = {};   // telemetry is per-requirement; don't mix across reqs
+  usageByModel = {};
   setModeStatus(ctx);
-  ctx.ui.notify(`已切换到需求 ${wf.reqId}(epic ${wf.epicId})\n模式 ${wf.mode}`, "info");
+  applyModeTools(pi, ctx);
+  await useRole(pi, ctx, wf.mode === "build" ? CONFIG.roles.split : CONFIG.roles.discuss);
+
+  const kids = bd.children(wf.repo, chosen.epic.id).filter((i) => i.issue_type === "task" || i.issue_type === "bug");
+  const summary = [
+    `[workflow resume context — 只恢复上下文,不要自动执行]`,
+    `Epic:${chosen.epic.id}`,
+    `标题:${chosen.epic.title}`,
+    `状态:${chosen.epic.status}`,
+    `本地模式:${wf.mode}`,
+    `PRD:${reqPath(wf, "prd.md")}${fs.existsSync(reqPath(wf, "prd.md")) ? "(存在)" : "(缺失)"}`,
+    `任务:${kids.filter((i) => i.status === "closed").length}/${kids.length} closed; ${kids.filter((i) => i.status === "in_progress").length} in_progress; ${kids.filter((i) => i.status === "open").length} open`,
+    `等待用户决定下一步。`,
+  ].join("\n");
+  pi.sendUserMessage(summary);
+  ctx.ui.notify(`已恢复 epic ${chosen.epic.id}:${chosen.epic.title}`, "info");
 }
 
 /** /wf bug <描述> — 轻量 bug 修复入口。跳过 PRD,直接建 bd bug + 最小规格,
@@ -602,7 +820,7 @@ async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
  *  尽量独立、可单独实现与验证的 beads task(带依赖),挂在当前活动需求 epic 下。
  *  跟 /wf bug 的区别:bug 是修(task type=bug),task 是加功能(type=task),
  *  而且拆分用 split_prd_to_tasks 同款的 tracer-bullet 原则(垂直切片、依赖最小化),
- *  会标注 task 之间的 blocks 依赖。建完后手动 /execute 让经理派 dev 并行实现。 */
+ *  会标注 task 之间的 blocks 依赖。建完后手动 /execute 让经理串行派 dev 实现。 */
 async function cmdTask(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
   const desc = args.trim().replace(/["']/g, "");
   if (!desc) { ctx.ui.notify("用法:/wf task <描述>(一句话小需求,会自动拆成多个 task)", "warning"); return; }
@@ -614,7 +832,7 @@ async function cmdTask(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: str
   // (vertical slices, dependency minimization) so the breakdown matches what
   // /execute would produce from a full PRD. Single coherent ask → 1 task;
   // multi-part ask ("加 X 和 Y") → multiple independent tasks.
-  ctx.ui.notify("分析需求,拆成可并行的 task…", "info");
+  ctx.ui.notify("分析需求,拆成可独立验证的 task…", "info");
   const splitPromptText = withBrief(wf.repo, [
     `你是技术负责人。基于以下需求描述,把它拆成一组尽量独立、可单独实现与验证的子任务(tracer-bullet 垂直切片)。`,
     `只输出严格 JSON:{"subtasks":[{"id":"01","title":"标题","depends_on":[],"spec":"完整 Markdown 规格"}]}`,
@@ -683,7 +901,7 @@ async function cmdTask(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: str
     `  ${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`
   ).join("\n");
   ctx.ui.notify(
-    `已建 ${created.length} 个 task(挂 epic ${wf.epicId}):\n${lines}\n\n/execute 让经理派 dev 并行实现(无依赖的 task 会并行跑)`,
+    `已建 ${created.length} 个 task(挂 epic ${wf.epicId}):\n${lines}\n\n/execute 让经理按安全单-writer顺序串行实现`,
     "info"
   );
 }
@@ -714,10 +932,9 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dr
   if (!template) throw new Error("找不到 .pi/manager-prompt.md");
   const prdFile = prdPathOverride || reqPath(wf, "prd.md");
   const epicId = epicIdOverride || wf.epicId;
-  // Inject the configured dev-fanout ceiling so `execute.maxParallel` is a
-  // live setting rather than dead config. The manager prompt refers to this
-  // value instead of a hardcoded "N".
-  const maxParallel = 1;
+  if (!epicId) throw new Error("缺少 bd epic id");
+  let existingTaskCount = 0;
+  try { existingTaskCount = bd.children(wf.repo, epicId).filter((i) => i.issue_type === "task").length; } catch { /* tool will report bd errors */ }
   const context = [
     ``,
     `--- 运行上下文 ---`,
@@ -726,7 +943,7 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dr
     `bd epic:${epicId}`,
     `PRD 文件:${prdFile}`,
     `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
-    `dev 并行上限:${maxParallel}(来自 workflow.config.json 的 execute.maxParallel;一次 subagent({tasks:[...]}) 里同时派的 dev 不要超过这个数)`,
+    `writer 并行上限:1(安全硬限制;禁止 tasks:[...] 和 worktree:true)`,
     `------------------`,
     ``,
     ...(dryRun
@@ -735,13 +952,15 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dr
           `本次是预演:你只做到"拆分 + 给出计划"就停,**绝对不要派 dev、不要调 subagent、不要改任何代码**。`,
           `步骤:`,
           `1. 读 PRD 文件。`,
-          `2. 调 split_prd_to_tasks 把 PRD 拆成 bd task(这一步会真的创建 bd issue,方便你审阅依赖图)。`,
-          `3. 把拆分结果整理成一份人类可读的计划汇报给用户:每个 task 的标题、依赖关系、你打算怎么分配(串行/并行、并行度多少)、预计的风险点。`,
+          `2. 先 bd_query(children)；只有当前 epic 没有 task 时,由你根据 PRD 形成结构化 subtasks 数组并一次调用 split_prd_to_tasks({prd_path,subtasks})。已有 task 时复用现有图。`,
+          `3. 把拆分结果整理成计划:task 标题、依赖、严格串行顺序和风险点。`,
           `4. 然后**停下来**,告诉用户"dry-run 完成,确认计划无误后跑 /execute 正式执行"。`,
-          `不要调 bd_task(claim)、不要调 subagent、不要调 run_test。`,
+          `不要调 bd_task(claim)、不要调 subagent、不要调 run_verify/finalize_test。`,
         ]
       : [
-          `现在开始:先读 PRD 文件,然后调 split_prd_to_tasks。`,
+          existingTaskCount > 0
+            ? `当前 epic 已有 ${existingTaskCount} 个 task:不要重复 split,先 bd_query(children) 后继续现有 task 循环。`
+            : `当前 epic 没有 task:先读 PRD,形成完整 subtasks 数组,一次调用 split_prd_to_tasks({prd_path,subtasks})。`,
           `一口气跑完整条流水线,异常(dev 反复失败/reviewer 多次 fail)才停下问用户。`,
         ]),
   ].join("\n");
@@ -755,6 +974,13 @@ function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dr
 async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (!wf.epicId) { ctx.ui.notify("缺少 bd epic id。", "error"); return; }
+  try { assertWorkflowAgentsUnshadowed(wf.repo); }
+  catch (e) { ctx.ui.notify(`拒绝进入 build:${(e as Error).message}`, "error"); return; }
+  const verifyCommand = getVerifyCommand(CONFIG, wf);
+  if (!verifyCommand) {
+    ctx.ui.notify("无法进入 build:未配置验证命令。请先执行 /wf verify <cmd>。空命令不允许跳过。", "error");
+    return;
+  }
 
   // Parse args: optional `--dry-run` flag + optional PRD path.
   // dry-run (P1) = split the PRD into bd tasks and report the plan, but never
@@ -775,15 +1001,33 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
     } catch (e) {
       ctx.ui.notify(`为外部 PRD 建 epic 失败:${(e as Error).message}`, "error"); return;
     }
-    ctx.ui.notify(`外部 PRD:${prdPath}\n新建 epic:${epicIdOverride}(${epicTitle})`, "info");
+    const originalPath = prdPath;
+    wf.reqId = `${nowStamp()}-${slug(epicTitle)}`;
+    wf.epicId = epicIdOverride;
+    wf.name = epicTitle;
+    wf.subtaskIds = [];
+    wf.baseline = undefined;
+    usageByModel = {};
+    activeDevToolCallId = undefined;
+    ensureRequirementDirs(wf);
+    const canonicalPrdPath = reqPath(wf, "prd.md");
+    fs.copyFileSync(originalPath, canonicalPrdPath);
+    prdPath = canonicalPrdPath;
+    ctx.ui.notify(`外部 PRD:${originalPath}\n已复制到:${canonicalPrdPath}\n活动 epic:${epicIdOverride}(${epicTitle})`, "info");
   } else {
     prdPath = reqPath(wf, "prd.md");
     if (!fs.existsSync(prdPath)) { ctx.ui.notify("还没有 PRD。先 /wf prd 生成。", "error"); return; }
+    const audit = readJson(reqPath(wf, "results", "prd-generation.json"));
+    if (!audit || audit.status !== "completed" || audit.resolvedModel !== "zai/glm-5.2"
+      || audit.context !== "fork" || audit.outputSha256 !== sha256File(prdPath)) {
+      ctx.ui.notify("PRD 缺少有效的 prd-writer GLM 审计,或生成后已被修改。请重新 /wf prd；外部 PRD 请显式传路径给 /execute。", "error");
+      return;
+    }
   }
 
   // Switch to build mode + lock the executor toolset.
   wf.mode = "build";
-  wf.baseline = gitHead(wf.repo);
+  wf.baseline = preservedBaseline(wf.baseline, gitHead(wf.repo));
   wf.managerNoop = false;
   mgrHasSplit = false;
   mgrTasksProcessed = 0;
@@ -797,15 +1041,15 @@ async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: 
     const dirty = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
     if (dirty) {
       const go = await ctx.ui.confirm("工作树不干净", "目标 repo 有未提交改动,建议先提交。仍要继续?");
-      if (!go) { wf.mode = "idle"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx); return; }
+      if (!go) { wf.mode = "plan"; saveState(wf); setModeStatus(ctx); applyModeTools(pi, ctx); return; }
     }
   }
 
   // Switch to the split/reasoning model for orchestration, then inject the
   // manager prompt as a user message — the main session LLM picks it up and
-  // starts running the pipeline (split → subagent(dev) → subagent(reviewer) → ...).
+  // starts running the pipeline (split → pi-workflow.dev → pi-workflow.reviewer → ...).
   await useRole(pi, ctx, CONFIG.roles.split);
-  const prompt = loadManagerPrompt(prdPath || undefined, epicIdOverride || undefined, dryRun);
+  const prompt = loadManagerPrompt(prdPath || undefined, wf.epicId, dryRun);
   ctx.ui.notify(
     dryRun
       ? `EXECUTE --dry-run:只拆分 + 汇报计划,不派 dev、不改代码。\n拆分结果会真的建成 bd task(方便审阅依赖图),确认无误后跑 /execute 正式执行;不满意可 /wf abort 清理。`
@@ -886,8 +1130,9 @@ async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
     }
   } catch (e) { bdError = (e as Error).message.split("\n")[0]; }
 
-  // 3) Back to idle — the build lock is released, tools unlocked.
-  wf.mode = "idle";
+  // 3) Return to plan mode after rollback; the epic remains active.
+  activeDevToolCallId = undefined;
+  wf.mode = "plan";
   saveState(wf);
   setModeStatus(ctx);
   applyModeTools(pi, ctx);
@@ -897,7 +1142,7 @@ async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
     `- 代码:git reset --hard 完成(HEAD 现在是 ${gitHead(wf.repo)?.slice(0, 8) ?? "?"})\n` +
     `- bd:reopen 了 ${reopened} 个 task${bdError ? `(bd 读取有问题:${bdError})` : ""}\n` +
     `- .workflow/ 工件已保留(回滚前先提交了一次,作为审计记录)\n` +
-    `- 模式:已切回 idle\n` +
+    `- 模式:已切回 plan\n` +
     `想重跑:修订 PRD 后 /execute,或先 /execute --dry-run 看计划。`,
     "info",
   );
@@ -906,6 +1151,15 @@ async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 // ---------------------------------------------------------------------------
 // Manager tools (registered for every session; handlers require active wf)
 // ---------------------------------------------------------------------------
+
+function assertActiveChildIssue(taskId: string): bd.BdIssue {
+  if (!wf?.epicId) throw new Error("没有活动 epic");
+  const issue = bd.show(wf.repo, taskId);
+  if (!issue || issue.parent !== wf.epicId || (issue.issue_type !== "task" && issue.issue_type !== "bug")) {
+    throw new Error(`issue ${taskId} 不是活动 epic ${wf.epicId} 的直接 task/bug child`);
+  }
+  return issue;
+}
 
 export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
   // Register these tools for every session, including a fresh repository that
@@ -916,74 +1170,135 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
   pi.registerTool({
     name: "split_prd_to_tasks",
     label: "拆分 PRD 为 task",
-    description: "读取 PRD 文件,把需求拆成尽量独立的 task(带依赖),创建为 bd issue。返回创建的 task 列表。",
+    description: "把 manager 已生成的结构化 subtasks 确定性写成规格和当前 epic 的 Beads task。工具本身不递归调用主模型。",
     parameters: Type.Object({
-      prd_path: Type.Optional(Type.String({ description: "PRD 文件路径(默认用上下文里的)" })),
+      prd_path: Type.Optional(Type.String({ description: "必须是当前 canonical PRD 路径" })),
+      subtasks: Type.Array(Type.Object({
+        id: Type.String({ description: "逻辑 id,如 01" }),
+        title: Type.String(),
+        depends_on: Type.Array(Type.String()),
+        spec: Type.String({ description: "完整 Markdown 规格" }),
+      }), { minItems: 1 }),
     }),
     async execute(_id, params) {
-      if (!wf) {
-        return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
+      if (!wf?.epicId) {
+        return { content: [{ type: "text", text: "错误:没有活动 epic。先 /wf new。" }], details: {} };
       }
-      const prdPath = (params as any).prd_path || process.env.WF_PRD_PATH || reqPath(wf, "prd.md");
-      if (!fs.existsSync(prdPath)) {
-        return { content: [{ type: "text", text: `错误:PRD 文件不存在 ${prdPath}` }], details: {} };
+      const canonicalPrdPath = reqPath(wf, "prd.md");
+      const requestedPrdPath = (params as any).prd_path;
+      if (requestedPrdPath && path.resolve(requestedPrdPath) !== path.resolve(canonicalPrdPath)) {
+        return { content: [{ type: "text", text: `错误:split 只允许当前 canonical PRD:${canonicalPrdPath}` }], details: {} };
       }
-      // Use the split LLM stage to produce the breakdown.
-      const prdText = fs.readFileSync(prdPath, "utf8");
-      const splitPromptText = withBrief(wf!.repo, [
-        `你是技术负责人。基于以下 PRD,把需求拆成一组尽量独立、可单独实现与验证的子任务。`,
-        `只输出严格 JSON:{"subtasks":[{"id":"01","title":"标题","depends_on":[],"spec":"完整 Markdown 规格"}]}`,
-        `要求:id 从 01 递增;depends_on 用其他 id;被依赖者在前面;每个子任务可独立提交。`,
-        ``,
-        `--- PRD ---`,
-        prdText,
-      ].join("\n"));
-      const splitText = await runStageText(pi, ctx, CONFIG.roles.split, splitPromptText);
-      if (!splitText) {
-        return { content: [{ type: "text", text: "错误:拆分模型无输出" }], details: {} };
+      if (!fs.existsSync(canonicalPrdPath)) {
+        return { content: [{ type: "text", text: `错误:PRD 文件不存在 ${canonicalPrdPath}` }], details: {} };
       }
-      let rawSubs: any[];
-      try { rawSubs = extractSubtasksJson(splitText).subtasks; }
-      catch (e) { return { content: [{ type: "text", text: `错误:${(e as Error).message}` }], details: {} }; }
+      const prdSha256 = sha256File(canonicalPrdPath)!;
+      const manifestPath = reqPath(wf, "results", "split.json");
+      const manifest = readJson(manifestPath);
+      const existingTasks = bd.children(wf.repo, wf.epicId).filter((i) => i.issue_type === "task");
+      const decision = splitDecision(existingTasks.map((i) => i.id), manifest, prdSha256);
+      if (decision === "reuse") {
+        wf.subtaskIds = [...new Set([...(wf.subtaskIds || []), ...existingTasks.map((i) => i.id)])];
+        saveState(wf);
+        return { content: [{ type: "text", text: `split 已完成,复用 ${existingTasks.length} 个 task:\n${existingTasks.map((i) => `${i.id} ${i.status} ${i.title}`).join("\n")}` }], details: {} };
+      }
+      if (decision === "reject") {
+        return { content: [{ type: "text", text: `错误:split state 不一致或不完整。为避免静默缺任务/重复任务,本工具拒绝继续。existingTasks=${existingTasks.length},manifestStatus=${manifest?.status || "missing"},manifest:${manifestPath}` }], details: {} };
+      }
 
-      // Write specs + create bd issues.
-      const created: { id: string; title: string; depends_on: string[] }[] = [];
-      const idToBd = new Map<string, string>();
-      for (let i = 0; i < rawSubs.length; i++) {
-        const r = rawSubs[i];
-        const logicalId = r.id || String(i + 1).padStart(2, "0");
-        const file = `subtasks/${logicalId}-${slug(r.title)}.md`;
-        fs.writeFileSync(reqPath(wf!, file), `# ${r.title}\n\n${String(r.spec || "").replace(/\r/g, "")}\n`);
-        const specAbs = reqPath(wf!, file);
-        const parentEpic = process.env.WF_EPIC_ID || wf!.epicId;
-        const bdId = bd.create(wf!.repo, { title: r.title, type: "task", parent: parentEpic, notes: `规格文件:${specAbs}` });
-        idToBd.set(logicalId, bdId);
-        created.push({ id: bdId, title: r.title, depends_on: Array.isArray(r.depends_on) ? r.depends_on : [] });
+      const rawSubs = (params as any).subtasks as any[];
+      const logicalIds = new Set<string>();
+      for (const r of rawSubs) {
+        if (!r?.id?.trim() || !r?.title?.trim() || !r?.spec?.trim()) return { content: [{ type: "text", text: "错误:每个 subtask 必须有非空 id/title/spec" }], details: {} };
+        if (logicalIds.has(r.id)) return { content: [{ type: "text", text: `错误:重复 subtask id:${r.id}` }], details: {} };
+        for (const dep of r.depends_on || []) if (!logicalIds.has(dep)) return { content: [{ type: "text", text: `错误:${r.id} 的依赖 ${dep} 必须指向前面已定义的 task` }], details: {} };
+        logicalIds.add(r.id);
       }
-      // Add deps.
-      for (const c of created) {
-        for (const depLogical of c.depends_on) {
-          const depBd = idToBd.get(depLogical);
-          if (depBd) try { bd.depAdd(wf!.repo, c.id, depBd, "blocks"); } catch (_e) { /* ignore */ }
+
+      const created: { id: string; logicalId: string; title: string; depends_on: string[] }[] = [];
+      fs.writeFileSync(manifestPath, JSON.stringify({
+        status: "creating", prdPath: canonicalPrdPath, prdSha256,
+        intended: rawSubs.map((r) => ({ id: r.id, title: r.title, depends_on: r.depends_on })),
+        created, startedAt: new Date().toISOString(),
+      }, null, 2) + "\n");
+      try {
+        const idToBd = new Map<string, string>();
+        for (const r of rawSubs) {
+          const file = `subtasks/${r.id}-${slug(r.title)}.md`;
+          fs.writeFileSync(reqPath(wf, file), `# ${r.title}\n\n${String(r.spec).replace(/\r/g, "")}\n`);
+          const specAbs = reqPath(wf, file);
+          const bdId = bd.create(wf.repo, { title: r.title, type: "task", parent: wf.epicId, notes: `规格文件:${specAbs}` });
+          idToBd.set(r.id, bdId);
+          created.push({ id: bdId, logicalId: r.id, title: r.title, depends_on: r.depends_on || [] });
+          fs.writeFileSync(manifestPath, JSON.stringify({ status: "creating", prdPath: canonicalPrdPath, prdSha256, created }, null, 2) + "\n");
         }
+        for (const c of created) for (const depLogical of c.depends_on) {
+          const depBd = idToBd.get(depLogical);
+          if (!depBd) throw new Error(`找不到依赖映射:${depLogical}`);
+          bd.depAdd(wf.repo, c.id, depBd, "blocks");
+        }
+        fs.writeFileSync(manifestPath, JSON.stringify({
+          status: "complete", prdPath: canonicalPrdPath, prdSha256, created,
+          completedAt: new Date().toISOString(),
+        }, null, 2) + "\n");
+      } catch (e) {
+        fs.writeFileSync(manifestPath, JSON.stringify({
+          status: "failed", prdPath: canonicalPrdPath, prdSha256, created,
+          error: (e as Error).message, failedAt: new Date().toISOString(),
+        }, null, 2) + "\n");
+        return { content: [{ type: "text", text: `错误:split partial failure,已记录 ${created.length} 个已创建 task。拒绝自动重试以避免重复:\n${(e as Error).message}\nmanifest:${manifestPath}` }], details: {} };
       }
-      wf!.subtaskIds = created.map((c) => c.id);
-      saveState(wf!);
-      mgrHasSplit = true;   // track that the manager actually did work
+      wf.subtaskIds = [...new Set([...(wf.subtaskIds || []), ...created.map((c) => c.id)])];
+      saveState(wf);
+      mgrHasSplit = true;
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
-      return { content: [{ type: "text", text: `已创建 ${created.length} 个 task:\n${summary}\n\n现在严格串行处理 ready task:每次只 claim 一个 task,调用一个 subagent(agent="dev"),再调用 reviewer,最后根据结果 close/reopen;完成整个循环后再认领下一个 task。禁止并行 writer、tasks:[...] 和 worktree:true。` }], details: {} };
+      return { content: [{ type: "text", text: `已确定性创建 ${created.length} 个 task:\n${summary}\n\n现在严格串行处理 ready task:claim → pi-workflow.dev → pi-workflow.reviewer → close/reopen。` }], details: {} };
     },
   });
 
-  // Tool 2: bd_task — atomic bd lifecycle operations (claim/close/reopen/comment).
+  // Tool 2: read-only Beads queries. This replaces manager shell access.
+  pi.registerTool({
+    name: "bd_query",
+    label: "查询当前 epic",
+    description: "只读查询当前 Beads epic 的 children/ready/show/blocked 状态。不能修改 issue。",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("children"), Type.Literal("ready"), Type.Literal("show"), Type.Literal("blocked")]),
+      issue_id: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
+      try {
+        const p = params as any;
+        let result: unknown;
+        if (p.action === "children") result = bd.children(wf.repo, wf.epicId);
+        else if (p.action === "ready") {
+          const childIds = new Set(bd.children(wf.repo, wf.epicId).map((i) => i.id));
+          result = bd.ready(wf.repo).filter((i) => childIds.has(i.id));
+        } else if (p.action === "blocked") {
+          const childIds = new Set(bd.children(wf.repo, wf.epicId).map((i) => i.id));
+          result = bd.blocked(wf.repo).filter((i) => childIds.has(i.id));
+        } else {
+          if (!p.issue_id) throw new Error("show 需要 issue_id");
+          const issue = bd.show(wf.repo, p.issue_id);
+          const allowed = issue.id === wf.epicId || bd.children(wf.repo, wf.epicId).some((i) => i.id === issue.id);
+          if (!allowed) throw new Error("只能查询当前 epic 及其子 issue");
+          result = issue;
+        }
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: {} };
+      } catch (e) {
+        return { content: [{ type: "text", text: `错误:${(e as Error).message}` }], details: {} };
+      }
+    },
+  });
+
+  // Tool 3: bd_task — atomic bd lifecycle operations (claim/close/reopen/comment).
   // The manager uses this for deterministic bd state transitions around
-  // subagent({ agent: "dev"|"reviewer", ... }) calls (nicobailon/pi-subagents'
-  // `subagent` tool). Replaces the former assign_dev tool which baked these
-  // into a spawn-based executor.
+  // subagent({ agent: "pi-workflow.dev"|"pi-workflow.reviewer", ... }) calls.
+  // This replaces the old spawn-based executor.
   pi.registerTool({
     name: "bd_task",
     label: "bd task 生命周期操作",
-    description: "对 bd issue 做确定性生命周期操作:claim(原子认领,记录 baseline SHA 供 reviewer 精确 diff 定位)、close(关闭前会在代码层强制跑一次验证命令复核,不通过则自动 reopen——不要只信 dev 自报的 verifyPassed)、reopen(放回 ready)、comment(留备注)。配合 subagent 工具使用:claim → subagent(agent=dev) → review → close/reopen。",
+    description: "对 bd issue 做确定性生命周期操作:claim(原子认领,记录 baseline SHA 供 reviewer 精确 diff 定位)、close(要求绑定 commit 的 GLM review pass,并重跑验证命令)、reopen(放回 ready)、comment(留备注)。配合受控 pi-workflow.dev/reviewer subagent 使用。",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("claim"), Type.Literal("close"), Type.Literal("reopen"), Type.Literal("comment")], { description: "操作类型" }),
       task_id: Type.String({ description: "bd issue id" }),
@@ -1003,7 +1318,11 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
       const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
       const track = (msg: string) => { try { bd.comment(repo, taskId, `[${stamp}] ${msg}`); } catch (_e) { /* best effort */ } };
       try {
+        assertActiveChildIssue(taskId);
         if (action === "claim") {
+          if (!getVerifyCommand(CONFIG, wf)) {
+            return { content: [{ type: "text", text: "✗ claim 被拒绝:未配置验证命令。先 /wf verify <cmd>。" }], details: {} };
+          }
           const agent = `manager-${wf.reqId}`;
           const ok = bd.claim(repo, taskId, agent);
           if (!ok) {
@@ -1019,6 +1338,12 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
           }
           try {
             fs.mkdirSync(path.dirname(claimPath), { recursive: true });
+            for (const stale of [
+              reqPath(wf, "results", `${taskId}.json`),
+              reqPath(wf, "results", `${taskId}.audit.json`),
+              reqPath(wf, "results", `${taskId}.review.json`),
+              reqPath(wf, "results", `${taskId}.review.audit.json`),
+            ]) if (fs.existsSync(stale)) fs.rmSync(stale, { force: true });
             fs.writeFileSync(claimPath, JSON.stringify({ taskId, baseline, claimedAt: new Date().toISOString() }, null, 2) + "\n");
           } catch (e) {
             bd.reopen(repo, taskId);
@@ -1035,8 +1360,14 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
           let commitSha = "";
           let baseline = "";
           try {
-            const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
-            const claim = JSON.parse(fs.readFileSync(claimPath, "utf8"));
+            const result = readJson(resultPath);
+            const resultAudit = readJson(reqPath(wf, "results", `${taskId}.audit.json`));
+            const claim = readJson(claimPath);
+            if (!result || !resultAudit || !claim) throw new Error("JSON artifact 无法解析");
+            if (resultAudit.status !== "completed" || resultAudit.resolvedModel !== "deepseek/deepseek-v4-flash"
+              || resultAudit.context !== "fresh" || resultAudit.outputSha256 !== sha256File(resultPath) || resultAudit.toolsSafe !== true) {
+              throw new Error("dev agent/model/tool/output audit 无效");
+            }
             commitSha = typeof result?.commitSha === "string" ? result.commitSha.trim() : "";
             baseline = claim?.taskId === taskId && typeof claim?.baseline === "string" ? claim.baseline.trim() : "";
           } catch (e) {
@@ -1046,6 +1377,22 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
               content: [{ type: "text", text: `✗ close 被拒绝:结果或 claim baseline 缺失/无效,已自动 reopen ${taskId}。\n${(e as Error).message}` }],
               details: {},
             };
+          }
+          const reviewPath = reqPath(wf, "results", `${taskId}.review.json`);
+          const reviewAuditPath = reqPath(wf, "results", `${taskId}.review.audit.json`);
+          try {
+            const review = readJson(reviewPath);
+            const audit = readJson(reviewAuditPath);
+            if (!review || !audit) throw new Error("review JSON artifact 无法解析");
+            const reviewBound = review?.verdict === "pass" && review?.taskId === taskId
+              && review?.baseline === baseline && review?.commitSha === commitSha;
+            const auditValid = audit?.status === "completed" && audit?.resolvedModel === "zai/glm-5.2"
+              && audit?.context === "fresh" && audit?.outputSha256 === sha256File(reviewPath);
+            if (!reviewBound || !auditValid) throw new Error("review verdict 未通过、未绑定 task/commit,或 GLM audit 无效");
+          } catch (e) {
+            bd.reopen(repo, taskId);
+            track(`✗ close 被拒:review 证据缺失/无效,已自动 reopen。`);
+            return { content: [{ type: "text", text: `✗ close 被拒绝:必须先由 zai/glm-5.2 reviewer 对 taskId/baseline/commitSha 给出绑定的 pass verdict。\n${(e as Error).message}` }], details: {} };
           }
           const range = validateIntegratedCommitRange(repo, baseline, commitSha);
           if (!range.ok) {
@@ -1062,11 +1409,9 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
           }
 
           // Code-level P0 recheck (risk #2/#4): don't trust the dev's
-          // self-reported verifyPassed alone. Re-run the requirement's actual
-          // verify command before allowing close. A missing/empty verify
-          // command is NOT treated as pass here — runVerify(allowEmptyVerify
-          // = false) fails loudly, same P0 policy as run_test's final gate.
-          const v = runVerify(CONFIG, wf!, false);
+          // Missing verification is always a hard failure; runVerify has no
+          // bypass flag and the same policy applies to run_verify.
+          const v = runVerify(CONFIG, wf!);
           if (!v.ok) {
             bd.reopen(repo, taskId);
             track(`✗ close 被拒:代码层验证复核未通过,已自动 reopen。\n${v.output.slice(-800)}`);
@@ -1074,7 +1419,7 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
               content: [{ type: "text", text:
                 `✗ close 被拒绝:验证命令复核未通过,已自动 reopen ${taskId}。\n` +
                 `${v.output.slice(-1200)}\n` +
-                `不要直接重试 close——先确认 subagent(dev) 指令里传的验证命令和仓库配置一致,或检查 dev 的改动是否真的让验证通过。`
+                `不要直接重试 close——先确认 pi-workflow.dev 指令里传的验证命令和仓库配置一致,或检查 dev 的改动是否真的让验证通过。`
               }],
               details: {},
             };
@@ -1101,40 +1446,152 @@ export function registerManagerTools(pi: ExtensionAPI, ctx: ExtensionCommandCont
     },
   });
 
-  // Tool 3: run_test — write cumulative diff + run the verify gate.
-  // NOTE: per-task review is done by the manager calling
-  // subagent({ agent: "reviewer", ... }) during the dispatch loop. run_test is
-  // the FINAL whole-requirement gate: it writes the cumulative diff (for the
-  // manager to feed a final reviewer subagent if desired) and runs the P0
-  // verify command. Bug creation from review findings is now the manager's
-  // job (bd.create via bash), not baked in.
+  // Tool 4: deterministic verification. The manager cannot run shell; this
+  // tool executes only the preconfigured command and persists bounded evidence.
   pi.registerTool({
-    name: "run_test",
-    label: "测试产出",
-    description: "所有 task 完成后调用。写累积 diff(供最终整体 review 用)+ 跑 P0 验证门。返回验证结果 + diff 路径。整体 review 由你(manager)自行调 subagent({agent:'reviewer'}) 看 cumulative.diff;发现 blocker 用 bash 调 bd create 建 bug。",
+    name: "run_verify",
+    label: "运行确定性验证",
+    description: "所有 task/bug 关闭后运行预配置验证命令,写 verify.json 与 cumulative.diff。不能接受任意命令参数。",
     parameters: Type.Object({}),
     async execute() {
-      if (!wf) {
-        return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
+      if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
+      const command = getVerifyCommand(CONFIG, wf);
+      if (!command) return { content: [{ type: "text", text: "错误:未配置验证命令。先 /wf verify <cmd>。" }], details: {} };
+      const dirtyCode = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
+      if (dirtyCode) return { content: [{ type: "text", text: `错误:代码工作树不干净,不能生成最终证据:\n${dirtyCode}` }], details: {} };
+      const unfinished = bd.children(wf.repo, wf.epicId).filter((i) => (i.issue_type === "task" || i.issue_type === "bug") && i.status !== "closed");
+      if (unfinished.length) {
+        return { content: [{ type: "text", text: `错误:仍有 ${unfinished.length} 个未关闭 task/bug:\n${unfinished.map((i) => `${i.id} ${i.status} ${i.title}`).join("\n")}` }], details: {} };
       }
-      // Write cumulative diff.
-      const diffBase = wf!.baseline || "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-      const diff = sh("git", ["diff", diffBase, "HEAD"], wf!.repo).stdout;
-      const diffPath = reqPath(wf!, "results", "cumulative.diff");
-      try { fs.writeFileSync(diffPath, diff); } catch (_e) { /* ignore */ }
-
-      // Verify gate (P0 safety — runs the configured verify command).
-      const v = runVerify(CONFIG, wf!, true);
-      const verifyPart = v.ok ? "验证通过" : `验证失败:\n${v.output.slice(-1500)}`;
-
-      commitArtifacts(wf!);
-      return {
-        content: [{ type: "text", text:
-          `${verifyPart}\n累积 diff 已写入:${diffPath}\n` +
-          `下一步建议:调 subagent({agent:"reviewer", task:"审查整个需求的累积 diff:<diffPath>,对照 PRD:<prdPath>"})。reviewer 返回 blocker 时,用 bash 跑 bd create 建 bug issue,再走 claim→subagent(dev)→subagent(reviewer) 循环修复。`
-        }],
-        details: {},
+      const diffBase = wf.baseline || "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+      const diffPath = reqPath(wf, "results", "cumulative.diff");
+      const verifyPath = reqPath(wf, "results", "verify.json");
+      const finalPath = reqPath(wf, "results", "final-review.json");
+      const finalAuditPath = reqPath(wf, "results", "final-review.audit.json");
+      const prdPath = reqPath(wf, "prd.md");
+      if (!fs.existsSync(prdPath)) return { content: [{ type: "text", text: `错误:PRD 不存在:${prdPath}` }], details: {} };
+      fs.mkdirSync(path.dirname(diffPath), { recursive: true });
+      for (const stale of [finalPath, finalAuditPath]) if (fs.existsSync(stale)) fs.rmSync(stale, { force: true });
+      const headBefore = gitHead(wf.repo);
+      if (!headBefore) return { content: [{ type: "text", text: "错误:无法读取当前 HEAD" }], details: {} };
+      const diffResult = sh("git", ["diff", diffBase, headBefore], wf.repo);
+      if (diffResult.code !== 0) return { content: [{ type: "text", text: `错误:生成 cumulative diff 失败:${diffResult.stderr}` }], details: {} };
+      fs.writeFileSync(diffPath, diffResult.stdout);
+      const startedAt = new Date().toISOString();
+      const runId = randomUUID();
+      const v = runVerify(CONFIG, wf);
+      const headAfter = gitHead(wf.repo);
+      const headStable = headAfter === headBefore;
+      const evidence = {
+        runId,
+        command: v.command,
+        ok: v.ok && headStable,
+        exitCode: v.code,
+        output: headStable ? v.output : `${v.output}\n验证命令执行期间 HEAD 发生变化:${headBefore} -> ${headAfter}`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        baseline: diffBase,
+        head: headBefore,
+        diffPath,
+        prdPath,
+        prdSha256: sha256File(prdPath),
+        diffSha256: sha256File(diffPath),
       };
+      fs.writeFileSync(verifyPath, JSON.stringify(evidence, null, 2) + "\n");
+      return { content: [{ type: "text", text:
+        `确定性验证${evidence.ok ? "通过" : "失败"}(exit ${v.code},runId ${runId})。\nverify:${verifyPath}\ndiff:${diffPath}\n` +
+        `下一步必须调用 subagent({agent:"pi-workflow.final-reviewer", context:"fresh", cwd:${JSON.stringify(wf.repo)}, output:${JSON.stringify(reqPath(wf, "results", "final-review.json"))}, task:"读取 PRD ${prdPath}、verify ${verifyPath}、diff ${diffPath},逐条验收并在 JSON 中原样返回 runId=${runId}"}),然后调用 finalize_test。`
+      }], details: {} };
+    },
+  });
+
+  // Tool 5: validate final-reviewer JSON and create bugs deterministically.
+  pi.registerTool({
+    name: "finalize_test",
+    label: "处理最终审查",
+    description: "读取固定路径 verify.json/final-review.json,校验结构;失败时在当前 epic 下创建 bug,通过时提交 workflow 工件。",
+    parameters: Type.Object({}),
+    async execute() {
+      if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
+      const verifyPath = reqPath(wf, "results", "verify.json");
+      const reviewPath = reqPath(wf, "results", "final-review.json");
+      const auditPath = reqPath(wf, "results", "final-review.audit.json");
+      const diffPath = reqPath(wf, "results", "cumulative.diff");
+      const prdPath = reqPath(wf, "prd.md");
+      try {
+        const command = getVerifyCommand(CONFIG, wf);
+        if (!command) throw new Error("未配置验证命令;禁止 finalize");
+        const dirtyCode = sh("git", ["status", "--porcelain", "--", ".", ":!.workflow"], wf.repo).stdout.trim();
+        if (dirtyCode) throw new Error(`代码工作树不干净;必须重新提交/验证:\n${dirtyCode}`);
+        const verify = readJson(verifyPath);
+        const review = readJson(reviewPath);
+        const audit = readJson(auditPath);
+        if (!verify || !review || !audit) throw new Error("最终 evidence JSON 无法解析");
+        const currentHead = gitHead(wf.repo);
+        const unfinished = bd.children(wf.repo, wf.epicId).filter((i) => (i.issue_type === "task" || i.issue_type === "bug") && i.status !== "closed");
+        if (unfinished.length) throw new Error(`仍有 ${unfinished.length} 个未关闭 task/bug`);
+        if (!verify?.runId || verify.command !== command || verify.head !== currentHead) throw new Error("verify evidence 与当前 command/HEAD 不匹配");
+        if (verify.prdSha256 !== sha256File(prdPath) || verify.diffSha256 !== sha256File(diffPath)) throw new Error("PRD/diff hash 已变化;必须重新 run_verify");
+        if (!review || review.runId !== verify.runId || !["pass", "fail"].includes(review.verdict)
+          || !Array.isArray(review.issues) || !Array.isArray(review.acceptanceChecks) || review.acceptanceChecks.length === 0
+          || typeof review.summary !== "string" || !review.summary.trim()) {
+          throw new Error("final-review.json schema/runId 无效");
+        }
+        if (audit?.status !== "completed" || audit?.resolvedModel !== "zai/glm-5.2" || audit?.context !== "fresh"
+          || audit?.verifyRunId !== verify.runId || audit?.verifySha256 !== sha256File(verifyPath)
+          || audit?.outputSha256 !== sha256File(reviewPath)) {
+          throw new Error("final-reviewer GLM audit 缺失、模型错误或 evidence 已变化");
+        }
+        const blockingReviewIssues = review.issues.filter((i: any) => i && ["blocker", "major"].includes(i.severity));
+        const failedChecks = review.acceptanceChecks.filter((c: any) => !c || c.status !== "pass" || !String(c.criterion || "").trim() || !String(c.evidence || "").trim());
+        if (review.verdict === "pass" && (verify.ok !== true || failedChecks.length || blockingReviewIssues.length)) {
+          throw new Error("pass verdict 与验证/checks/blocking issues 矛盾");
+        }
+        if (review.verdict === "pass") {
+          const committed = commitArtifacts(wf);
+          if (!committed.committed) throw new Error("workflow 最终工件提交失败或没有可提交工件");
+          return { content: [{ type: "text", text: `✓ 最终验证与 GLM review 均通过。runId:${verify.runId}\n报告:${reviewPath}\n工件 commit:${committed.sha}` }], details: {} };
+        }
+
+        const issues = blockingReviewIssues;
+        if (verify.ok !== true && issues.length === 0) {
+          issues.push({
+            severity: "blocker",
+            title: "验证命令失败",
+            description: `${verify.command} exit ${verify.exitCode}\n${String(verify.output || "").slice(-1500)}`,
+            suggestedFix: "修复验证失败后重新运行最终验收",
+          });
+        }
+        if (issues.length === 0) throw new Error("final verdict=fail 但没有 blocker/major issue");
+
+        const created: string[] = [];
+        for (let i = 0; i < issues.length; i++) {
+          const issue = issues[i];
+          const title = String(issue.title || `最终审查问题 ${i + 1}`).slice(0, 80);
+          const specPath = reqPath(wf, "subtasks", `bug-final-${String(i + 1).padStart(2, "0")}-${slug(title)}.md`);
+          const body = [
+            `# Bug: ${title}`, "", `## 严重度`, String(issue.severity), "",
+            `## 问题`, String(issue.description || ""), "",
+            `## 位置`, `${issue.file || "未指定"}${issue.line ? `:${issue.line}` : ""}`, "",
+            `## 建议修复`, String(issue.suggestedFix || "根据最终审查证据修复"), "",
+            `## 验收标准`, `- [ ] 问题不再复现`, `- [ ] ${verify.command} 通过`, `- [ ] final-reviewer verdict=pass`, "",
+          ].join("\n");
+          fs.writeFileSync(specPath, body);
+          const id = bd.create(wf.repo, {
+            title: `bug: ${title}`,
+            type: "bug",
+            parent: wf.epicId,
+            description: String(issue.description || title),
+            notes: `规格文件:${specPath};来源:${reviewPath}`,
+          });
+          created.push(id);
+        }
+        wf.subtaskIds = [...(wf.subtaskIds || []), ...created];
+        saveState(wf);
+        return { content: [{ type: "text", text: `最终审查失败,已创建 ${created.length} 个 bug:\n${created.join("\n")}\n修复后重新 run_verify → final-reviewer → finalize_test。` }], details: {} };
+      } catch (e) {
+        return { content: [{ type: "text", text: `错误:${(e as Error).message}` }], details: {} };
+      }
     },
   });
   // NOTE: tool-set locking by mode is now handled centrally by applyModeTools(),
@@ -1150,18 +1607,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   registerWorkflowProviders(pi, CONFIG);
 
   pi.on("session_start", async (_e, ctx) => {
+    // No epic is auto-restored. Normal Pi is the default; /wf resume presents
+    // the Beads epic picker. Capture the pre-workflow active tool set so /wf
+    // done can restore it exactly.
+    if (baseActiveTools.length === 0) baseActiveTools = pi.getActiveTools();
+    wf = undefined;
+    activeDevToolCallId = undefined;
     setModeStatus(ctx as any);
-    // Restore the most recent requirement so /execute etc. work across sessions
-    // (wf is an in-memory singleton that doesn't survive restart).
-    if (!wf && restoreLatestWf(ctx as any)) {
-      ctx.ui.notify?.(`已恢复上次需求 ${wf!.reqId}(epic ${wf!.epicId},模式 ${wf!.mode})。\n/wf resume <reqId> 切换,/wf new 新建,/wf idle 进通用模式。`, "info");
-      setModeStatus(ctx as any);
-    }
-    // Always register manager tools — the main session IS the manager now.
-    // Tool-set visibility is controlled by mode (idle=full, plan=readonly, build=executor),
-    // not by which process we're in (no more WF_ROLE/manager subprocess).
     registerManagerTools(pi, ctx as any);
-    // Apply the current mode's tool set.
     applyModeTools(pi, ctx as any);
   });
 
@@ -1178,6 +1631,87 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   // observability lost when the reasonix `-metrics` aggregation was removed.
   pi.on("message_end", async (event: any, ctx: any) => {
     try { trackUsage(event, ctx); } catch (_e) { /* never break a run over telemetry */ }
+  });
+
+  pi.on("tool_call", async (event: any) => {
+    if (event?.toolName !== "subagent") return;
+    const reason = validateSubagentCall(event);
+    if (reason) return { block: true, reason };
+  });
+
+  // Persist the resolved child model and child usage reported by pi-subagents.
+  // The PRD/final-review output remains the child's raw artifact; this adjacent
+  // envelope makes provider/model selection auditable without trusting text the
+  // child wrote about itself.
+  pi.on("tool_result", async (event: any) => {
+    try {
+      if (event?.toolName !== "subagent") return;
+      const agent = String(event?.input?.agent || "");
+      if (agent === "pi-workflow.dev" && activeDevToolCallId === String(event?.toolCallId || "")) activeDevToolCallId = undefined;
+      if (!wf || !["pi-workflow.prd-writer", "pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) return;
+      const result = event?.details?.results?.[0];
+      const usage = result?.usage ?? event?.details?.totalChildUsage ?? event?.usage ?? null;
+      const inputOutput = String(event?.input?.output || "");
+      let expectedOutput: string;
+      let auditPath: string;
+      let expectedContext: "fork" | "fresh";
+      if (agent === "pi-workflow.prd-writer") {
+        expectedOutput = reqPath(wf, "prd.md");
+        auditPath = reqPath(wf, "results", "prd-generation.json");
+        expectedContext = "fork";
+      } else if (agent === "pi-workflow.final-reviewer") {
+        expectedOutput = reqPath(wf, "results", "final-review.json");
+        auditPath = reqPath(wf, "results", "final-review.audit.json");
+        expectedContext = "fresh";
+      } else if (agent === "pi-workflow.dev") {
+        expectedOutput = inputOutput;
+        auditPath = inputOutput.replace(/\.json$/, ".audit.json");
+        expectedContext = "fresh";
+      } else {
+        expectedOutput = inputOutput;
+        auditPath = inputOutput.replace(/\.review\.json$/, ".review.audit.json");
+        expectedContext = "fresh";
+      }
+      const exactOutput = !!inputOutput && path.resolve(inputOutput) === path.resolve(expectedOutput)
+        && (!result?.savedOutputPath || path.resolve(result.savedOutputPath) === path.resolve(expectedOutput));
+      const resolvedModel = result?.model ?? null;
+      const context = result?.context ?? event?.details?.context ?? null;
+      const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
+      const allowedTools = agent === "pi-workflow.dev"
+        ? new Set(["read", "write", "edit", "bash", "grep", "find"])
+        : agent === "pi-workflow.reviewer"
+          ? new Set(["read", "bash", "grep", "find", "ls"])
+          : new Set(["read", "grep", "find", "ls"]);
+      const toolsSafe = toolCalls.every((call: any) => {
+        const toolName = renderedToolName(call);
+        return allowedTools.has(toolName);
+      });
+      const verify = agent === "pi-workflow.final-reviewer" ? readJson(reqPath(wf, "results", "verify.json")) : undefined;
+      const expectedModel = agent === "pi-workflow.dev" ? "deepseek/deepseek-v4-flash" : "zai/glm-5.2";
+      const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
+        && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expectedModel
+        && context === expectedContext && !!usage && toolsSafe;
+      fs.writeFileSync(auditPath, JSON.stringify({
+        status: ok ? "completed" : "failed",
+        agent,
+        requestedModel: expectedModel,
+        resolvedModel,
+        attemptedModels: result?.attemptedModels ?? [],
+        context,
+        usage,
+        output: expectedOutput,
+        outputSha256: sha256File(expectedOutput) ?? null,
+        outputExists: fs.existsSync(expectedOutput),
+        exactOutput,
+        toolsSafe,
+        toolCalls,
+        verifyRunId: verify?.runId ?? null,
+        verifySha256: agent === "pi-workflow.final-reviewer" ? sha256File(reqPath(wf, "results", "verify.json")) ?? null : null,
+        exitCode: result?.exitCode ?? null,
+        error: result?.error ?? result?.outputSaveError ?? (event?.isError ? "subagent tool failed" : null),
+        completedAt: new Date().toISOString(),
+      }, null, 2) + "\n");
+    } catch (_e) { /* audit must not alter the subagent tool result */ }
   });
 
   pi.on("agent_end", async (event: any) => {
@@ -1203,9 +1737,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
 
   // Commands (always registered — there's only one session now, no WF_ROLE split).
   pi.registerCommand("wf", {
-      description: "workflow 流水线:new / prd / analyze / status / verify / execute / resume / bug / task / done / idle / abort",
+      description: "workflow 流水线:new / prd / analyze / status / verify / execute / resume / bug / task / done / abort",
       getArgumentCompletions: (prefix: string) => {
-        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "task", "done", "idle", "abort", "help"];
+        const subs = ["new", "prd", "analyze", "status", "verify", "execute", "resume", "bug", "task", "done", "abort", "help"];
         const f = subs.filter((s) => s.startsWith(prefix));
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
@@ -1222,35 +1756,34 @@ export default function workflowExtension(pi: ExtensionAPI): void {
             await cmdAnalyze(pi, ctx); break;
           }
           case "status": cmdStatus(ctx); break;
-          case "resume": cmdResume(ctx, rest); break;
+          case "resume": await cmdResume(pi, ctx, rest); break;
           case "bug": await cmdBug(pi, ctx, rest); break;
           case "task": await cmdTask(pi, ctx, rest); break;
           case "done": cmdDone(pi, ctx); break;
-          case "idle": cmdIdle(pi, ctx); break;
           case "abort": await cmdAbort(pi, ctx); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
           case "verify":
             if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
-            wf.verifyCommand = rest; saveState(wf);
-            ctx.ui.notify(`验证命令:${rest || "(清空)"}`, "info"); break;
+            if (!rest.trim()) { ctx.ui.notify("验证命令不能为空。用法:/wf verify <cmd>", "error"); break; }
+            wf.verifyCommand = rest.trim(); saveState(wf);
+            ctx.ui.notify(`验证命令:${wf.verifyCommand}`, "info"); break;
           default:
             ctx.ui.notify([
-              "workflow 三模式:idle(通用,自由写代码) / plan(讨论需求,只读) / build(执行流水线)",
+              "workflow 两模式:plan(讨论/PRD,代码只读) / build(manager 代码只读,委派执行)。无 active epic 时是普通 Pi。",
               "",
-              "/wf new <名> [repo]     新建需求(bd epic),进 plan 模式(只读讨论)",
-              "/wf resume [reqId]      切换到已有需求(无参=列列表)。新 session 自动恢复最近需求",
+              "/wf new <名> [repo]     新建 Beads epic,进入 plan",
+              "/wf resume [epicId]     从全部 Beads epic 选择;缺 state 时可重建",
               "/plan                   回 plan 模式讨论",
-              "/wf idle                切到通用模式(工具全开,自由写代码/问问题,保留 wf)",
               "/wf analyze [--refresh] 分析仓库,生成跨需求复用简报",
-              "/wf prd                 生成 prd.md(glm-5.2,基于讨论)",
-              "/execute [prd路径]      进 build 模式:主 session 跑流水线(拆 task→派 dev/reviewer→测试)。传 PRD 路径用该 PRD,否则用当前 prd.md",
-              "/execute --dry-run      只拆 task + 汇报计划,不派 dev、不改代码(先看计划再决定)",
-              "/wf status              查看 bd 子任务状态 + 进度 + 本需求 token/cache 用量(bd 不可用时降级显示 state.json 里的 task id)",
-              "/wf done                结束执行,切回 idle(释放 build 锁,恢复全工具集)",
-              "/wf abort               回滚:git reset --hard 到 /execute 前的 baseline + 把 epic 下 task 全部 reopen(需确认,不可逆)",
-              "/wf bug <描述>          建 bd bug(挂当前需求 epic,跳过 PRD),然后 /execute 修复",
-              "/wf task <描述>         一句话需求拆多 task(挂当前 epic,跳过 PRD,tracer-bullet 拆分+依赖),/execute 派 dev 并行实现",
-              "/wf verify <cmd>        设置验证命令(空 = 触发 P0 门:每个 task close 时会因无验证而被拒)",
+              "/wf prd                 调用 fork 的 prd-writer(GLM-5.2)生成并展示 PRD",
+              "/execute [prd路径]      进入 build;要求非空验证命令",
+              "/execute --dry-run      只拆 task + 汇报计划,不派 dev",
+              "/wf status              查看当前 epic 任务和 token/cache 用量",
+              "/wf done                退出当前 epic,恢复普通 Pi;之后可 resume",
+              "/wf abort               回滚到 execute baseline,task reopen,回到 plan",
+              "/wf bug <描述>          在当前 epic 创建 bug",
+              "/wf task <描述>         在当前 epic 创建 task",
+              "/wf verify <cmd>        设置强制验证命令;空命令直接报错",
             ].join("\n"), "info");
         }
       },

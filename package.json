@@ -1,7 +1,7 @@
 {
   "name": "pi-workflow",
   "version": "0.1.0",
-  "description": "三模式(idle/plan/build)需求流水线 pi 扩展:deepseek-pro 讨论 → glm-5.2 写 PRD → 主 session 拆子任务 → pi-subagents(deepseek-v4-flash)逐子任务实现+验证+commit → glm-5.2 review。",
+  "description": "plan/build 两模式需求流水线:GLM PRD writer、Beads task、串行 dev/reviewer、确定性验证与 GLM final review。",
   "keywords": [
     "pi-package"
   ],
@@ -20,7 +20,12 @@
     ],
     "skills": [
       "./skills"
-    ]
+    ],
+    "subagents": {
+      "agents": [
+        "./.pi/agents"
+      ]
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.81.0",

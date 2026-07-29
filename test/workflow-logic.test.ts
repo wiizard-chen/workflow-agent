@@ -30,11 +30,12 @@ import {
   comment,
   create,
   depAdd,
+  list as listIssues,
   reopen,
   type BdExec,
   type BdExecResult,
 } from "../extensions/bd.ts";
-import { extractSubtasksJson, registerManagerTools } from "../extensions/workflow.ts";
+import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
   addUsage,
   buildRunSummary,
@@ -172,8 +173,45 @@ console.log("bd.ts — BdExec argv correctness:");
   );
 }
 
+{
+  const calls: string[][] = [];
+  const fakeExec: BdExec = (_repo, args): BdExecResult => {
+    calls.push(args);
+    return { code: 0, stdout: "[]", stderr: "" };
+  };
+  listIssues("/repo", { type: "epic", all: true, limit: 0 }, fakeExec);
+  check(
+    "list({all:true,limit:0}) passes --all/--limit 0 so resume includes every epic",
+    calls[0].includes("--all") && calls[0][calls[0].indexOf("--limit") + 1] === "0" && calls[0].includes("--type") && calls[0].includes("epic"),
+    JSON.stringify(calls[0]),
+  );
+}
+
 // ===========================================================================
-// 2. extractSubtasksJson — pure JSON validation/error paths
+// 2. Behavioral helpers for runtime evidence/state decisions
+// ===========================================================================
+
+console.log("\nworkflow runtime helpers:");
+check("renderedToolName parses pi-subagents 0.37 {text,expandedText} shape", renderedToolName({ text: "read /tmp/a" }) === "read");
+check("renderedToolName maps pi-subagents shell '$ ' summary to bash", renderedToolName({ text: "$ npm test" }) === "bash");
+check("renderedToolName still accepts named shape", renderedToolName({ toolName: "bash" }) === "bash");
+check("preservedBaseline keeps original resume baseline", preservedBaseline("old-sha", "new-sha") === "old-sha");
+check("preservedBaseline initializes a new run", preservedBaseline(undefined, "new-sha") === "new-sha");
+check("splitDecision creates only with no tasks/manifest", splitDecision([], undefined, "hash") === "create");
+check("splitDecision reuses matching complete manifest", splitDecision(["a", "b"], { status: "complete", prdSha256: "hash", created: [{ id: "b" }, { id: "a" }] }, "hash") === "reuse");
+check("splitDecision rejects partial split", splitDecision(["a"], { status: "failed", prdSha256: "hash", created: [{ id: "a" }] }, "hash") === "reject");
+check("splitDecision rejects complete manifest with missing task", splitDecision(["a"], { status: "complete", prdSha256: "hash", created: [{ id: "a" }, { id: "b" }] }, "hash") === "reject");
+check("splitDecision rejects complete manifest with missing Beads tasks", splitDecision([], { status: "complete", prdSha256: "hash", created: [{ id: "a" }] }, "hash") === "reject");
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wf-dirs-"));
+  try {
+    ensureRequirementDirs({ reqId: "external", name: "x", repo: root, mode: "plan", createdAt: "now", epicId: "e", subtaskIds: [] });
+    check("ensureRequirementDirs initializes external PRD results/subtasks", fs.existsSync(path.join(root, ".workflow", "external", "results")) && fs.existsSync(path.join(root, ".workflow", "external", "subtasks")));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+
+// ===========================================================================
+// 3. extractSubtasksJson — pure JSON validation/error paths
 // ===========================================================================
 
 console.log("\nextractSubtasksJson — validation/error paths:");
@@ -262,25 +300,19 @@ try {
 
   {
     const s: WorkflowState = { ...baseState, verifyCommand: "" };
-    const v = runVerify(CONFIG, s, false);
-    check("runVerify: empty command + allowEmptyVerify=false => HARD FAIL (P0 gate)", v.ok === false, v.output);
-  }
-
-  {
-    const s: WorkflowState = { ...baseState, verifyCommand: "" };
-    const v = runVerify(CONFIG, s, true);
-    check("runVerify: empty command + allowEmptyVerify=true => explicit pass", v.ok === true, v.output);
+    const v = runVerify(CONFIG, s);
+    check("runVerify: empty command always HARD FAIL", v.ok === false && v.code === -1, v.output);
   }
 
   {
     const s: WorkflowState = { ...baseState, verifyCommand: "exit 0" };
-    const v = runVerify(CONFIG, s, false);
+    const v = runVerify(CONFIG, s);
     check("runVerify: verify command exits 0 => pass", v.ok === true, v.output);
   }
 
   {
     const s: WorkflowState = { ...baseState, verifyCommand: "exit 1" };
-    const v = runVerify(CONFIG, s, false);
+    const v = runVerify(CONFIG, s);
     check("runVerify: verify command exits nonzero => fail (this is bd_task(close)'s new recheck gate)", v.ok === false, v.output);
   }
 
@@ -393,7 +425,7 @@ console.log("\nregression guard — build-mode tool whitelist uses the real tool
   registerManagerTools(fakePi as any, {} as any);
   check(
     "fresh repo registers all manager tools before wf exists",
-    ["split_prd_to_tasks", "bd_task", "run_test"].every((name) => registered.includes(name)),
+    ["split_prd_to_tasks", "bd_query", "bd_task", "run_verify", "finalize_test"].every((name) => registered.includes(name)),
     JSON.stringify(registered),
   );
 }
@@ -404,7 +436,8 @@ console.log("\nregression guard — build-mode tool whitelist uses the real tool
   check("applyModeTools()'s build-mode whitelist block exists", !!activeToolsBlock);
   if (activeToolsBlock) {
     check('build-mode whitelist includes "subagent"', activeToolsBlock[0].includes('"subagent"'), activeToolsBlock[0]);
-    check('build-mode whitelist does NOT include "delegate" (wrong tool name)', !activeToolsBlock[0].includes('"delegate"'), activeToolsBlock[0]);
+    check('build-mode whitelist excludes unrestricted "bash"', !activeToolsBlock[0].includes('"bash"'), activeToolsBlock[0]);
+    check('build-mode whitelist includes deterministic test tools', activeToolsBlock[0].includes('"run_verify"') && activeToolsBlock[0].includes('"finalize_test"'));
   }
 }
 
@@ -453,8 +486,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   const loadMgr = src.match(/function loadManagerPrompt\([\s\S]*?\n}/);
   check("loadManagerPrompt() exists", !!loadMgr);
   if (loadMgr) {
-    check("loadManagerPrompt() enforces the serial writer ceiling", /const maxParallel = 1/.test(loadMgr[0]));
-    check("loadManagerPrompt() injects the parallel ceiling into the prompt", /dev 并行上限/.test(loadMgr[0]));
+    check("loadManagerPrompt() injects writer ceiling 1", /writer 并行上限:1/.test(loadMgr[0]));
     check("loadManagerPrompt() supports a dryRun branch", /dryRun/.test(loadMgr[0]));
     check("dry-run branch forbids dispatching dev", /不要派 dev|绝对不要派 dev/.test(loadMgr[0]));
   }
@@ -464,15 +496,36 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   // manager-prompt.md must no longer contain the never-substituted "N 个开发".
   const mgrPrompt = fs.readFileSync(new URL("../.pi/manager-prompt.md", import.meta.url), "utf8");
   check('manager-prompt.md no longer says the placeholder "N 个开发"', !/N 个开发/.test(mgrPrompt));
-  check("manager-prompt.md documents the injected parallel ceiling", /并行上限/.test(mgrPrompt));
-  check("manager-prompt.md forbids worktree writers", /禁止 `worktree:true`|不要传 `worktree:true`/.test(mgrPrompt));
+  check("manager-prompt.md documents writer ceiling", /writer 上限固定为 1/.test(mgrPrompt));
+  check("manager-prompt.md forbids worktree writers", /禁止 `tasks:\[\.\.\.\]`、`worktree:true`/.test(mgrPrompt));
+  check("manager-prompt.md uses deterministic verify + final reviewer", /run_verify[\s\S]*final-reviewer[\s\S]*finalize_test/.test(mgrPrompt));
+  check("manager-prompt.md does not grant bash", !/开放[^\n]*bash|工具集[^\n]*bash/.test(mgrPrompt));
   check("bd_task close validates a claim-bound integrated commit range", /validateIntegratedCommitRange/.test(src) && /\.claim\.json/.test(src));
 
   // Fresh repositories have no wf during session_start. Manager tools must be
   // registered anyway, with active-workflow checks inside each execute handler.
   const registerTools = src.match(/function registerManagerTools\([\s\S]*?\n}/);
   check("registerManagerTools() does not return early when wf is absent", !!registerTools && !/if \(!wf\) return/.test(registerTools[0]));
-  check("manager tool handlers fail safely without an active workflow", (src.match(/错误:没有活动需求。先 \/wf new。/g) || []).length >= 3);
+  check("manager tool handlers fail safely without an active workflow", (src.match(/错误:没有活动\s*(?:需求|epic)/g) || []).length >= 4);
+  check("empty verify command is rejected before build", /无法进入 build:未配置验证命令/.test(src));
+  check("run_test and allowEmptyVerify are removed", !/name: "run_test"|allowEmptyVerify/.test(src));
+  check("resume uses Beads epic picker and reconstructs state", /bd\.list\(ctx\.cwd, \{ type: "epic", all: true, limit: 0 \}\)/.test(src) && /ui\.select\("选择要恢复的 Beads epic"/.test(src) && /重建 workflow 上下文/.test(src));
+  check("idle command is removed", !/case "idle"|cmdIdle|\/wf idle/.test(src));
+  check("PRD command delegates to forked namespaced prd-writer", /agent: "pi-workflow\.prd-writer"[\s\S]*context: "fork"[\s\S]*cwd:/.test(src));
+  check("subagent capability guard rejects parallel/worktree/async and model overrides", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*input\.model/.test(src));
+  check("subagent capability guard restricts plan/build roles", /plan 模式只允许 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
+  check("subagent capability guard enforces workflow cwd and serial dev lease", /cwd 必须精确[\s\S]*activeDevToolCallId/.test(src));
+  check("workflow fails closed on higher-precedence agent shadow/override", /function assertWorkflowAgentsUnshadowed[\s\S]*workflow agent 被高优先级定义覆盖[\s\S]*settings override/.test(src));
+  check("PRD child model/usage is persisted from subagent tool details", /pi\.on\("tool_result"[\s\S]*prd-generation\.json[\s\S]*resolvedModel[\s\S]*usage/.test(src));
+  check("final reviewer has a separate actual-model audit envelope", /final-review\.audit\.json/.test(src));
+  check("final evidence is bound to runId/head/command/hashes and exact GLM audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*resolvedModel !== "zai\/glm-5\.2"[\s\S]*verifyRunId/.test(src));
+  check("bd_task mutations are scoped to active epic children", /assertActiveChildIssue\(taskId\)/.test(src));
+  check("task close requires commit-bound reviewer pass + audit", /review\?\.taskId === taskId[\s\S]*review\?\.baseline === baseline[\s\S]*review\?\.commitSha === commitSha/.test(src));
+  check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*usageByModel = \{\}[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
+  check("split ignores env overrides and only uses active epic/canonical PRD", !/WF_EPIC_ID|WF_PRD_PATH/.test(src) && /parent: wf\.epicId/.test(src) && /split 只允许当前 canonical PRD/.test(src));
+  check("split is manifest-backed and fails closed on partial creation", /manifestPath = reqPath\(wf, "results", "split\.json"\)/.test(src) && /status: "creating"[\s\S]*status: "complete"[\s\S]*status: "failed"/.test(src) && /拒绝自动重试以避免重复/.test(src));
+  check("split tool no longer recursively calls the parent model", !/const splitPromptText = withBrief\(wf!\.repo/.test(src));
+  check("execute preserves the original baseline across resume", /wf\.baseline = preservedBaseline\(wf\.baseline, gitHead/.test(src));
 
   // P1-7: /execute --dry-run parsing.
   check("cmdExecute() parses --dry-run", /--dry-run/.test(src));
@@ -514,10 +567,21 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
 
   const devAgent = fs.readFileSync(new URL("../.pi/agents/dev.md", import.meta.url), "utf8");
   const reviewerAgent = fs.readFileSync(new URL("../.pi/agents/reviewer.md", import.meta.url), "utf8");
+  const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  check("package exposes bundled pi-subagents agents", pkg.pi?.subagents?.agents?.includes("./.pi/agents"), JSON.stringify(pkg.pi));
+  const wfpi = fs.readFileSync(new URL("../scripts/wfpi", import.meta.url), "utf8");
+  check("wfpi exposes bundled agents in local-source mode", /PI_SUBAGENT_EXTRA_AGENT_DIRS/.test(wfpi));
   const providerSource = fs.readFileSync(new URL("../extensions/providers.ts", import.meta.url), "utf8");
+  const finalReviewerAgent = fs.readFileSync(new URL("../.pi/agents/final-reviewer.md", import.meta.url), "utf8");
+  const prdWriterAgent = fs.readFileSync(new URL("../.pi/agents/prd-writer.md", import.meta.url), "utf8");
   check("provider bridge maps GLM5_2_API_KEY for builtin Z.AI children", /ZAI_API_KEY[\s\S]*GLM5_2_API_KEY/.test(providerSource));
-  check("dev model is provider-qualified", /model:\s*deepseek\/deepseek-v4-flash/.test(devAgent));
-  check("reviewer model is provider-qualified", /model:\s*zai\/glm-5\.2/.test(reviewerAgent));
+  check("dev model is provider-qualified", /package:\s*pi-workflow[\s\S]*model:\s*deepseek\/deepseek-v4-flash/.test(devAgent));
+  check("reviewer model is provider-qualified", /package:\s*pi-workflow[\s\S]*model:\s*zai\/glm-5\.2/.test(reviewerAgent));
+  check("prd-writer uses namespaced GLM-5.2", /package:\s*pi-workflow[\s\S]*model:\s*zai\/glm-5\.2/.test(prdWriterAgent));
+  check("final-reviewer uses GLM-5.2 without bash", /model:\s*zai\/glm-5\.2/.test(finalReviewerAgent) && !/tools:.*bash/.test(finalReviewerAgent));
+  for (const [name, text] of [["dev", devAgent], ["reviewer", reviewerAgent], ["prd-writer", prdWriterAgent], ["final-reviewer", finalReviewerAgent]] as const) {
+    check(`${name} disables inferred acceptance for raw artifact output`, /acceptance:\s*\{level:\s*none/.test(text));
+  }
 }
 
 {
@@ -534,7 +598,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   // P0-2: README must not advertise the nonexistent `dev: {model, timeoutMs}`
   // config field as currently settable.
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  check("README states dev/reviewer models live in .pi/agents/*.md", /dev \/ reviewer 的模型不在这里配/.test(readme));
+  check("README states subagent models live in .pi/agents/*.md", /dev \/ reviewer \/ prd-writer \/ final-reviewer 的模型不在这里配/.test(readme));
   check("README no longer shows the removed NN.metrics.json artifact", !/NN\.metrics\.json/.test(readme));
   check("README documents /execute --dry-run", /--dry-run/.test(readme));
   check("README documents /wf abort", /\/wf abort/.test(readme));
