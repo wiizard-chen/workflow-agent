@@ -54,6 +54,17 @@ import {
   type WorkflowState,
 } from "../extensions/lib.ts";
 
+function workflowSource(): string {
+  return [
+    "runtime.ts",
+    "commands/plan.ts", "commands/lifecycle.ts", "commands/issues.ts", "commands/build.ts",
+    "tools/split.ts", "tools/beads.ts", "tools/verification.ts",
+    "manager-tools.ts", "index.ts",
+  ]
+    .map((file) => fs.readFileSync(new URL(`../extensions/workflow/${file}`, import.meta.url), "utf8"))
+    .join("\n");
+}
+
 let failures = 0;
 function check(name: string, cond: boolean, extra = "") {
   if (cond) { console.log(`  ✓ ${name}`); }
@@ -408,6 +419,20 @@ try {
 
 // ===========================================================================
 
+console.log("\nregression guard — modular workflow layout:");
+{
+  const entry = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
+  const requiredModules = [
+    "runtime.ts", "index.ts", "commands.ts", "manager-tools.ts",
+    "commands/plan.ts", "commands/lifecycle.ts", "commands/issues.ts", "commands/build.ts",
+    "tools/split.ts", "tools/beads.ts", "tools/verification.ts",
+  ];
+  check("workflow.ts remains a thin compatibility entry", entry.split("\n").length <= 15 && /workflow\/index\.ts/.test(entry) && !/registerCommand|registerTool/.test(entry), entry);
+  for (const module of requiredModules) {
+    check(`modular workflow file exists: ${module}`, fs.existsSync(new URL(`../extensions/workflow/${module}`, import.meta.url)));
+  }
+}
+
 // ===========================================================================
 // 4. Regression guard: build-mode tool whitelist must reference the real
 //    nicobailon/pi-subagents tool name `subagent`, not `delegate` (the wrong
@@ -431,7 +456,7 @@ console.log("\nregression guard — build-mode tool whitelist uses the real tool
 }
 
 {
-  const src = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
+  const src = workflowSource();
   const activeToolsBlock = src.match(/pi\.setActiveTools\(\[\s*"split_prd_to_tasks"[\s\S]*?\]\)/);
   check("applyModeTools()'s build-mode whitelist block exists", !!activeToolsBlock);
   if (activeToolsBlock) {
@@ -453,7 +478,7 @@ console.log("\nregression guard — build-mode tool whitelist uses the real tool
 console.log("\nregression guard — lockReadonly() wires up pi-web-access tool names:");
 
 {
-  const src = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
+  const src = workflowSource();
   const lockReadonlyBlock = src.match(/function lockReadonly\([\s\S]*?\n}/);
   check("lockReadonly() function exists", !!lockReadonlyBlock);
   const webAccessConst = src.match(/const WEB_ACCESS_TOOLS = \[[^\]]*\]/);
@@ -480,7 +505,7 @@ console.log("\nregression guard — lockReadonly() wires up pi-web-access tool n
 console.log("\nregression guards — P0/P1 fixes stay wired:");
 
 {
-  const src = fs.readFileSync(new URL("../extensions/workflow.ts", import.meta.url), "utf8");
+  const src = workflowSource();
 
   // P0-1: maxParallel is read from config AND injected into the prompt context.
   const loadMgr = src.match(/function loadManagerPrompt\([\s\S]*?\n}/);
@@ -521,7 +546,7 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("final evidence is bound to runId/head/command/hashes and exact GLM audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*resolvedModel !== "zai\/glm-5\.2"[\s\S]*verifyRunId/.test(src));
   check("bd_task mutations are scoped to active epic children", /assertActiveChildIssue\(taskId\)/.test(src));
   check("task close requires commit-bound reviewer pass + audit", /review\?\.taskId === taskId[\s\S]*review\?\.baseline === baseline[\s\S]*review\?\.commitSha === commitSha/.test(src));
-  check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*usageByModel = \{\}[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
+  check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*resetUsageByModel\(\)[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
   check("split ignores env overrides and only uses active epic/canonical PRD", !/WF_EPIC_ID|WF_PRD_PATH/.test(src) && /parent: wf\.epicId/.test(src) && /split 只允许当前 canonical PRD/.test(src));
   check("split is manifest-backed and fails closed on partial creation", /manifestPath = reqPath\(wf, "results", "split\.json"\)/.test(src) && /status: "creating"[\s\S]*status: "complete"[\s\S]*status: "failed"/.test(src) && /拒绝自动重试以避免重复/.test(src));
   check("split tool no longer recursively calls the parent model", !/const splitPromptText = withBrief\(wf!\.repo/.test(src));

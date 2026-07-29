@@ -29,6 +29,29 @@ build（manager 对代码只读）:
 
 manager 没有 `bash`/`write`/`edit`;只开放只读工具、`subagent` 和窄化的 workflow tools。当前 writer 上限固定为 1,禁止 `worktree:true` 并行 writer。`tool_call` hook 进一步强制 namespaced agent、精确 cwd/output/context、单 writer lease，并在每次调用前拒绝 target/user agent shadow 或 settings override。
 
+## 扩展源码结构
+
+`extensions/workflow.ts` 仅保留兼容入口，实际实现按职责拆到 `extensions/workflow/`：
+
+```text
+workflow/
+├── index.ts                 # Pi 生命周期、事件 hook、命令装配
+├── runtime.ts               # 配置、共享状态、模式权限、agent 安全与通用 helper
+├── commands.ts              # command barrel
+├── commands/
+│   ├── plan.ts              # new/plan/analyze/prd
+│   ├── lifecycle.ts         # done/status/resume
+│   ├── issues.ts            # bug/task
+│   └── build.ts             # execute/abort/manager prompt
+├── manager-tools.ts         # manager tool 装配
+└── tools/
+    ├── split.ts             # deterministic split + manifest
+    ├── beads.ts             # bd_query/bd_task
+    └── verification.ts      # run_verify/finalize_test
+```
+
+这一阶段只做结构重组，不改变命令名、工具名、agent 协议、安全边界或 `.workflow/` 产物格式。后续 builtin `researcher/scout/oracle` 增强会在独立阶段加入。
+
 ## 模型分工
 
 | 阶段 | 执行方 | 模型 |
