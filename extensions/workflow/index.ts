@@ -6,14 +6,16 @@ import { readRunSummary, formatUsageLine, readRepoBrief, reqPath, saveState } fr
 import * as bd from "../bd.ts";
 import { registerWorkflowProviders } from "../providers.ts";
 import { registerManagerTools } from "./manager-tools.ts";
-import { validateAdvisoryLaunchContract } from "./capabilities.ts";
+import { syncSubagentCapabilityCeiling, validateAdvisoryLaunchContract } from "./capabilities.ts";
 import {
   cmdAbort, cmdAnalyze, cmdBug, cmdDone, cmdExecute, cmdNew, cmdPlan,
   cmdPrd, cmdResearch, cmdOracle, cmdResume, cmdStatus, cmdTask,
 } from "./commands.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
   lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  currentWorkflow, currentBaseActiveTools, currentActiveDevToolCallId,
+  currentManagerHasSplit, currentManagerTasksProcessed,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -37,6 +39,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   const planInterrogationPrompt = loadPlanInterrogationPrompt();
 
   pi.on("before_agent_start", async (event: any) => {
+    const wf = currentWorkflow();
     const systemPrompt = withPlanInterrogationSystemPrompt(event.systemPrompt, wf, planInterrogationPrompt);
     if (systemPrompt !== event.systemPrompt) return { systemPrompt };
   });
@@ -45,7 +48,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     // No epic is auto-restored. Normal Pi is the default; /wf resume presents
     // the Beads epic picker. Capture the pre-workflow active tool set so /wf
     // done can restore it exactly.
-    if (baseActiveTools.length === 0) setBaseActiveTools(pi.getActiveTools());
+    if (currentBaseActiveTools().length === 0) setBaseActiveTools(pi.getActiveTools());
     setWorkflow(undefined);
     setActiveDevToolCallId(undefined);
     setModeStatus(ctx as any);
@@ -72,9 +75,24 @@ export default function workflowExtension(pi: ExtensionAPI): void {
     if (event?.toolName !== "subagent") return;
     const reason = validateSubagentCall(event);
     if (reason) return { block: true, reason };
-    if (["researcher", "scout", "oracle"].includes(String(event?.input?.agent || ""))) {
+    const agent = String(event?.input?.agent || "");
+    if (["researcher", "scout", "oracle"].includes(agent)) {
       const contractReason = await validateAdvisoryLaunchContract(event.input, ctx);
       if (contractReason) return { block: true, reason: contractReason };
+      return;
+    }
+    if (["pi-workflow.prd-writer", "pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) {
+      // Re-assert BUILD's unrestricted child mode immediately before launch.
+      // This also removes an orphaned PLAN ceiling left in pi-subagents'
+      // global registry by an earlier extension instance after /reload.
+      if (currentWorkflow()?.mode === "build") syncSubagentCapabilityCeiling(ctx, "build");
+      // pi-subagents 0.37.2 validates the public `thinking` field but its direct
+      // foreground tool path does not forward that field into the child
+      // executor. A known model suffix is forwarded and is also projected back
+      // as result.thinking. Validate the caller's exact base model + thinking
+      // first, then apply the suffix only to the actual execution input.
+      const expected = workflowAgentConfig(agent);
+      event.input.model = `${expected.model}:${expected.effort}`;
     }
   });
 
@@ -85,8 +103,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   pi.on("tool_result", async (event: any) => {
     try {
       if (event?.toolName !== "subagent") return;
+      const wf = currentWorkflow();
       const agent = String(event?.input?.agent || "");
-      if (agent === "pi-workflow.dev" && activeDevToolCallId === String(event?.toolCallId || "")) setActiveDevToolCallId(undefined);
+      if (agent === "pi-workflow.dev" && currentActiveDevToolCallId() === String(event?.toolCallId || "")) setActiveDevToolCallId(undefined);
       if (!wf) return;
       const result = event?.details?.results?.[0];
       const usage = result?.usage ?? event?.details?.totalChildUsage ?? event?.usage ?? null;
@@ -166,7 +185,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       }
       const exactOutput = !!inputOutput && path.resolve(inputOutput) === path.resolve(expectedOutput)
         && (!result?.savedOutputPath || path.resolve(result.savedOutputPath) === path.resolve(expectedOutput));
-      const resolvedModel = result?.model ?? null;
+      const expected = workflowAgentConfig(agent);
+      const resolvedModelRaw = result?.model ?? null;
+      const resolvedModel = resolvedModelRaw === `${expected.model}:${expected.effort}` ? expected.model : resolvedModelRaw;
       const resolvedEffort = result?.thinking ?? null;
       const context = result?.context ?? event?.details?.context ?? null;
       const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
@@ -180,7 +201,6 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         return allowedTools.has(toolName);
       });
       const verify = agent === "pi-workflow.final-reviewer" ? readJson(reqPath(wf, "results", "verify.json")) : undefined;
-      const expected = workflowAgentConfig(agent);
       const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
         && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expected.model
         && resolvedEffort === expected.effort
@@ -192,6 +212,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         requestedEffort: expected.effort,
         profile: CONFIG.activeModelProfile,
         resolvedModel,
+        resolvedModelRaw,
         resolvedEffort,
         attemptedModels: result?.attemptedModels ?? [],
         context,
@@ -212,11 +233,12 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event: any) => {
+    const wf = currentWorkflow();
     try { const t = extractAssistantText(event?.messages); if (t) setLastAssistantText(t); } catch (_e) { /* ignore */ }
     // In build mode, detect "did zero work" so we can warn instead of a false success.
     // Two signals: in-memory counters AND a bd reality check (task count under epic).
     if (wf && wf.mode === "build") {
-      const memSaysNoop = !mgrHasSplit && mgrTasksProcessed === 0;
+      const memSaysNoop = !currentManagerHasSplit() && currentManagerTasksProcessed() === 0;
       if (memSaysNoop) {
         let bdTaskCount = 0;
         try {
@@ -241,6 +263,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         return f.length ? f.map((s) => ({ value: s, label: s })) : null;
       },
       handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const wf = currentWorkflow();
         const trimmed = args.trim();
         const sub = trimmed.split(/\s+/)[0] || "help";
         const rest = trimmed.slice(sub.length).trim();

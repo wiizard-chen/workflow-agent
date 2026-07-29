@@ -11,8 +11,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -23,6 +23,7 @@ import {
 } from "../runtime.ts";
 
 export async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
   const desc = args.trim().replace(/["']/g, "");
   if (!desc) { ctx.ui.notify("用法:/wf bug <描述>(可包含多个问题)", "warning"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf resume 切到要修 bug 的需求。", "warning"); return; }
@@ -103,6 +104,7 @@ export async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg
  *  而且拆分用 split_prd_to_tasks 同款的 tracer-bullet 原则(垂直切片、依赖最小化),
  *  会标注 task 之间的 blocks 依赖。建完后手动 /execute 让经理串行派 dev 实现。 */
 export async function cmdTask(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
   const desc = args.trim().replace(/["']/g, "");
   if (!desc) { ctx.ui.notify("用法:/wf task <描述>(一句话小需求,会自动拆成多个 task)", "warning"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf resume 切到要加功能的需求。", "warning"); return; }

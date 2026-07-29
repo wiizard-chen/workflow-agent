@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const CAPABILITY_REGISTRY_KEY = "pi-subagents.capability-ceiling.v1";
+const PLAN_CEILING_SOURCE = "pi-workflow-plan";
 
 export const PLAN_ADVISORY_TOOLS = [
   "read", "grep", "find", "ls",
@@ -16,6 +17,32 @@ type Registry = Map<string, Map<symbol, { source: string; ceiling: Ceiling }>>;
 
 let ceilingHandle: Handle | undefined;
 let ceilingSessionId: string | undefined;
+
+function capabilityRegistry(): Registry | undefined {
+  const key = Symbol.for(CAPABILITY_REGISTRY_KEY);
+  const store = globalThis as typeof globalThis & { [key: symbol]: unknown };
+  return store[key] instanceof Map ? store[key] as Registry : undefined;
+}
+
+/** Remove this extension's ceilings even when /reload discarded the local handle. */
+export function clearWorkflowCapabilityCeilings(sessionIdValue?: string): number {
+  const registry = capabilityRegistry();
+  if (!registry) return 0;
+  let removed = 0;
+  const sessions = sessionIdValue
+    ? [[sessionIdValue, registry.get(sessionIdValue)] as const]
+    : [...registry.entries()];
+  for (const [id, session] of sessions) {
+    if (!session) continue;
+    for (const [token, entry] of session) {
+      if (entry.source !== PLAN_CEILING_SOURCE && !entry.ceiling.sources.includes(PLAN_CEILING_SOURCE)) continue;
+      session.delete(token);
+      removed++;
+    }
+    if (session.size === 0) registry.delete(id);
+  }
+  return removed;
+}
 
 function sessionId(ctx: any): string | undefined {
   try { return ctx?.sessionManager?.getSessionId?.() || undefined; }
@@ -58,15 +85,21 @@ export function syncSubagentCapabilityCeiling(ctx: any, mode: "plan" | "build" |
     ceilingHandle?.dispose();
     ceilingHandle = undefined;
     ceilingSessionId = undefined;
+    // Capability entries live in a global registry while the handle lives in
+    // this module instance. /reload can therefore orphan an old PLAN token.
+    // BUILD must remove every token owned by this extension, not just the one
+    // reachable through the current module-local handle.
+    clearWorkflowCapabilityCeilings();
     return;
   }
   if (!currentSessionId) throw new Error("无法建立 PLAN subagent capability ceiling:缺少 sessionId");
-  if (ceilingHandle && ceilingSessionId === currentSessionId) {
-    ceilingHandle.update(PLAN_ADVISORY_TOOLS);
-    return;
-  }
+  // Remove both the current handle and orphaned tokens from previous extension
+  // instances, then register one authoritative ceiling for this session.
   ceilingHandle?.dispose();
-  ceilingHandle = registerCeiling(currentSessionId, "pi-workflow-plan", PLAN_ADVISORY_TOOLS);
+  ceilingHandle = undefined;
+  ceilingSessionId = undefined;
+  clearWorkflowCapabilityCeilings(currentSessionId);
+  ceilingHandle = registerCeiling(currentSessionId, PLAN_CEILING_SOURCE, PLAN_ADVISORY_TOOLS);
   ceilingSessionId = currentSessionId;
 }
 

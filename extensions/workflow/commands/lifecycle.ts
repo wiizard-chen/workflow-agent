@@ -11,8 +11,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -24,6 +24,7 @@ import {
 } from "../runtime.ts";
 
 export function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("无活动需求。", "info"); return; }
   const finished = wf;
   // Persist a resumable non-executing mode before clearing the in-memory
@@ -39,6 +40,7 @@ export function cmdDone(pi: ExtensionAPI, ctx: ExtensionCommandContext): void {
 }
 
 export function cmdStatus(ctx: ExtensionCommandContext): void {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("无活动需求。/wf new <名字> [repo] 开始。", "info"); return; }
   let lines: string[] = [];
   let summary = "";
@@ -98,6 +100,7 @@ export function cmdStatus(ctx: ExtensionCommandContext): void {
 
 /** /wf resume — select any Beads epic; reconstruct missing local state. */
 export async function cmdResume(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
   try { await assertActiveProfileModelsAvailable(ctx); }
   catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   const arg = args.trim().replace(/["']/g, "");

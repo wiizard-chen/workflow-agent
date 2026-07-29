@@ -38,7 +38,7 @@ import {
 import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
   activeModelProfile, advisoryOutputPath, assertActiveProfileModelsAvailable,
-  configuredActiveProfileName, loadConfig, loadPlanInterrogationPrompt, setWorkflow, useRole,
+  configuredActiveProfileName, currentWorkflow, loadConfig, loadPlanInterrogationPrompt, setWorkflow, useRole,
   validateSubagentCall, withPlanInterrogationSystemPrompt, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
@@ -138,9 +138,11 @@ console.log("bd.ts — BdExec argv correctness:");
   const fakeExec: BdExec = (_repo, args): BdExecResult => { calls.push(args); return { code: 0, stdout: "", stderr: "" }; };
   reopen("/repo", "bd-4", fakeExec);
   check(
-    "reopen() calls bd reopen <id>",
-    calls.length === 1 && calls[0][0] === "reopen" && calls[0][1] === "bd-4",
-    JSON.stringify(calls[0]),
+    "reopen() reopens and clears stale assignee for a retry",
+    calls.length === 2
+      && calls[0][0] === "reopen" && calls[0][1] === "bd-4"
+      && JSON.stringify(calls[1]) === JSON.stringify(["update", "bd-4", "--assignee", ""]),
+    JSON.stringify(calls),
   );
 }
 
@@ -283,6 +285,7 @@ console.log("\nPLAN builtin advisory capability guard:");
     check("PLAN capability ceiling removes bash/write/edit", !PLAN_ADVISORY_TOOLS.some((tool) => ["bash", "write", "edit"].includes(tool)));
     check("PLAN capability ceiling preserves researcher web tools", PLAN_ADVISORY_TOOLS.includes("web_search"));
     setWorkflow(state);
+    check("runtime accessor returns the latest workflow instead of a Jiti-stale named export", currentWorkflow() === state);
     ensureRequirementDirs(state);
     const call = (agent: string, context: string, output: string, model?: string, thinking?: string) => validateSubagentCall({
       toolCallId: "advisory-test",
@@ -313,6 +316,16 @@ console.log("\nPLAN builtin advisory capability guard:");
     fs.rmSync(path.join(repo, ".pi", "settings.json"), { force: true });
     state.repo = repo;
     state.mode = "build";
+    const orphanSession = new Map<symbol, any>();
+    orphanSession.set(Symbol("stale-plan-ceiling"), {
+      source: "pi-workflow-plan",
+      ceiling: { version: 1, allowedTools: ["read"], denyExtensions: false, sources: ["pi-workflow-plan"] },
+    });
+    registry.set("session-from-before-reload", orphanSession);
+    syncSubagentCapabilityCeiling(ceilingCtx, "build");
+    const stalePlanCeilings = [...registry.values()].flatMap((session) => [...session.values()])
+      .filter((entry) => entry.source === "pi-workflow-plan" || entry.ceiling?.sources?.includes("pi-workflow-plan"));
+    check("BUILD removes orphaned PLAN ceilings left by /reload", stalePlanCeilings.length === 0);
     check("builtin advisory agents cannot enter BUILD", /build 模式只允许/.test(call("oracle", "fresh", path.join(repo, ".workflow", "req", "results", "x.md")) || ""));
     fs.writeFileSync(path.join(repo, ".workflow", "req", "results", "verify.json"), "{}\n");
     const finalOutput = path.join(repo, ".workflow", "req", "results", "final-review.json");
@@ -645,9 +658,14 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("empty verify command is rejected before build", /无法进入 build:未配置验证命令/.test(src));
   check("run_test and allowEmptyVerify are removed", !/name: "run_test"|allowEmptyVerify/.test(src));
   check("resume uses Beads epic picker and reconstructs state", /bd\.list\(ctx\.cwd, \{ type: "epic", all: true, limit: 0 \}\)/.test(src) && /ui\.select\("选择要恢复的 Beads epic"/.test(src) && /重建 workflow 上下文/.test(src));
+  check("cross-module workflow reads use runtime accessor instead of Jiti-stale named export", !/CONFIG,\s*wf,\s*baseActiveTools/.test(src)
+    && (src.match(/currentWorkflow\(\)/g) || []).length >= 15);
   check("idle command is removed", !/case "idle"|cmdIdle|\/wf idle/.test(src));
   check("PRD command delegates to forked namespaced prd-writer", /agent: "pi-workflow\.prd-writer"[\s\S]*context: "fork"[\s\S]*cwd:/.test(src));
   check("subagent capability guard rejects parallel/worktree/async and binds model/effort to active profile", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*workflowAgentConfig\(agent\)[\s\S]*input\.thinking/.test(src));
+  check("authoritative direct subagents apply effort through a post-validation model suffix", /validateSubagentCall\(event\)[\s\S]*event\.input\.model = `\$\{expected\.model\}:\$\{expected\.effort\}`/.test(src)
+    && /resolvedModelRaw === `\$\{expected\.model\}:\$\{expected\.effort\}` \? expected\.model/.test(src));
+  check("BUILD child launch self-heals orphaned PLAN capability ceilings", /currentWorkflow\(\)\?\.mode === "build"\) syncSubagentCapabilityCeiling\(ctx, "build"\)/.test(src));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
   check("PLAN main prompt deterministically injects bundled plan-interrogation", /before_agent_start[\s\S]*withPlanInterrogationSystemPrompt\(event\.systemPrompt, wf, planInterrogationPrompt\)/.test(src)
     && /loadPlanInterrogationPrompt[\s\S]*skills[\s\S]*plan-interrogation[\s\S]*SKILL\.md/.test(src));

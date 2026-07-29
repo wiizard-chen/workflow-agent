@@ -233,6 +233,13 @@ export let lastAssistantText = "";
 export let usageByModel: Record<string, UsageTotals> = {};
 
 export function setConfig(value: WorkflowConfig): void { CONFIG = value; }
+export function currentWorkflow(): WorkflowState | undefined { return wf; }
+export function currentBaseActiveTools(): string[] { return baseActiveTools; }
+export function currentActiveDevToolCallId(): string | undefined { return activeDevToolCallId; }
+export function currentManagerHasSplit(): boolean { return mgrHasSplit; }
+export function currentManagerTasksProcessed(): number { return mgrTasksProcessed; }
+export function currentLastAssistantText(): string { return lastAssistantText; }
+export function currentUsageByModel(): Record<string, UsageTotals> { return usageByModel; }
 export function setWorkflow(value: WorkflowState | undefined): void { wf = value; }
 export function setBaseActiveTools(value: string[]): void { baseActiveTools = value; }
 export function setActiveDevToolCallId(value: string | undefined): void { activeDevToolCallId = value; }

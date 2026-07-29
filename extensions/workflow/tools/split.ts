@@ -12,8 +12,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -43,6 +43,7 @@ export function registerSplitTool(pi: ExtensionAPI): void {
       }), { minItems: 1 }),
     }),
     async execute(_id, params) {
+      const wf = currentWorkflow();
       if (!wf?.epicId) {
         return { content: [{ type: "text", text: "错误:没有活动 epic。先 /wf new。" }], details: {} };
       }

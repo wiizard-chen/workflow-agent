@@ -12,8 +12,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -37,6 +37,7 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
     description: "所有 task/bug 关闭后运行预配置验证命令,写 verify.json 与 cumulative.diff。不能接受任意命令参数。",
     parameters: Type.Object({}),
     async execute() {
+      const wf = currentWorkflow();
       if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
       const command = getVerifyCommand(CONFIG, wf);
       if (!command) return { content: [{ type: "text", text: "错误:未配置验证命令。先 /wf verify <cmd>。" }], details: {} };
@@ -96,6 +97,7 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
     description: "读取固定路径 verify.json/final-review.json,校验结构;失败时在当前 epic 下创建 bug,通过时提交 workflow 工件。",
     parameters: Type.Object({}),
     async execute() {
+      const wf = currentWorkflow();
       if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
       const verifyPath = reqPath(wf, "results", "verify.json");
       const reviewPath = reqPath(wf, "results", "final-review.json");

@@ -11,8 +11,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -29,6 +29,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
   try { await assertActiveProfileModelsAvailable(ctx); }
   catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -62,6 +63,7 @@ export async function cmdNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg
 }
 
 export async function cmdPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const wf = currentWorkflow();
   try { await assertActiveProfileModelsAvailable(ctx); }
   catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
@@ -72,6 +74,7 @@ export async function cmdPlan(pi: ExtensionAPI, ctx: ExtensionCommandContext): P
 }
 
 export async function cmdResearch(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
   if (wf.mode !== "plan") { ctx.ui.notify("researcher 只允许在 plan 模式运行。先 /plan。", "warning"); return; }
   try { assertAdvisoryAgentsUnshadowed(wf.repo); }
@@ -89,6 +92,7 @@ export async function cmdResearch(pi: ExtensionAPI, ctx: ExtensionCommandContext
 }
 
 export async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext, opts: { silent?: boolean } = {}): Promise<boolean> {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return false; }
   if (wf.mode !== "plan") { ctx.ui.notify("scout 只允许在 plan 模式运行。先 /plan。", "warning"); return false; }
   try { assertAdvisoryAgentsUnshadowed(wf.repo); }
@@ -107,6 +111,7 @@ export async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext,
 
 /** /wf prd — delegate PRD generation to a dedicated forked GLM subagent. */
 export async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const wf = currentWorkflow();
   try { await assertActiveProfileModelsAvailable(ctx); }
   catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new 或 /wf resume。", "warning"); return; }
@@ -152,6 +157,7 @@ export async function cmdPrd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 
 /** /wf oracle — optional advisory consistency review after PRD generation. */
 export async function cmdOracle(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new 或 /wf resume。", "warning"); return; }
   if (wf.mode !== "plan") { ctx.ui.notify("oracle 只允许在 plan 模式运行。先 /plan。", "warning"); return; }
   const prdPath = reqPath(wf, "prd.md");

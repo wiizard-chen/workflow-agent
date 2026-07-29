@@ -268,9 +268,10 @@ export function close(repo: string, id: string, reason?: string, exec: BdExec = 
   requireOk(exec(repo, args), "close");
 }
 
-/** Reopen an issue (e.g. put a failed subtask back into the ready queue). */
+/** Reopen an issue for retry and release any stale assignee from the failed run. */
 export function reopen(repo: string, id: string, exec: BdExec = defaultBdExec): void {
   requireOk(exec(repo, ["reopen", id]), "reopen");
+  requireOk(exec(repo, ["update", id, "--assignee", ""]), "reopen unassign");
 }
 
 /** Add a comment (e.g. failure notes for a reopened subtask). */

@@ -11,8 +11,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -34,6 +34,7 @@ import {
  *  The manager prompt guides the main session through the pipeline in build mode.
  *  It's NOT an agent definition — the main session IS the manager. */
 export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: string, dryRun = false): string {
+  const wf = currentWorkflow();
   if (!wf) throw new Error("无活动需求");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -94,6 +95,7 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
  *  itself (interactive, user can watch + intervene via /wf status).
  *  Optional prdPath arg points at a specific PRD (auto-creates a fresh epic). */
 export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string = ""): Promise<void> {
+  const wf = currentWorkflow();
   try { await assertActiveProfileModelsAvailable(ctx); }
   catch (e) { ctx.ui.notify(`模型 profile 不可用:${(e as Error).message}`, "error"); return; }
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return; }
@@ -197,6 +199,7 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
  *  discard first. `.workflow/` artifacts are preserved (they're the audit
  *  trail — a separate commit anyway). */
 export async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("无活动需求。", "warning"); return; }
   if (!wf.baseline) {
     ctx.ui.notify("这个需求没有记录 baseline(可能从未 /execute 过),无法回滚。", "error");

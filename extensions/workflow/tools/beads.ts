@@ -12,8 +12,8 @@ import {
 } from "../../lib.ts";
 import * as bd from "../../bd.ts";
 import {
-  CONFIG, wf, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
-  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
+  CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
+  lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow, currentWorkflow,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -39,6 +39,7 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
       issue_id: Type.Optional(Type.String()),
     }),
     async execute(_id, params) {
+      const wf = currentWorkflow();
       if (!wf?.epicId) return { content: [{ type: "text", text: "错误:没有活动 epic。" }], details: {} };
       try {
         const p = params as any;
@@ -78,6 +79,7 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
       text: Type.Optional(Type.String({ description: "close 的 reason / comment 的内容" })),
     }),
     async execute(_id, params) {
+      const wf = currentWorkflow();
       if (!wf) {
         return { content: [{ type: "text", text: "错误:没有活动需求。先 /wf new。" }], details: {} };
       }
