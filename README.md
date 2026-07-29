@@ -163,7 +163,7 @@ build 模式的经理行为由 `.pi/manager-prompt.md` 定义。注意它**不�
 
 ## 内置 skill:计划追问法
 
-仓库自带 `plan-interrogation` skill,扩展加载时自动挂上。方法论:在 PRD 阶段逐条走查设计树、一次只问一个问题并给出推荐答案、能查代码就先查不发问。
+仓库自带 `plan-interrogation` skill。扩展仍会通过 skill discovery 暴露 `/skill:plan-interrogation`，但 workflow 主 session 在 `plan` 模式下不再依赖模型按需加载：`before_agent_start` 会把 bundled skill 的完整规则确定性注入每个 PLAN turn。普通 Pi（无 active epic）和 `build` 模式不会注入。方法论:在 PRD 阶段逐条走查设计树、一次只问一个问题并给出推荐答案、能查代码就先查不发问。
 
 ## beads skill 四件套 + 全局安装
 

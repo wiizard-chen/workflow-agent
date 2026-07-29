@@ -38,8 +38,8 @@ import {
 import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
   activeModelProfile, advisoryOutputPath, assertActiveProfileModelsAvailable,
-  configuredActiveProfileName, loadConfig, setWorkflow, useRole,
-  validateSubagentCall, workflowAgentEffort, workflowAgentModel,
+  configuredActiveProfileName, loadConfig, loadPlanInterrogationPrompt, setWorkflow, useRole,
+  validateSubagentCall, withPlanInterrogationSystemPrompt, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
 import {
@@ -225,6 +225,16 @@ check("splitDecision rejects complete manifest with missing Beads tasks", splitD
     ensureRequirementDirs({ reqId: "external", name: "x", repo: root, mode: "plan", createdAt: "now", epicId: "e", subtaskIds: [] });
     check("ensureRequirementDirs initializes external PRD results/subtasks", fs.existsSync(path.join(root, ".workflow", "external", "results")) && fs.existsSync(path.join(root, ".workflow", "external", "subtasks")));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+{
+  const planState: WorkflowState = { reqId: "plan", name: "x", repo: "/tmp", mode: "plan", createdAt: "now" };
+  const buildState: WorkflowState = { ...planState, mode: "build" };
+  const skillPrompt = loadPlanInterrogationPrompt();
+  const injected = withPlanInterrogationSystemPrompt("BASE", planState, skillPrompt);
+  check("PLAN main system prompt auto-loads full plan-interrogation", injected.includes("<pi-workflow-plan-interrogation>") && injected.includes("一次只问一个问题") && injected.includes("能查证的先查证"));
+  check("ordinary Pi does not receive plan-interrogation", withPlanInterrogationSystemPrompt("BASE", undefined, skillPrompt) === "BASE");
+  check("BUILD does not receive plan-interrogation", withPlanInterrogationSystemPrompt("BASE", buildState, skillPrompt) === "BASE");
+  check("PLAN injection is idempotent", withPlanInterrogationSystemPrompt(injected, planState, skillPrompt) === injected);
 }
 
 console.log("\nmodel profile availability guard:");
@@ -639,6 +649,8 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("PRD command delegates to forked namespaced prd-writer", /agent: "pi-workflow\.prd-writer"[\s\S]*context: "fork"[\s\S]*cwd:/.test(src));
   check("subagent capability guard rejects parallel/worktree/async and binds model/effort to active profile", /function validateSubagentCall[\s\S]*input\.tasks[\s\S]*input\.worktree[\s\S]*input\.async[\s\S]*workflowAgentConfig\(agent\)[\s\S]*input\.thinking/.test(src));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
+  check("PLAN main prompt deterministically injects bundled plan-interrogation", /before_agent_start[\s\S]*withPlanInterrogationSystemPrompt\(event\.systemPrompt, wf, planInterrogationPrompt\)/.test(src)
+    && /loadPlanInterrogationPrompt[\s\S]*skills[\s\S]*plan-interrogation[\s\S]*SKILL\.md/.test(src));
   check("PLAN builtin advisory calls are context/output bound", /ADVISORY_AGENTS[\s\S]*agent === "oracle" \? "fork" : "fresh"[\s\S]*advisoryOutputPath\(agent\)/.test(src));
   check("PLAN advisory children have an out-of-band capability ceiling", /pi-subagents\.capability-ceiling\.v1[\s\S]*PLAN_ADVISORY_TOOLS[\s\S]*validateAdvisoryLaunchContract/.test(src));
   check("advisory call arguments use a strict allowlist", /allowedKeys = new Set\(\["agent", "task", "context", "cwd", "output"\]\)/.test(src));

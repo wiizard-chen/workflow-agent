@@ -21,7 +21,8 @@ import {
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
   extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
-  advisoryOutputPath, advisoryRepoSnapshot, workflowAgentConfig, renderedToolName
+  advisoryOutputPath, advisoryRepoSnapshot, loadPlanInterrogationPrompt,
+  withPlanInterrogationSystemPrompt, workflowAgentConfig, renderedToolName
 } from "./runtime.ts";
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,14 @@ import {
 export default function workflowExtension(pi: ExtensionAPI): void {
   setConfig(loadConfig());
   registerWorkflowProviders(pi, CONFIG);
+  // Fail closed at extension load if the bundled PLAN policy is missing. The
+  // full skill body is then appended deterministically on every PLAN turn.
+  const planInterrogationPrompt = loadPlanInterrogationPrompt();
+
+  pi.on("before_agent_start", async (event: any) => {
+    const systemPrompt = withPlanInterrogationSystemPrompt(event.systemPrompt, wf, planInterrogationPrompt);
+    if (systemPrompt !== event.systemPrompt) return { systemPrompt };
+  });
 
   pi.on("session_start", async (_e, ctx) => {
     // No epic is auto-restored. Normal Pi is the default; /wf resume presents

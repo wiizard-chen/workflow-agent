@@ -178,6 +178,32 @@ export function loadConfig(): WorkflowConfig {
   return config;
 }
 
+export const PLAN_INTERROGATION_MARKER = "<pi-workflow-plan-interrogation>";
+
+export function loadPlanInterrogationPrompt(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "..", "..", "skills", "plan-interrogation", "SKILL.md"),
+    path.join(here, "..", "skills", "plan-interrogation", "SKILL.md"),
+  ];
+  const skillPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!skillPath) throw new Error("找不到 bundled plan-interrogation skill;拒绝启动 workflow extension");
+  const raw = fs.readFileSync(skillPath, "utf8");
+  const body = raw.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "").trim();
+  if (!body) throw new Error(`plan-interrogation skill 内容为空:${skillPath}`);
+  return [
+    PLAN_INTERROGATION_MARKER,
+    "以下规则在当前 workflow PLAN 模式的主 session 中强制生效；无需再手动调用 /skill:plan-interrogation。",
+    body,
+    `</pi-workflow-plan-interrogation>`,
+  ].join("\n\n");
+}
+
+export function withPlanInterrogationSystemPrompt(base: string, state: WorkflowState | undefined, skillPrompt: string): string {
+  if (!state || state.mode !== "plan" || base.includes(PLAN_INTERROGATION_MARKER)) return base;
+  return `${base}\n\n${skillPrompt}`;
+}
+
 export const READONLY_TOOLS = ["read", "grep", "find", "ls"];
 
 // Tools registered by nicobailon/pi-web-access (pi install npm:pi-web-access),
