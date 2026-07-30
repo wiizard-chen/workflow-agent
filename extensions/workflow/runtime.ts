@@ -543,6 +543,10 @@ export function validateSubagentCall(event: any): string | undefined {
     const taskId = path.basename(output, ".json");
     try { assertActiveChildIssue(taskId); } catch (e) { return (e as Error).message; }
     if (!fs.existsSync(reqPath(wf, "results", `${taskId}.claim.json`))) return `缺少 ${taskId}.claim.json;先 bd_task(claim)`;
+    const feedbackPath = reqPath(wf, "results", `${taskId}.review-feedback.json`);
+    if (fs.existsSync(feedbackPath) && !String(input.task || "").includes(feedbackPath)) {
+      return `dev 重试必须在 task 中引用并逐项处理 reviewer 反馈:${feedbackPath}`;
+    }
     activeDevToolCallId = String(event?.toolCallId || "dev-running");
     return undefined;
   }

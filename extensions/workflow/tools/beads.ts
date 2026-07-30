@@ -28,6 +28,34 @@ import {
 // Manager tools (registered for every session; handlers require active wf)
 // ---------------------------------------------------------------------------
 
+// Preserve reviewer failures as non-authoritative retry context. Authoritative
+// review.json/audit files are deleted on the next claim so they cannot be
+// reused as close evidence, but a fresh dev still needs the exact findings.
+export function persistReviewerFeedback(wf: WorkflowState, taskId: string): string | undefined {
+  const reviewPath = reqPath(wf, "results", `${taskId}.review.json`);
+  const review = readJson(reviewPath);
+  if (review?.verdict !== "fail" || !Array.isArray(review?.issues)) return undefined;
+  const feedbackPath = reqPath(wf, "results", `${taskId}.review-feedback.json`);
+  const existing = readJson(feedbackPath);
+  const reviews = Array.isArray(existing?.reviews) ? [...existing.reviews] : [];
+  const entry = {
+    baseline: typeof review.baseline === "string" ? review.baseline : null,
+    commitSha: typeof review.commitSha === "string" ? review.commitSha : null,
+    issues: review.issues,
+    summary: typeof review.summary === "string" ? review.summary : "",
+    reviewSha256: sha256File(reviewPath),
+    recordedAt: new Date().toISOString(),
+  };
+  if (!reviews.some((item: any) => item?.reviewSha256 === entry.reviewSha256)) reviews.push(entry);
+  fs.writeFileSync(feedbackPath, JSON.stringify({
+    taskId,
+    authoritative: false,
+    purpose: "retry-context-only",
+    reviews,
+  }, null, 2) + "\n");
+  return feedbackPath;
+}
+
 export function registerBeadsTools(pi: ExtensionAPI): void {
   // Tool 2: read-only Beads queries. This replaces manager shell access.
   pi.registerTool({
@@ -124,8 +152,11 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
             bd.reopen(repo, taskId);
             return { content: [{ type: "text", text: `✗ 无法保存 claim baseline,已 reopen ${taskId}: ${(e as Error).message}` }], details: {} };
           }
-          track(`▶ 认领,开始派 dev。baseline=${baseline}`);
-          return { content: [{ type: "text", text: `✓ 已认领 ${taskId}; baseline 已保存到 ${claimPath}` }], details: {} };
+          const feedbackPath = fs.existsSync(reqPath(wf, "results", `${taskId}.review-feedback.json`))
+            ? reqPath(wf, "results", `${taskId}.review-feedback.json`)
+            : undefined;
+          track(`▶ 认领,开始派 dev。baseline=${baseline}${feedbackPath ? `;必须读取 reviewer 反馈=${feedbackPath}` : ""}`);
+          return { content: [{ type: "text", text: `✓ 已认领 ${taskId}; baseline 已保存到 ${claimPath}${feedbackPath ? `; dev 必须读取 ${feedbackPath}` : ""}` }], details: {} };
         }
         if (action === "close") {
           // Prove this task produced a non-empty commit range after its claim,
@@ -213,9 +244,10 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
           return { content: [{ type: "text", text: `✓ 已关闭 ${taskId}(验证复核通过)${text ? `(${text})` : ""}` }], details: {} };
         }
         if (action === "reopen") {
+          const feedbackPath = persistReviewerFeedback(wf, taskId);
           bd.reopen(repo, taskId);
-          track(`✗ 放回 ready${text ? `:${text.slice(0, 120)}` : ""}`);
-          return { content: [{ type: "text", text: `✓ 已放回 ready ${taskId}` }], details: {} };
+          track(`✗ 放回 ready${text ? `:${text.slice(0, 120)}` : ""}${feedbackPath ? `;reviewer 反馈已保存:${feedbackPath}` : ""}`);
+          return { content: [{ type: "text", text: `✓ 已放回 ready ${taskId}${feedbackPath ? `; reviewer 反馈已保存到 ${feedbackPath}` : ""}` }], details: {} };
         }
         if (action === "comment") {
           if (!text) return { content: [{ type: "text", text: "错误:comment 需要 text 参数" }], details: {} };

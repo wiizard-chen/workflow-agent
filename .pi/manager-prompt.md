@@ -80,7 +80,7 @@ subagent({
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.json",
-  task: "实现 task <id>。规格:<spec路径>。验证命令:<非空命令>。只做当前 task，验证通过后 commit，并返回 filesChanged/verifyPassed/verifyCommand/verifyOutput/commitSha/summary。"
+  task: "实现 task <id>。规格:<spec路径>。验证命令:<非空命令>。重试反馈:<results>/<taskId>.review-feedback.json（存在时必须先读取，逐项修复全部 reviewer issues，并补覆盖测试；不存在则忽略）。只做当前 task，验证通过后 commit，并返回 filesChanged/verifyPassed/verifyCommand/verifyOutput/commitSha/summary。"
 })
 ```
 
@@ -103,7 +103,7 @@ subagent({
 ### D. 收尾
 
 - reviewer pass：`bd_task(action="close", task_id="<id>")`
-- reviewer fail：先 `bd_task(reopen)`，再 `bd_task(comment, text=<issues摘要>)`
+- reviewer fail：先 `bd_task(reopen)`，再 `bd_task(comment, text=<issues摘要>)`。`reopen` 会在删除下一轮权威 review 证据前，把失败详情累计保存到 `<results>/<taskId>.review-feedback.json`；下一轮 dev task 必须逐字包含该绝对路径并逐项处理。
 
 `bd_task(close)` 会再次校验 claim-bound commit range 已进入目标 HEAD，并重跑验证命令。
 

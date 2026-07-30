@@ -42,6 +42,7 @@ import {
   validateSubagentCall, withPlanInterrogationSystemPrompt, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
+import { persistReviewerFeedback } from "../extensions/workflow/tools/beads.ts";
 import {
   addUsage,
   buildRunSummary,
@@ -337,6 +338,35 @@ console.log("\nPLAN builtin advisory capability guard:");
   } finally {
     syncSubagentCapabilityCeiling({ sessionManager: { getSessionId: () => "wf-advisory-capability-test" } }, undefined);
     setWorkflow(undefined);
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+}
+
+console.log("\nreviewer retry feedback persistence:");
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-review-feedback-"));
+  const state: WorkflowState = { reqId: "req", name: "x", repo, mode: "build", createdAt: "now", epicId: "e", subtaskIds: ["e.1"] };
+  try {
+    const results = path.join(repo, ".workflow", "req", "results");
+    fs.mkdirSync(results, { recursive: true });
+    fs.writeFileSync(path.join(results, "e.1.review.json"), JSON.stringify({
+      taskId: "e.1", baseline: "base", commitSha: "commit-1", verdict: "fail",
+      issues: [{ severity: "major", desc: "fix me" }], summary: "failed review",
+    }));
+    const feedbackPath = persistReviewerFeedback(state, "e.1");
+    const feedback = JSON.parse(fs.readFileSync(feedbackPath!, "utf8"));
+    check("reviewer fail is preserved as non-authoritative retry context", feedback.authoritative === false && feedback.reviews.length === 1);
+    persistReviewerFeedback(state, "e.1");
+    const deduped = JSON.parse(fs.readFileSync(feedbackPath!, "utf8"));
+    check("identical reviewer feedback is not duplicated", deduped.reviews.length === 1);
+    fs.writeFileSync(path.join(results, "e.1.review.json"), JSON.stringify({
+      taskId: "e.1", baseline: "base", commitSha: "commit-2", verdict: "fail",
+      issues: [{ severity: "major", desc: "fix another" }], summary: "failed again",
+    }));
+    persistReviewerFeedback(state, "e.1");
+    const accumulated = JSON.parse(fs.readFileSync(feedbackPath!, "utf8"));
+    check("later reviewer failures accumulate for the next fresh dev", accumulated.reviews.length === 2);
+  } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 }
@@ -666,6 +696,9 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("authoritative direct subagents apply effort through a post-validation model suffix", /validateSubagentCall\(event\)[\s\S]*event\.input\.model = `\$\{expected\.model\}:\$\{expected\.effort\}`/.test(src)
     && /resolvedModelRaw === `\$\{expected\.model\}:\$\{expected\.effort\}` \? expected\.model/.test(src));
   check("BUILD child launch self-heals orphaned PLAN capability ceilings", /currentWorkflow\(\)\?\.mode === "build"\) syncSubagentCapabilityCeiling\(ctx, "build"\)/.test(src));
+  check("reviewer failures are persisted and mandatory in retry dev prompts", /review-feedback\.json/.test(src)
+    && /dev 重试必须在 task 中引用并逐项处理 reviewer 反馈/.test(src)
+    && /存在时必须先读取，逐项修复全部 reviewer issues/.test(mgrPrompt));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
   check("PLAN main prompt deterministically injects bundled plan-interrogation", /before_agent_start[\s\S]*withPlanInterrogationSystemPrompt\(event\.systemPrompt, wf, planInterrogationPrompt\)/.test(src)
     && /loadPlanInterrogationPrompt[\s\S]*skills[\s\S]*plan-interrogation[\s\S]*SKILL\.md/.test(src));
