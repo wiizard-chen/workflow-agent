@@ -726,3 +726,18 @@ export function extractSuggestedVerifyCommand(brief: string): string | undefined
   return cmd;
 }
 
+/** AI-generated verification commands require a narrower safety envelope than explicit user input. */
+export function suggestedVerifyCommandRisk(command: string): string | undefined {
+  const cmd = command.trim();
+  if (!cmd) return "建议命令为空";
+  if (cmd.length > 1000 || /[\r\n\0]/.test(cmd)) return "建议命令格式异常";
+  if (/\|\||(?<!\|)\|(?!\|)|;|`|\$\(|>|<|(?<!&)&(?!&)/.test(cmd)) return "建议命令包含不允许的 shell 控制符";
+  if (/(^|\s)(sudo|rm|mv|cp|git|curl|wget|ssh|scp|dd|mkfs|chmod|chown|kill|pkill|brew|apt(?:-get)?|npm\s+(?:install|uninstall|publish)|pnpm\s+(?:add|remove|publish)|yarn\s+(?:add|remove|publish))(?=\s|$)/i.test(cmd)) {
+    return "建议命令包含写入、网络、进程或包管理操作";
+  }
+  if (!/(?:^|\s|:)(test|lint|build|check|typecheck|tsc|pytest|vitest|playwright|cargo\s+test|go\s+test|mvn\s+test|gradle\s+test)(?:\s|$|:)/i.test(cmd)) {
+    return "建议命令未包含可识别的测试、类型检查、lint 或 build 门";
+  }
+  return undefined;
+}
+

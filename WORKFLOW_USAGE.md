@@ -42,6 +42,9 @@ wfpi
 /wf research <可选的研究主题>
 /wf prd
 /wf oracle
+# 由 AI 分析仓库、显示建议，确认后直接写入
+/wf verify
+# 或手工覆盖
 /wf verify <测试命令>
 /execute --dry-run
 /execute
@@ -62,7 +65,7 @@ wfpi
 /execute
 ```
 
-> `/wf verify` 不能为空。没有验证命令时，`/execute`、task close 和最终验证都会 fail closed。
+> workflow state 中的验证命令不能为空。可用无参数 `/wf verify` 生成并确认，或 `/wf verify <cmd>` 手工设置；未确认/未设置时，`/execute`、task close 和最终验证都会 fail closed。
 
 ---
 
@@ -124,20 +127,6 @@ wfpi
 git init       # 仅当目标目录还不是 Git 仓库
 bd init        # 仅当目标仓库尚未初始化 Beads
 wfpi
-```
-
-### 不使用 shell alias
-
-如果 `wfpi` 尚未进入 `PATH`：
-
-```bash
-/Users/wiizardchen/ghq/github.com/wiizard-chen/workflow-agent/scripts/wfpi
-```
-
-或者：
-
-```bash
-WF_AGENT_HOME=/path/to/workflow-agent /path/to/workflow-agent/scripts/wfpi
 ```
 
 ---
@@ -278,6 +267,14 @@ Oracle 只给建议，不替代 PRD writer、task reviewer 或 final reviewer。
 ## 5. BUILD 阶段完整流程
 
 ### 设置验证命令
+
+让 builtin scout 只读分析仓库并生成建议，确认后直接写入 workflow state：
+
+```text
+/wf verify
+```
+
+extension 会展示完整命令并询问是否采用；此步骤只保存命令，不会立即执行。建议命令包含明显危险 shell 操作时会被拒绝并要求手工设置。也可直接覆盖：
 
 ```text
 /wf verify <命令>
@@ -603,7 +600,8 @@ plan-interrogation
 | `/wf research [topic]` | 外部资料研究 |
 | `/wf prd` | 生成权威 PRD |
 | `/wf oracle` | PRD 一致性建议 |
-| `/wf verify <cmd>` | 设置验证命令 |
+| `/wf verify` | AI 只读分析并建议验证命令，用户确认后写入 |
+| `/wf verify <cmd>` | 手工设置验证命令 |
 | `/execute --dry-run` | 拆 task，不派 dev |
 | `/execute` | 进入 BUILD 并执行任务 |
 | `/wf status` | 查看 workflow、模型和 task 状态 |
@@ -790,7 +788,7 @@ Pi 中：
 开始 BUILD：
 
 ```text
-/wf verify <项目验证命令>
+/wf verify
 /execute --dry-run
 /execute
 ```

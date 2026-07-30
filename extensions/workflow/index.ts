@@ -9,7 +9,8 @@ import { registerManagerTools } from "./manager-tools.ts";
 import { syncSubagentCapabilityCeiling, validateAdvisoryLaunchContract } from "./capabilities.ts";
 import {
   cmdAbort, cmdAnalyze, cmdBug, cmdDone, cmdExecute, cmdNew, cmdPlan,
-  cmdPrd, cmdResearch, cmdOracle, cmdResume, cmdStatus, cmdTask,
+  cmdPrd, cmdResearch, cmdOracle, cmdResume, cmdStatus, cmdTask, cmdVerify,
+  confirmAndSaveSuggestedVerifyCommand,
 } from "./commands.ts";
 import {
   CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
@@ -100,7 +101,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
   // The PRD/final-review output remains the child's raw artifact; this adjacent
   // envelope makes provider/model selection auditable without trusting text the
   // child wrote about itself.
-  pi.on("tool_result", async (event: any) => {
+  pi.on("tool_result", async (event: any, ctx: any) => {
     try {
       if (event?.toolName !== "subagent") return;
       const wf = currentWorkflow();
@@ -160,6 +161,14 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           error: result?.error ?? result?.outputSaveError ?? (event?.isError ? "subagent tool failed" : null),
           completedAt: new Date().toISOString(),
         }, null, 2) + "\n");
+        if (ok && agent === "scout" && launched?.purpose === "verify-command") {
+          const suggested = extractSuggestedVerifyCommand(fs.readFileSync(expectedOutput, "utf8"));
+          if (!suggested) {
+            ctx?.ui?.notify?.("scout 未生成可提取的“建议命令:”。请手工使用 /wf verify <cmd>。", "warning");
+          } else if (ctx?.ui) {
+            await confirmAndSaveSuggestedVerifyCommand(ctx, suggested, expectedOutput);
+          }
+        }
         return;
       }
       if (!["pi-workflow.prd-writer", "pi-workflow.dev", "pi-workflow.reviewer", "pi-workflow.final-reviewer"].includes(agent)) return;
@@ -284,11 +293,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
           case "done": cmdDone(pi, ctx); break;
           case "abort": await cmdAbort(pi, ctx); break;
           case "execute": await cmdExecute(pi, ctx, rest); break;
-          case "verify":
-            if (!wf) { ctx.ui.notify("无活动需求。", "warning"); break; }
-            if (!rest.trim()) { ctx.ui.notify("验证命令不能为空。用法:/wf verify <cmd>", "error"); break; }
-            wf.verifyCommand = rest.trim(); saveState(wf);
-            ctx.ui.notify(`验证命令:${wf.verifyCommand}`, "info"); break;
+          case "verify": await cmdVerify(pi, ctx, rest); break;
           default:
             ctx.ui.notify([
               "workflow 两模式:plan(讨论/PRD,代码只读) / build(manager 代码只读,委派执行)。无 active epic 时是普通 Pi。",
@@ -307,7 +312,7 @@ export default function workflowExtension(pi: ExtensionAPI): void {
               "/wf abort               回滚到 execute baseline,task reopen,回到 plan",
               "/wf bug <描述>          在当前 epic 创建 bug",
               "/wf task <描述>         在当前 epic 创建 task",
-              "/wf verify <cmd>        设置强制验证命令;空命令直接报错",
+              "/wf verify [cmd]        无参数由 AI 建议并确认写入；带参数直接设置",
             ].join("\n"), "info");
         }
       },

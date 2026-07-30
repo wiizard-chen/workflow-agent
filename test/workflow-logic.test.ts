@@ -38,11 +38,12 @@ import {
 import { ensureRequirementDirs, extractSubtasksJson, preservedBaseline, registerManagerTools, renderedToolName, splitDecision } from "../extensions/workflow.ts";
 import {
   activeModelProfile, advisoryOutputPath, assertActiveProfileModelsAvailable,
-  configuredActiveProfileName, currentWorkflow, loadConfig, loadPlanInterrogationPrompt, setWorkflow, useRole,
+  configuredActiveProfileName, currentWorkflow, loadConfig, loadPlanInterrogationPrompt, setWorkflow, suggestedVerifyCommandRisk, useRole,
   validateSubagentCall, withPlanInterrogationSystemPrompt, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
 import { persistReviewerFeedback, reviewerRetryDecision } from "../extensions/workflow/tools/beads.ts";
+import { confirmAndSaveSuggestedVerifyCommand } from "../extensions/workflow/commands/plan.ts";
 import {
   addUsage,
   buildRunSummary,
@@ -337,6 +338,38 @@ console.log("\nPLAN builtin advisory capability guard:");
     check("final reviewer effort drift is rejected", /effort 必须/.test(call("pi-workflow.final-reviewer", "fresh", finalOutput, finalModel, "low") || ""));
   } finally {
     syncSubagentCapabilityCeiling({ sessionManager: { getSessionId: () => "wf-advisory-capability-test" } }, undefined);
+    setWorkflow(undefined);
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+}
+
+console.log("\nAI verify command safety:");
+{
+  check("normal chained quality gates are accepted", suggestedVerifyCommandRisk("npm test && npx tsc --noEmit && npm run build") === undefined);
+  check("AI verify suggestion rejects destructive commands", /写入、网络/.test(suggestedVerifyCommandRisk("rm -rf . && npm test") || ""));
+  check("AI verify suggestion rejects failure-masking shell operators", /shell 控制符/.test(suggestedVerifyCommandRisk("npm test || true") || ""));
+  check("AI verify suggestion must contain a recognizable quality gate", /未包含可识别/.test(suggestedVerifyCommandRisk("node scripts/report.js") || ""));
+}
+
+console.log("\nAI verify command confirmation:");
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "wf-ai-verify-"));
+  const state: WorkflowState = { reqId: "req", name: "x", repo, mode: "plan", createdAt: "now", epicId: "e", subtaskIds: [] };
+  try {
+    ensureRequirementDirs(state);
+    setWorkflow(state);
+    let confirms = 0;
+    const ctx = { ui: {
+      confirm: async () => { confirms++; return true; },
+      notify: () => {},
+    } } as any;
+    const accepted = await confirmAndSaveSuggestedVerifyCommand(ctx, "npm test && npx tsc --noEmit", "test-scout");
+    const audit = JSON.parse(fs.readFileSync(path.join(repo, ".workflow", "req", "results", "verify-command-suggestion.json"), "utf8"));
+    check("confirmed AI verify command is written directly to workflow state", accepted && state.verifyCommand === "npm test && npx tsc --noEmit");
+    check("AI verify confirmation writes provenance", audit.status === "accepted" && audit.source === "test-scout" && confirms === 1);
+    const rejected = await confirmAndSaveSuggestedVerifyCommand(ctx, "rm -rf . && npm test", "unsafe-scout");
+    check("unsafe AI verify command is rejected before user confirmation", rejected === false && confirms === 1 && state.verifyCommand === "npm test && npx tsc --noEmit");
+  } finally {
     setWorkflow(undefined);
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -714,6 +747,10 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
     && /需求歧义、PRD\/架构冲突/.test(mgrPrompt)
     && /maxReviewerAutoFixes:\s*3/.test(src)
     && /sameIssueStopAfter:\s*2/.test(src));
+  check("/wf verify without args uses AI suggestion plus explicit user confirmation", /case "verify": await cmdVerify/.test(src)
+    && /采用 AI 建议的验证命令/.test(src)
+    && /verify-command-suggestion\.json/.test(src)
+    && /suggestedVerifyCommandRisk/.test(src));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
   check("PLAN main prompt deterministically injects bundled plan-interrogation", /before_agent_start[\s\S]*withPlanInterrogationSystemPrompt\(event\.systemPrompt, wf, planInterrogationPrompt\)/.test(src)
     && /loadPlanInterrogationPrompt[\s\S]*skills[\s\S]*plan-interrogation[\s\S]*SKILL\.md/.test(src));

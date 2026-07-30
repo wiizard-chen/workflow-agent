@@ -19,7 +19,8 @@ import {
   sha256File, ensureRequirementDirs, preservedBaseline, splitDecision,
   validateSubagentCall, listAllStates, extractAssistantText, stripFence,
   extractSubtasksJson, useRole, runStageText, withBrief, analyzePrompt,
-  extractSuggestedVerifyCommand, assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
+  extractSuggestedVerifyCommand, suggestedVerifyCommandRisk,
+  assertActiveChildIssue, assertWorkflowAgentsUnshadowed,
   assertAdvisoryAgentsUnshadowed, advisoryOutputPath, advisoryRepoSnapshot,
   assertActiveProfileModelsAvailable, workflowAgentEffort, workflowAgentModel, renderedToolName
 } from "../runtime.ts";
@@ -91,7 +92,66 @@ export async function cmdResearch(pi: ExtensionAPI, ctx: ExtensionCommandContext
   ].join("\n"));
 }
 
-export async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext, opts: { silent?: boolean } = {}): Promise<boolean> {
+export async function confirmAndSaveSuggestedVerifyCommand(
+  ctx: ExtensionCommandContext,
+  command: string,
+  source: string,
+): Promise<boolean> {
+  const wf = currentWorkflow();
+  if (!wf) return false;
+  const auditPath = reqPath(wf, "results", "verify-command-suggestion.json");
+  const risk = suggestedVerifyCommandRisk(command);
+  if (risk) {
+    fs.writeFileSync(auditPath, JSON.stringify({ status: "rejected", source, command, reason: risk, decidedAt: new Date().toISOString() }, null, 2) + "\n");
+    ctx.ui.notify(`AI 建议验证命令被安全策略拒绝:${risk}\n${command}\n请手工使用 /wf verify <cmd>。`, "error");
+    return false;
+  }
+  const accepted = await ctx.ui.confirm(
+    "采用 AI 建议的验证命令?",
+    `${command}\n\n确认后将直接写入当前 workflow state；这里只保存命令，不会立即执行。`,
+  );
+  fs.writeFileSync(auditPath, JSON.stringify({
+    status: accepted ? "accepted" : "rejected",
+    source,
+    command,
+    reason: accepted ? null : "user-rejected",
+    decidedAt: new Date().toISOString(),
+  }, null, 2) + "\n");
+  if (!accepted) {
+    ctx.ui.notify(`未采用 AI 建议。可手工执行:/wf verify <cmd>`, "info");
+    return false;
+  }
+  wf.verifyCommand = command;
+  saveState(wf);
+  ctx.ui.notify(`已写入验证命令:${command}`, "info");
+  return true;
+}
+
+export async function cmdVerify(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+  const wf = currentWorkflow();
+  if (!wf) { ctx.ui.notify("无活动需求。", "warning"); return; }
+  const explicit = args.trim();
+  if (explicit) {
+    wf.verifyCommand = explicit;
+    saveState(wf);
+    ctx.ui.notify(`验证命令:${wf.verifyCommand}`, "info");
+    return;
+  }
+  if (wf.mode !== "plan") {
+    ctx.ui.notify("AI 生成验证命令只允许在 plan 模式。可手工使用 /wf verify <cmd>。", "warning");
+    return;
+  }
+  const brief = readRepoBrief(wf.repo);
+  const suggested = brief ? extractSuggestedVerifyCommand(brief) : undefined;
+  if (suggested) {
+    await confirmAndSaveSuggestedVerifyCommand(ctx, suggested, repoBriefPath(wf.repo));
+    return;
+  }
+  ctx.ui.notify("尚无可用验证建议，将启动 builtin scout 只读分析仓库；完成后会弹出确认并直接写入。", "info");
+  await cmdAnalyze(pi, ctx, { silent: true, purpose: "verify-command" });
+}
+
+export async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext, opts: { silent?: boolean; purpose?: "verify-command" } = {}): Promise<boolean> {
   const wf = currentWorkflow();
   if (!wf) { ctx.ui.notify("没有活动需求。先 /wf new。", "warning"); return false; }
   if (wf.mode !== "plan") { ctx.ui.notify("scout 只允许在 plan 模式运行。先 /plan。", "warning"); return false; }
@@ -99,7 +159,7 @@ export async function cmdAnalyze(pi: ExtensionAPI, ctx: ExtensionCommandContext,
   catch (e) { ctx.ui.notify(`拒绝启动 builtin scout:${(e as Error).message}`, "error"); return false; }
   const outputPath = advisoryOutputPath("scout");
   const auditPath = reqPath(wf, "results", "scout.audit.json");
-  fs.writeFileSync(auditPath, JSON.stringify({ status: "launched", agent: "scout", authority: "advisory", context: "fresh", output: outputPath, repoSnapshot: advisoryRepoSnapshot(wf.repo), launchedAt: new Date().toISOString() }, null, 2) + "\n");
+  fs.writeFileSync(auditPath, JSON.stringify({ status: "launched", agent: "scout", authority: "advisory", purpose: opts.purpose ?? "repo-brief", context: "fresh", output: outputPath, repoSnapshot: advisoryRepoSnapshot(wf.repo), launchedAt: new Date().toISOString() }, null, 2) + "\n");
   if (!opts.silent) ctx.ui.notify("将由 builtin scout 分析仓库(advisory,只读探查)…", "info");
   pi.sendUserMessage([
     `请调用 builtin scout subagent,生成 workflow 仓库简报。`,
