@@ -134,7 +134,13 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   // Worktree-isolated parallel children return patches/handoff manifests; they
   // do not auto-merge into the target repository. Until deterministic handoff
   // integration is implemented, the safe default is one serial dev writer.
-  execute: { driver: "bd", maxParallel: 1, pollIntervalMs: 2000 },
+  execute: {
+    driver: "bd",
+    maxParallel: 1,
+    pollIntervalMs: 2000,
+    maxReviewerAutoFixes: 3,
+    sameIssueStopAfter: 2,
+  },
 };
 
 export function configuredActiveProfileName(raw: any, fallback: string): string {
@@ -166,13 +172,22 @@ export function loadConfig(): WorkflowConfig {
   catch (e) { throw new Error(`${(e as Error).message} (${configPath})`); }
   const profile = modelProfiles[activeName];
   if (!profile) throw new Error(`workflow 配置引用未知 profile:${activeName} (${configPath})`);
+  const execute = { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) };
+  for (const [field, value] of [
+    ["maxReviewerAutoFixes", execute.maxReviewerAutoFixes],
+    ["sameIssueStopAfter", execute.sameIssueStopAfter],
+  ] as const) {
+    if (!Number.isInteger(value) || Number(value) < 1) {
+      throw new Error(`workflow 配置 execute.${field} 必须是 >=1 的整数 (${configPath})`);
+    }
+  }
   const config: WorkflowConfig = {
     providers: { ...DEFAULT_CONFIG.providers, ...(raw.providers || {}) },
     activeModelProfile: activeName,
     modelProfiles,
     roles: derivedRoles(profile, activeName),
     build: { ...DEFAULT_CONFIG.build, ...(raw.build || {}) },
-    execute: { ...DEFAULT_CONFIG.execute, ...(raw.execute || {}) },
+    execute,
   };
   activeModelProfile(config);
   return config;

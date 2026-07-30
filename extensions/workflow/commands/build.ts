@@ -67,6 +67,8 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
     `final reviewer model:${profile.finalReviewer.model} (effort=${profile.finalReviewer.effort})`,
     `结果文件目录:${reqPath(wf, "results")}(dev/reviewer 的 output JSON 写到这里)`,
     `writer 并行上限:1(安全硬限制;禁止 tasks:[...] 和 worktree:true)`,
+    `reviewer 自动修复上限:${CONFIG.execute?.maxReviewerAutoFixes ?? 3}(初始实现之外的 dev 修复轮数)`,
+    `同一 issue 集连续重复停止阈值:${CONFIG.execute?.sameIssueStopAfter ?? 2}`,
     `------------------`,
     ``,
     ...(dryRun
@@ -84,7 +86,7 @@ export function loadManagerPrompt(prdPathOverride?: string, epicIdOverride?: str
           existingTaskCount > 0
             ? `当前 epic 已有 ${existingTaskCount} 个 task:不要重复 split,先 bd_query(children) 后继续现有 task 循环。`
             : `当前 epic 没有 task:先读 PRD,形成完整 subtasks 数组,一次调用 split_prd_to_tasks({prd_path,subtasks})。`,
-          `一口气跑完整条流水线,异常(dev 反复失败/reviewer 多次 fail)才停下问用户。`,
+          `一口气跑完整条流水线。明确可定位、无需产品决策的 reviewer code issue 按 retryDecision 在同一次 /execute 内自动修复；只有预算耗尽、同 issue 无进展、需求歧义或外部阻塞才停下问用户。`,
         ]),
   ].join("\n");
   return template + "\n" + context;

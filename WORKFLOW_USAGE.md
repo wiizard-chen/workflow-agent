@@ -339,6 +339,27 @@ split tasks
   → finalize_test
 ```
 
+### Reviewer fail 自动修复
+
+Task reviewer 返回可定位、无需产品决策的代码问题时，manager 会在**同一次 `/execute`** 内自动执行：
+
+```text
+reopen → 保存 review-feedback → claim → dev 修复 → reviewer 复审
+```
+
+默认配置：
+
+```json
+{
+  "execute": {
+    "maxReviewerAutoFixes": 3,
+    "sameIssueStopAfter": 2
+  }
+}
+```
+
+含义：初始实现之外最多自动修复 3 轮；完全相同的规范化 issue 集连续出现 2 次时提前停止，避免死循环。需求歧义、PRD/架构冲突、外部凭证/数据阻塞或破坏性决策仍会停下询问用户。manager 不会递归调用 `/execute`，也不会跳过 reviewer。
+
 ### 查看状态
 
 ```text

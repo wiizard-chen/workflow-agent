@@ -47,6 +47,10 @@ export interface WorkflowConfig {
     driver?: "bd";          // only "bd" supported; default "bd"
     maxParallel?: number;   // suggested parallel task(dev) calls for the manager prompt; default 1
     pollIntervalMs?: number; // unused in omp-native path; kept for compat
+    /** Automatic dev repairs after reviewer failures, before asking the user. */
+    maxReviewerAutoFixes?: number;
+    /** Stop if the exact same normalized issue set repeats this many consecutive reviews. */
+    sameIssueStopAfter?: number;
   };
 }
 

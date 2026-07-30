@@ -46,6 +46,10 @@
     "maxParallel": 1,
     "$comment_maxParallel": "安全上限固定为 1；确定性 worktree handoff 完成前禁止并行 writer。",
     "pollIntervalMs": 2000,
-    "$comment_pollIntervalMs": "死字段:当前实现不轮询,仅为兼容。"
+    "$comment_pollIntervalMs": "死字段:当前实现不轮询,仅为兼容。",
+    "maxReviewerAutoFixes": 3,
+    "$comment_maxReviewerAutoFixes": "reviewer fail 后在同一次 /execute 内自动派 dev 修复的最大次数；3 表示初始实现后最多再自动修复 3 轮。",
+    "sameIssueStopAfter": 2,
+    "$comment_sameIssueStopAfter": "连续 reviewer 返回完全相同的规范化 issue 集达到此次数时停止，避免无进展死循环。"
   }
 }

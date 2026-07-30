@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -28,6 +28,45 @@ import {
 // Manager tools (registered for every session; handlers require active wf)
 // ---------------------------------------------------------------------------
 
+function issueFingerprint(issues: unknown[]): string {
+  const normalized = issues.map((issue: any) => ({
+    severity: String(issue?.severity || "").trim().toLowerCase(),
+    file: String(issue?.file || "").trim(),
+    line: Number.isFinite(Number(issue?.line)) ? Number(issue.line) : null,
+    desc: String(issue?.desc || "").replace(/\s+/g, " ").trim(),
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+export interface ReviewerRetryDecision {
+  autoRetryAllowed: boolean;
+  failedReviews: number;
+  maxAutoFixes: number;
+  consecutiveSameIssues: number;
+  sameIssueStopAfter: number;
+  reason: "within-budget" | "auto-fix-budget-exhausted" | "same-issues-repeated";
+}
+
+export function reviewerRetryDecision(feedback: any, maxAutoFixes: number, sameIssueStopAfter: number): ReviewerRetryDecision {
+  const reviews = Array.isArray(feedback?.reviews) ? feedback.reviews : [];
+  const fingerprints = reviews.map((review: any) => typeof review?.issueFingerprint === "string"
+    ? review.issueFingerprint
+    : issueFingerprint(Array.isArray(review?.issues) ? review.issues : []));
+  const latest = fingerprints.at(-1);
+  let consecutiveSameIssues = 0;
+  for (let index = fingerprints.length - 1; index >= 0 && fingerprints[index] === latest; index--) consecutiveSameIssues++;
+  const budgetExhausted = reviews.length > maxAutoFixes;
+  const sameIssuesRepeated = reviews.length > 0 && consecutiveSameIssues >= sameIssueStopAfter;
+  return {
+    autoRetryAllowed: !budgetExhausted && !sameIssuesRepeated,
+    failedReviews: reviews.length,
+    maxAutoFixes,
+    consecutiveSameIssues,
+    sameIssueStopAfter,
+    reason: sameIssuesRepeated ? "same-issues-repeated" : budgetExhausted ? "auto-fix-budget-exhausted" : "within-budget",
+  };
+}
+
 // Preserve reviewer failures as non-authoritative retry context. Authoritative
 // review.json/audit files are deleted on the next claim so they cannot be
 // reused as close evidence, but a fresh dev still needs the exact findings.
@@ -42,6 +81,7 @@ export function persistReviewerFeedback(wf: WorkflowState, taskId: string): stri
     baseline: typeof review.baseline === "string" ? review.baseline : null,
     commitSha: typeof review.commitSha === "string" ? review.commitSha : null,
     issues: review.issues,
+    issueFingerprint: issueFingerprint(review.issues),
     summary: typeof review.summary === "string" ? review.summary : "",
     reviewSha256: sha256File(reviewPath),
     recordedAt: new Date().toISOString(),
@@ -245,9 +285,22 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
         }
         if (action === "reopen") {
           const feedbackPath = persistReviewerFeedback(wf, taskId);
+          const retryDecision = feedbackPath ? reviewerRetryDecision(
+            readJson(feedbackPath),
+            CONFIG.execute?.maxReviewerAutoFixes ?? 3,
+            CONFIG.execute?.sameIssueStopAfter ?? 2,
+          ) : undefined;
           bd.reopen(repo, taskId);
-          track(`✗ 放回 ready${text ? `:${text.slice(0, 120)}` : ""}${feedbackPath ? `;reviewer 反馈已保存:${feedbackPath}` : ""}`);
-          return { content: [{ type: "text", text: `✓ 已放回 ready ${taskId}${feedbackPath ? `; reviewer 反馈已保存到 ${feedbackPath}` : ""}` }], details: {} };
+          const retryText = retryDecision
+            ? retryDecision.autoRetryAllowed
+              ? `;AUTO_RETRY_ALLOWED failedReviews=${retryDecision.failedReviews}/${retryDecision.maxAutoFixes}`
+              : `;STOP_REQUIRED reason=${retryDecision.reason},failedReviews=${retryDecision.failedReviews}/${retryDecision.maxAutoFixes},sameIssues=${retryDecision.consecutiveSameIssues}/${retryDecision.sameIssueStopAfter}`
+            : "";
+          track(`✗ 放回 ready${text ? `:${text.slice(0, 120)}` : ""}${feedbackPath ? `;reviewer 反馈已保存:${feedbackPath}` : ""}${retryText}`);
+          return {
+            content: [{ type: "text", text: `✓ 已放回 ready ${taskId}${feedbackPath ? `; reviewer 反馈已保存到 ${feedbackPath}` : ""}${retryText}` }],
+            details: { feedbackPath, retryDecision } as any,
+          };
         }
         if (action === "comment") {
           if (!text) return { content: [{ type: "text", text: "错误:comment 需要 text 参数" }], details: {} };

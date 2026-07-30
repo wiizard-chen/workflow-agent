@@ -42,7 +42,7 @@ import {
   validateSubagentCall, withPlanInterrogationSystemPrompt, workflowAgentEffort, workflowAgentModel,
 } from "../extensions/workflow/runtime.ts";
 import { PLAN_ADVISORY_TOOLS, syncSubagentCapabilityCeiling } from "../extensions/workflow/capabilities.ts";
-import { persistReviewerFeedback } from "../extensions/workflow/tools/beads.ts";
+import { persistReviewerFeedback, reviewerRetryDecision } from "../extensions/workflow/tools/beads.ts";
 import {
   addUsage,
   buildRunSummary,
@@ -366,6 +366,16 @@ console.log("\nreviewer retry feedback persistence:");
     persistReviewerFeedback(state, "e.1");
     const accumulated = JSON.parse(fs.readFileSync(feedbackPath!, "utf8"));
     check("later reviewer failures accumulate for the next fresh dev", accumulated.reviews.length === 2);
+    const distinctDecision = reviewerRetryDecision(accumulated, 3, 2);
+    check("manager may auto-fix distinct actionable reviews within budget", distinctDecision.autoRetryAllowed === true && distinctDecision.failedReviews === 2);
+    accumulated.reviews.push({ ...accumulated.reviews.at(-1) });
+    const repeatedDecision = reviewerRetryDecision(accumulated, 3, 2);
+    check("identical consecutive issue sets stop the automatic loop", repeatedDecision.autoRetryAllowed === false && repeatedDecision.reason === "same-issues-repeated");
+    const budgetDecision = reviewerRetryDecision({ reviews: [
+      { issues: [{ desc: "a" }] }, { issues: [{ desc: "b" }] },
+      { issues: [{ desc: "c" }] }, { issues: [{ desc: "d" }] },
+    ] }, 3, 2);
+    check("automatic reviewer repair stops after configured budget", budgetDecision.autoRetryAllowed === false && budgetDecision.reason === "auto-fix-budget-exhausted");
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -699,6 +709,11 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("reviewer failures are persisted and mandatory in retry dev prompts", /review-feedback\.json/.test(src)
     && /dev 重试必须在 task 中引用并逐项处理 reviewer 反馈/.test(src)
     && /存在时必须先读取，逐项修复全部 reviewer issues/.test(mgrPrompt));
+  check("manager automatically repairs actionable reviewer failures inside the same execute run", /retryDecision\.autoRetryAllowed === true/.test(mgrPrompt)
+    && /不得递归调用 `\/execute`/.test(mgrPrompt)
+    && /需求歧义、PRD\/架构冲突/.test(mgrPrompt)
+    && /maxReviewerAutoFixes:\s*3/.test(src)
+    && /sameIssueStopAfter:\s*2/.test(src));
   check("subagent capability guard restricts plan/build roles", /plan 模式只允许 researcher\/scout\/oracle advisory 或 pi-workflow\.prd-writer[\s\S]*build 模式只允许 pi-workflow\.dev\/reviewer\/final-reviewer/.test(src));
   check("PLAN main prompt deterministically injects bundled plan-interrogation", /before_agent_start[\s\S]*withPlanInterrogationSystemPrompt\(event\.systemPrompt, wf, planInterrogationPrompt\)/.test(src)
     && /loadPlanInterrogationPrompt[\s\S]*skills[\s\S]*plan-interrogation[\s\S]*SKILL\.md/.test(src));

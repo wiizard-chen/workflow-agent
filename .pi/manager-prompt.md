@@ -100,10 +100,32 @@ subagent({
 })
 ```
 
-### D. 收尾
+### D. reviewer fail 自动决策与收尾
 
-- reviewer pass：`bd_task(action="close", task_id="<id>")`
-- reviewer fail：先 `bd_task(reopen)`，再 `bd_task(comment, text=<issues摘要>)`。`reopen` 会在删除下一轮权威 review 证据前，把失败详情累计保存到 `<results>/<taskId>.review-feedback.json`；下一轮 dev task 必须逐字包含该绝对路径并逐项处理。
+- reviewer pass：`bd_task(action="close", task_id="<id>")`。
+- reviewer fail：先判断问题是否属于 manager 可自动调度的修复，不要因为“第二次/第三次 fail”本身就询问用户。
+
+**自动修复（默认）**：同时满足以下条件时，必须在当前 `/execute` 内继续 `reopen → claim → dev → reviewer`，不得停下来要求用户再次执行 `/execute`：
+
+- reviewer 给出明确的 file/line/desc 或可定位代码路径；
+- 属于局部代码逻辑、测试覆盖、类型、接口或确定性数据处理问题；
+- 不改变 PRD、业务口径或已确认架构；
+- 不需要用户提供凭证、外部数据、破坏性授权或产品取舍。
+
+步骤：
+
+1. 调用 `bd_task(reopen)`；它会累计 `<results>/<taskId>.review-feedback.json` 并返回结构化 `retryDecision`。
+2. `retryDecision.autoRetryAllowed === true` 时，立即重新 claim，并把反馈文件绝对路径写入 dev task，自动完成下一轮修复与复审。
+3. 不得递归调用 `/execute`；这是同一次 manager run 内的单 task 循环。
+
+**只有以下情况停止询问用户**：
+
+- `retryDecision.autoRetryAllowed === false`（超过运行上下文中的自动修复上限，或完全相同的规范化 issue 集连续达到停止阈值）；
+- reviewer 指出需求歧义、PRD/架构冲突、需要产品取舍；
+- 缺少外部凭证、服务、数据或需要用户批准破坏性操作；
+- reviewer 输出无法定位、互相矛盾或证据不足。
+
+无论自动继续或停止，都调用 `bd_task(comment, text=<issues摘要和决策原因>)`。不要跳过 reviewer，不要因测试通过而覆盖 major/blocker verdict。
 
 `bd_task(close)` 会再次校验 claim-bound commit range 已进入目标 HEAD，并重跑验证命令。
 
