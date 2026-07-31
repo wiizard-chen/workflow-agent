@@ -45,6 +45,10 @@ function isInside(child, parent) {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== "..");
 }
 
+function isProductionBoundary(workspace) {
+  return workspace.kind === "production" || workspace.kind === "application";
+}
+
 function internalDependencies(manifest) {
   const names = new Set();
   for (const field of ["dependencies", "optionalDependencies"]) {
@@ -199,13 +203,13 @@ export function validateV2Boundaries(root = repositoryRoot) {
     for (const targetName of dependencyNames) {
       if (!workspace.allowed.includes(targetName)) errors.push(`${workspace.name} has forbidden dependency edge to ${targetName}.`);
       const target = WORKSPACE_BY_NAME.get(targetName);
-      if (workspace.kind === "production" && target?.kind === "testkit") errors.push(`${workspace.name} production dependency cannot target testkit.`);
+      if (isProductionBoundary(workspace) && target?.kind === "testkit") errors.push(`${workspace.name} production boundary cannot depend on testkit.`);
       if (workspace.kind === "application" && target?.kind === "application") errors.push(`${workspace.name} applications cannot depend on one another.`);
     }
 
     for (const sourceRoot of ["src", "test"]) {
       for (const path of sourceFiles(join(directory, sourceRoot))) {
-        const productionSource = sourceRoot === "src";
+        const productionSource = sourceRoot === "src" && isProductionBoundary(workspace);
         for (const specifier of importSpecifiers(path)) {
           if (specifier.startsWith(".")) {
             const target = resolve(dirname(path), specifier);
@@ -219,7 +223,10 @@ export function validateV2Boundaries(root = repositoryRoot) {
           if (targetManifest && !isPublicSpecifier(specifier, targetWorkspace.name, targetManifest)) errors.push(`${relative(root, path)} deep-imports non-exported ${specifier}.`);
           if (targetWorkspace.name === workspace.name) continue;
           if (!declaredDependencyNames.has(targetWorkspace.name)) errors.push(`${relative(root, path)} imports undeclared internal dependency ${targetWorkspace.name}.`);
-          if (productionSource && workspace.kind === "production" && targetWorkspace.kind === "testkit") errors.push(`${relative(root, path)} production source cannot import testkit.`);
+          if (productionSource && declaredDependencyNames.has(targetWorkspace.name) && !dependencyNames.has(targetWorkspace.name)) {
+            errors.push(`${relative(root, path)} production source imports ${targetWorkspace.name} declared only in devDependencies or peerDependencies.`);
+          }
+          if (productionSource && targetWorkspace.kind === "testkit") errors.push(`${relative(root, path)} production source cannot import testkit.`);
           if (workspace.kind === "application" && targetWorkspace.kind === "application") errors.push(`${relative(root, path)} applications cannot import one another.`);
         }
       }
@@ -247,31 +254,93 @@ async function runNegativeFixtureTests(root) {
       recursive: true,
       filter: (path) => ![".git", ".beads", "node_modules", "dist"].includes(path.split(sep).at(-1)),
     });
+    assert.deepEqual(
+      validateV2Boundaries(fixture),
+      [],
+      "unmutated boundary fixture must be accepted by the validator",
+    );
+
     const cases = [
-      ["application-to-application dependency", async (candidate) => {
-        await mutateJson(join(candidate, "apps/workflowd/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/workflow-worker"] = "file:../workflow-worker"; });
-        await mutateJson(join(candidate, "apps/workflowd/tsconfig.json"), (config) => { config.references.push({ path: "../workflow-worker" }); });
-      }],
-      ["production-to-testkit dependency", async (candidate) => {
-        await mutateJson(join(candidate, "packages/v2-protocol/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-testkit"] = "file:../v2-testkit"; });
-        await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references.push({ path: "../v2-testkit" }); });
-      }],
-      ["relative deep import", async (candidate) => {
-        await writeFile(join(candidate, "apps/workflowd/src/forbidden.ts"), 'import "../../../packages/v2-domain/src/index.js";\n');
-      }],
-      ["dependency/reference disagreement", async (candidate) => {
-        await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references = []; });
-      }],
-      ["source export", async (candidate) => {
-        await mutateJson(join(candidate, "packages/v2-domain/package.json"), (manifest) => { manifest.exports["."].import = "./src/index.ts"; });
-      }],
+      {
+        label: "application-to-application dependency",
+        expectedErrors: ["applications cannot depend on one another"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "apps/workflowd/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/workflow-worker"] = "file:../workflow-worker"; });
+          await mutateJson(join(candidate, "apps/workflowd/tsconfig.json"), (config) => { config.references.push({ path: "../workflow-worker" }); });
+        },
+      },
+      {
+        label: "production-to-testkit dependency",
+        expectedErrors: ["production boundary cannot depend on testkit"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-protocol/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-testkit"] = "file:../v2-testkit"; });
+          await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references.push({ path: "../v2-testkit" }); });
+        },
+      },
+      {
+        label: "application-to-testkit dependency",
+        expectedErrors: ["production boundary cannot depend on testkit"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "apps/workflowd/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-testkit"] = "file:../../packages/v2-testkit"; });
+          await mutateJson(join(candidate, "apps/workflowd/tsconfig.json"), (config) => { config.references.push({ path: "../../packages/v2-testkit" }); });
+        },
+      },
+      {
+        label: "production source importing testkit through peer dependency",
+        expectedErrors: [
+          "production source imports @pi-workflow/v2-testkit declared only in devDependencies or peerDependencies",
+          "production source cannot import testkit",
+        ],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-protocol/package.json"), (manifest) => { manifest.peerDependencies = { ...manifest.peerDependencies, "@pi-workflow/v2-testkit": "file:../v2-testkit" }; });
+          await writeFile(join(candidate, "packages/v2-protocol/src/forbidden.ts"), 'import "@pi-workflow/v2-testkit";\n');
+        },
+      },
+      {
+        label: "application source importing testkit through dev dependency",
+        expectedErrors: [
+          "production source imports @pi-workflow/v2-testkit declared only in devDependencies or peerDependencies",
+          "production source cannot import testkit",
+        ],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "apps/workflowd/package.json"), (manifest) => { manifest.devDependencies = { ...manifest.devDependencies, "@pi-workflow/v2-testkit": "file:../../packages/v2-testkit" }; });
+          await writeFile(join(candidate, "apps/workflowd/src/forbidden.ts"), 'import "@pi-workflow/v2-testkit";\n');
+        },
+      },
+      {
+        label: "relative deep import",
+        expectedErrors: ["relative import crosses into @pi-workflow/v2-domain"],
+        mutate: async (candidate) => {
+          await writeFile(join(candidate, "apps/workflowd/src/forbidden.ts"), 'import "../../../packages/v2-domain/src/index.js";\n');
+        },
+      },
+      {
+        label: "dependency/reference disagreement",
+        expectedErrors: ["declares @pi-workflow/v2-domain without its TypeScript project reference"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references = []; });
+        },
+      },
+      {
+        label: "source export",
+        expectedErrors: ["public export must expose ./dist/index.js and ./dist/index.d.ts", "exports must expose only generated dist paths"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-domain/package.json"), (manifest) => { manifest.exports["."].import = "./src/index.ts"; });
+        },
+      },
     ];
-    for (const [label, mutate] of cases) {
+    for (const { label, expectedErrors, mutate } of cases) {
       const candidate = await mkdtemp(join(tmpdir(), "pi-workflow-v2-boundary-case-"));
       try {
         await cp(fixture, candidate, { recursive: true });
         await mutate(candidate);
-        assert.ok(validateV2Boundaries(candidate).length > 0, `negative fixture was accepted: ${label}`);
+        const errors = validateV2Boundaries(candidate);
+        for (const expectedError of expectedErrors) {
+          assert.ok(
+            errors.some((error) => error.includes(expectedError)),
+            `negative fixture ${label} did not report ${expectedError}:\n${errors.join("\n")}`,
+          );
+        }
       } finally {
         await rm(candidate, { recursive: true, force: true });
       }

@@ -13,7 +13,7 @@
   "scripts": {
     "setup": "bash scripts/setup.sh",
     "test:v1": "node --experimental-strip-types test/workflow-logic.test.ts",
-    "test:v2": "npm --workspaces --if-present run test",
+    "test:v2": "npm --workspace=@pi-workflow/v2-domain run test && npm --workspace=@pi-workflow/v2-protocol run test && npm --workspace=@pi-workflow/v2-testkit run test && npm --workspace=@pi-workflow/workflowd run test && npm --workspace=@pi-workflow/workflow-worker run test",
     "test": "npm run test:v1 && npm run test:v2",
     "typecheck:v1": "tsc --project tsconfig.json",
     "typecheck:v2": "npm run clean:v2 && tsc --build tsconfig.v2.json",
