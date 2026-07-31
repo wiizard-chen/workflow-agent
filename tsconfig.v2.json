@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/v2-domain" },
+    { "path": "./packages/v2-protocol" },
+    { "path": "./packages/v2-testkit" },
+    { "path": "./apps/workflowd" },
+    { "path": "./apps/workflow-worker" }
+  ]
+}
