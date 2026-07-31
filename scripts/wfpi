@@ -53,5 +53,22 @@ else
   export PI_SUBAGENT_EXTRA_AGENT_DIRS="$AGENTS_DIR"
 fi
 
+# Test harnesses can pin Pi to a pre-validated absolute executable. In normal
+# use resolve it once here, then reject a non-absolute override rather than
+# silently falling back to a PATH-shadowed binary.
+if [[ -n "${WF_PI_EXECUTABLE:-}" ]]; then
+  if [[ "${WF_PI_EXECUTABLE}" != /* || ! -x "${WF_PI_EXECUTABLE}" ]]; then
+    echo "❌ WF_PI_EXECUTABLE must be an executable absolute path" >&2
+    exit 1
+  fi
+  PI_EXECUTABLE="$WF_PI_EXECUTABLE"
+else
+  PI_EXECUTABLE="$(command -v pi || true)"
+  if [[ -z "$PI_EXECUTABLE" || "$PI_EXECUTABLE" != /* || ! -x "$PI_EXECUTABLE" ]]; then
+    echo "❌ 找不到可执行的 pi；设置 WF_PI_EXECUTABLE 为绝对路径" >&2
+    exit 1
+  fi
+fi
+
 # 透传所有参数 $@。cwd 保持当前目录(让 workflow 操作当前仓库)
-exec pi -e "$WORKFLOW_TS" -e "$CACHE_TS" "$@"
+exec "$PI_EXECUTABLE" -e "$WORKFLOW_TS" -e "$CACHE_TS" "$@"

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Hermetic compatibility checks for the root Pi package.
+ * Hermetic, no-model package compatibility diagnostics for pi-workflow.
  *
- * The checks deliberately use Pi's RPC resource registry rather than a model
- * prompt.  All Pi state (including npm-installed pi-subagents) lives below a
- * single temporary directory, and the caller's Pi directory is fingerprinted
- * before and after the run.
+ * Every executable is resolved to an absolute, executable path before a child
+ * starts. Every child runs in its own process group, so timeout, failure, and
+ * parent SIGINT/SIGTERM cleanup terminate the whole group rather than merely
+ * its leader. The only inherited environment value used for resolution is PATH;
+ * child environments are constructed from an allow-list.
  */
 
 import { createHash } from "node:crypto";
@@ -17,21 +18,35 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  readlinkSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const MODES = new Set(["local-source", "clone-parity", "pi-git-install"]);
-const PROVIDER_ENV = /(?:^|_)(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|TOKEN|SECRET|CREDENTIAL|PASSWORD)$/;
 const EXPECTED_AGENTS = ["dev", "reviewer"];
-const USER_PI_DIR = join(homedir(), ".pi", "agent");
+const USER_PI_CONFIG_ENTRIES = ["settings.json", "models.json", "models-store.json", "auth.json", "trust.json", "npm", "git", "extensions", "skills"];
 const USER_ZSHRC = join(homedir(), ".zshrc");
+const TERMINATE_GRACE_MS = 1_500;
+const RPC_TIMEOUT_MS = 30_000;
 
-function fail(message) {
-  throw new Error(message);
+function fail(message) { throw new Error(message); }
+function assertEqual(actual, expected, label) {
+  if (actual !== expected) fail(`${label}: expected ${expected}, got ${actual}`);
+}
+function assertFile(path, label) {
+  if (!existsSync(path)) fail(`Missing ${label}: ${path}`);
+}
+function shortOutput(output, limit = 2_000) {
+  const text = output.trim();
+  return text.length <= limit ? text : `…${text.slice(-limit)}`;
+}
+function pathWithin(child, parent) {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
 function parseArgs(argv) {
@@ -42,6 +57,7 @@ function parseArgs(argv) {
     const key = arg.slice(2);
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) fail(`Missing value for --${key}`);
+    if (Object.hasOwn(options, key)) fail(`Duplicate --${key}`);
     options[key] = value;
     index += 1;
   }
@@ -50,167 +66,218 @@ function parseArgs(argv) {
   return { mode, candidate: options.candidate, source: options.source };
 }
 
-function shortOutput(output, limit = 1800) {
-  const text = output.trim();
-  return text.length <= limit ? text : `…${text.slice(-limit)}`;
+/** Locate a command now, but never permit later children to resolve it via PATH. */
+function findExecutableOnPath(name) {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, name);
+    try {
+      if (statSync(candidate).isFile() && (statSync(candidate).mode & 0o111) !== 0) return realpathSync(candidate);
+    } catch { /* continue looking */ }
+  }
+  fail(`Could not pre-resolve executable ${name} from PATH; set PATH before invoking this diagnostic`);
+}
+function validatedExecutable(label, candidate) {
+  if (!candidate || !isAbsolute(candidate)) fail(`${label} executable must be an absolute path, not ${String(candidate)}`);
+  let resolved;
+  try { resolved = realpathSync(candidate); } catch { fail(`${label} executable does not exist: ${candidate}`); }
+  const stat = statSync(resolved);
+  if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`${label} executable is not executable: ${resolved}`);
+  return resolved;
+}
+function resolveTools() {
+  // The overrides are deliberately required to be absolute; they make a
+  // PATH-shadowing test fail closed rather than silently executing the shadow.
+  const pi = validatedExecutable("pi", process.env.WF_PI_EXECUTABLE ?? findExecutableOnPath("pi"));
+  const git = validatedExecutable("git", process.env.WF_GIT_EXECUTABLE ?? findExecutableOnPath("git"));
+  const npm = validatedExecutable("npm", process.env.WF_NPM_EXECUTABLE ?? findExecutableOnPath("npm"));
+  const node = validatedExecutable("node", process.env.WF_NODE_EXECUTABLE ?? process.execPath);
+  return { pi, git, npm, node };
 }
 
-function pathWithin(child, parent) {
-  const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-}
-
-/** A byte-oriented tree digest; it intentionally ignores mtimes and ownership. */
+/**
+ * Hash a filesystem object and, crucially, hash the target contents of links.
+ * A link whose target changes but whose link text does not must change the user
+ * configuration fingerprint. Cycles are represented deterministically.
+ */
 function hashTree(path) {
   const hash = createHash("sha256");
+  const active = new Set();
   const visit = (current, label) => {
-    if (!existsSync(current)) {
+    let stat;
+    try { stat = lstatSync(current); } catch {
       hash.update(`missing\0${label}\0`);
       return;
     }
-    const stat = lstatSync(current);
     if (stat.isSymbolicLink()) {
-      hash.update(`symlink\0${label}\0${readlinkSync(current)}\0`);
+      let target;
+      try { target = realpathSync(current); } catch {
+        hash.update(`dangling-symlink\0${label}\0`);
+        return;
+      }
+      hash.update(`symlink\0${label}\0${target}\0`);
+      if (active.has(target)) { hash.update(`cycle\0${target}\0`); return; }
+      active.add(target);
+      visit(target, `${label}=>`);
+      active.delete(target);
       return;
     }
+    const identity = realpathSync(current);
+    if (active.has(identity)) { hash.update(`cycle\0${identity}\0`); return; }
+    active.add(identity);
     if (stat.isDirectory()) {
       hash.update(`directory\0${label}\0`);
       for (const entry of readdirSync(current).sort()) visit(join(current, entry), join(label, entry));
-      return;
-    }
-    if (!stat.isFile()) {
+    } else if (stat.isFile()) {
+      hash.update(`file\0${label}\0`);
+      hash.update(readFileSync(current));
+      hash.update("\0");
+    } else {
       hash.update(`other\0${label}\0`);
-      return;
     }
-    hash.update(`file\0${label}\0`);
-    hash.update(readFileSync(current));
-    hash.update("\0");
+    active.delete(identity);
   };
   visit(path, ".");
   return hash.digest("hex");
 }
-
 function userConfigFingerprint() {
-  return {
-    piAgent: hashTree(USER_PI_DIR),
-    zshrc: hashTree(USER_ZSHRC),
-  };
+  // Sessions and run-history are intentionally live files owned by the parent
+  // Pi process. We prove session isolation by path below; hashing them would
+  // falsely attribute a concurrently appended parent transcript to this test.
+  // Persistent user configuration, models, packages, extensions, and linked
+  // skills are all covered, with hashTree following their symlink targets.
+  const config = createHash("sha256");
+  for (const entry of USER_PI_CONFIG_ENTRIES) config.update(`${entry}\0${hashTree(join(homedir(), ".pi", "agent", entry))}\0`);
+  return { piConfiguration: config.digest("hex"), zshrc: hashTree(USER_ZSHRC) };
 }
 
-function assertEqual(actual, expected, message) {
-  if (actual !== expected) fail(`${message}: expected ${expected}, got ${actual}`);
+class ProcessSupervisor {
+  constructor() { this.children = new Set(); }
+  add(child) { this.children.add(child); }
+  remove(child) { this.children.delete(child); }
+  async terminate(child) {
+    if (!child || child.exitCode !== null) return;
+    const pid = child.pid;
+    const signalGroup = (signal) => {
+      try {
+        if (pid && pid > 0) process.kill(-pid, signal);
+        else child.kill(signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    };
+    signalGroup("SIGTERM");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, TERMINATE_GRACE_MS));
+    // Always sweep the group: its leader can have exited while descendants
+    // inherited its process group.
+    signalGroup("SIGKILL");
+    await new Promise((resolvePromise) => {
+      if (child.exitCode !== null) resolvePromise();
+      else child.once("close", () => resolvePromise());
+    });
+  }
+  async terminateAll() {
+    await Promise.allSettled([...this.children].map((child) => this.terminate(child)));
+  }
 }
 
-function assertFile(path, label) {
-  if (!existsSync(path)) fail(`Missing ${label}: ${path}`);
-}
-
-function command(command, args, options) {
-  const { cwd, env, input, timeoutMs = 60_000, label = [command, ...args].join(" ") } = options;
+function runCommand(supervisor, executable, args, options = {}) {
+  const { cwd, env, input, timeoutMs = 60_000, label = [executable, ...args].join(" ") } = options;
+  if (!isAbsolute(executable)) fail(`${label} attempted PATH execution: ${executable}`);
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(executable, args, { cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    supervisor.add(child);
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 1500).unref();
-    }, timeoutMs);
+    let completed = false;
+    let timeout;
+    const finish = (error, result) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      supervisor.remove(child);
+      if (error) reject(error); else resolvePromise(result);
+    };
+    const abort = async (reason) => {
+      try { await supervisor.terminate(child); }
+      catch (error) { reason = new Error(`${reason.message}\ntermination failed: ${error.message}`); }
+      finish(reason);
+    };
+    timeout = setTimeout(() => { void abort(new Error(`${label} timed out\n${shortOutput(`${stdout}\n${stderr}`)}`)); }, timeoutMs);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new Error(`${label} could not start: ${error.message}`));
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error(`${label} timed out\n${shortOutput(stderr || stdout)}`));
-      } else if (code !== 0) {
-        reject(new Error(`${label} failed (exit ${code}${signal ? `, ${signal}` : ""})\n${shortOutput(`${stdout}\n${stderr}`)}`));
-      } else {
-        resolvePromise({ stdout, stderr });
-      }
+    child.once("error", (error) => { void abort(new Error(`${label} could not start: ${error.message}`)); });
+    child.once("close", (code, signal) => {
+      if (completed) return;
+      if (code !== 0) finish(new Error(`${label} failed (exit ${code}${signal ? `, ${signal}` : ""})\n${shortOutput(`${stdout}\n${stderr}`)}`));
+      else finish(undefined, { stdout, stderr });
     });
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
 }
 
-function makeIsolatedEnv(root, extra = {}) {
+function safePath(tools) {
+  return [...new Set([dirname(tools.node), dirname(tools.pi), dirname(tools.git), dirname(tools.npm), "/usr/bin", "/bin"])].join(delimiter);
+}
+function makeIsolatedEnv(root, tools, extra = {}) {
   const home = join(root, "home");
   const agent = join(root, "agent");
   const sessions = join(root, "sessions");
   const temp = join(root, "tmp");
-  for (const dir of [home, agent, sessions, temp]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const npmCache = join(root, "npm-cache");
+  const npmPrefix = join(root, "npm-prefix");
+  const emptyNpmrc = join(root, "empty-npmrc");
+  const emptyGlobalNpmrc = join(root, "empty-global-npmrc");
   const emptyGitConfig = join(root, "empty-gitconfig");
-  writeFileSync(emptyGitConfig, "", { mode: 0o600 });
-
-  // Do not spread process.env: doing so would make user Pi packages, provider
-  // credentials, or an inherited PI_SUBAGENT_EXTRA_AGENT_DIRS visible.
+  for (const directory of [home, agent, sessions, temp, npmCache, npmPrefix]) mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (const file of [emptyNpmrc, emptyGlobalNpmrc, emptyGitConfig]) writeFileSync(file, "", { mode: 0o600 });
+  // Whitelist construction blocks all inherited registry, proxy, auth-token,
+  // provider, Pi, npm, and Git environment variables. Both npm spellings are
+  // set because npm accepts lowercase config environment names cross-platform.
   const env = {
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
-    HOME: home,
-    TMPDIR: temp,
-    TEMP: temp,
-    TMP: temp,
-    CI: "1",
-    NO_COLOR: "1",
-    npm_config_loglevel: "error",
-    npm_config_update_notifier: "false",
-    npm_config_audit: "false",
-    npm_config_fund: "false",
-    PI_CODING_AGENT_DIR: agent,
-    PI_CODING_AGENT_SESSION_DIR: sessions,
-    PI_SKIP_VERSION_CHECK: "1",
-    PI_TELEMETRY: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: emptyGitConfig,
-    GIT_ASKPASS: "/usr/bin/false",
+    PATH: safePath(tools), HOME: home, TMPDIR: temp, TEMP: temp, TMP: temp,
+    CI: "1", NO_COLOR: "1", PI_CODING_AGENT_DIR: agent, PI_CODING_AGENT_SESSION_DIR: sessions,
+    PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0", GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: emptyGitConfig, GIT_ASKPASS: "/usr/bin/false",
     GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no",
+    npm_config_userconfig: emptyNpmrc, npm_config_globalconfig: emptyGlobalNpmrc,
+    NPM_CONFIG_USERCONFIG: emptyNpmrc, NPM_CONFIG_GLOBALCONFIG: emptyGlobalNpmrc,
+    npm_config_cache: npmCache, NPM_CONFIG_CACHE: npmCache,
+    npm_config_prefix: npmPrefix, NPM_CONFIG_PREFIX: npmPrefix,
+    // This harness validates production installation without allowing npm to
+    // normalize/reorder the committed lockfile under a different npm version.
+    npm_config_package_lock: "false", NPM_CONFIG_PACKAGE_LOCK: "false",
+    npm_config_loglevel: "error", npm_config_update_notifier: "false", npm_config_audit: "false", npm_config_fund: "false",
+    npm_config_proxy: "", npm_config_https_proxy: "", npm_config_noproxy: "",
+    NPM_CONFIG_PROXY: "", NPM_CONFIG_HTTPS_PROXY: "", NPM_CONFIG_NOPROXY: "",
     ...extra,
   };
-  for (const key of Object.keys(process.env)) {
-    if (PROVIDER_ENV.test(key) || key === "PI_SUBAGENT_EXTRA_AGENT_DIRS") delete env[key];
-  }
-  return { env, home, agent, sessions, temp };
+  const forbidden = Object.keys(env).filter((key) => /(?:TOKEN|AUTH|PROXY|REGISTRY|PASSWORD|CREDENTIAL)/i.test(key) && !["npm_config_proxy", "npm_config_https_proxy", "npm_config_noproxy", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "NPM_CONFIG_NOPROXY"].includes(key));
+  if (forbidden.length) fail(`isolated environment retained forbidden credential/config keys: ${forbidden.join(", ")}`);
+  return { env, home, agent, sessions, temp, emptyNpmrc, emptyGlobalNpmrc };
 }
 
-async function makeTargetRepository(root, env) {
+async function makeTargetRepository(root, isolated, tools, supervisor) {
   const target = join(root, "target-repository");
   mkdirSync(target, { recursive: true });
-  await command("git", ["init", "--quiet"], { cwd: target, env, label: "create temporary target Git repository" });
+  await runCommand(supervisor, tools.git, ["init", "--quiet"], { cwd: target, env: isolated.env, label: "create temporary target Git repository" });
   writeFileSync(join(target, "README.md"), "temporary compatibility target\n");
-  await command("git", ["add", "README.md"], { cwd: target, env, label: "stage temporary target repository" });
-  await command("git", ["-c", "user.name=compat", "-c", "user.email=compat@example.invalid", "commit", "--quiet", "-m", "initial target"], {
-    cwd: target,
-    env,
-    label: "commit temporary target repository",
-  });
+  await runCommand(supervisor, tools.git, ["add", "README.md"], { cwd: target, env: isolated.env, label: "stage temporary target repository" });
+  await runCommand(supervisor, tools.git, ["-c", "user.name=compat", "-c", "user.email=compat@example.invalid", "commit", "--quiet", "-m", "initial target"], { cwd: target, env: isolated.env, label: "commit temporary target" });
   return target;
 }
-
 function readSettings(agentDir) {
-  const settingsPath = join(agentDir, "settings.json");
-  assertFile(settingsPath, "isolated Pi settings");
-  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  const path = join(agentDir, "settings.json");
+  assertFile(path, "isolated Pi settings");
+  const settings = JSON.parse(readFileSync(path, "utf8"));
   if (Object.hasOwn(settings, "npmCommand")) fail("isolated Pi settings must omit npmCommand");
   return settings;
 }
-
-async function installSubagents(target, isolated) {
-  const result = await command("pi", ["install", "npm:pi-subagents"], {
-    cwd: target,
-    env: isolated.env,
-    timeoutMs: 120_000,
-    label: "isolated pi install npm:pi-subagents",
-  });
+async function installSubagents(target, isolated, tools, supervisor) {
+  const result = await runCommand(supervisor, tools.pi, ["install", "npm:pi-subagents"], { cwd: target, env: isolated.env, timeoutMs: 120_000, label: "isolated pi install npm:pi-subagents" });
   const settings = readSettings(isolated.agent);
-  if (!Array.isArray(settings.packages) || !settings.packages.includes("npm:pi-subagents")) {
-    fail("isolated Pi settings did not register npm:pi-subagents");
-  }
+  if (!Array.isArray(settings.packages) || !settings.packages.includes("npm:pi-subagents")) fail("isolated settings did not register npm:pi-subagents");
   const packageRoot = join(isolated.agent, "npm", "node_modules", "pi-subagents");
   assertFile(join(packageRoot, "package.json"), "isolated pi-subagents package");
   return { packageRoot, output: shortOutput(`${result.stdout}\n${result.stderr}`) };
@@ -220,331 +287,230 @@ function parseJsonLines(raw, label) {
   const messages = [];
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    try {
-      messages.push(JSON.parse(line));
-    } catch {
-      fail(`${label} emitted non-JSON RPC output: ${line}`);
-    }
+    try { messages.push(JSON.parse(line)); }
+    catch { fail(`${label} emitted non-JSON RPC output: ${line}`); }
   }
   return messages;
 }
+function writeRuntimeDiagnostic(root) {
+  const diagnostic = join(root, "runtime-registry-diagnostic.ts");
+  writeFileSync(diagnostic, [
+    "export default function runtimeRegistryDiagnostic(pi: any) {",
+    "  pi.on('session_start', async (_event: any, ctx: any) => {",
+    "    const tools = pi.getAllTools().map((tool: any) => ({ name: tool.name, sourceInfo: tool.sourceInfo }));",
+    "    const commands = pi.getCommands().map((command: any) => ({ name: command.name, sourceInfo: command.sourceInfo }));",
+    "    ctx.ui.notify(`WFPICOM_RUNTIME_REGISTRY=${JSON.stringify({ tools, commands })}`, 'info');",
+    "  });",
+    "}", "",
+  ].join("\n"), { mode: 0o600 });
+  return diagnostic;
+}
 
-function rpcOnce(target, env, request, options = {}) {
-  const { label = "Pi RPC diagnostic", executable = "pi", extraArgs = [] } = options;
+/** A one-request RPC process; no prompt/model request is sent. */
+function rpcOnce(target, env, tools, supervisor, request, options = {}) {
+  const { label = "Pi RPC diagnostic", executable = tools.pi, extraArgs = [] } = options;
+  if (!isAbsolute(executable)) fail(`${label} attempted PATH execution: ${executable}`);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executable, ["--mode", "rpc", "--no-session", "--session-dir", env.PI_CODING_AGENT_SESSION_DIR, ...extraArgs], {
-      cwd: target,
-      env: { ...env, PI_OFFLINE: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
+      cwd: target, env: { ...env, PI_OFFLINE: "1", WF_CACHE_DIAGNOSTIC: "1" }, detached: true, stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
-    let lineBuffer = "";
-    let responseSeen = false;
-    let agentTitle;
-    let stdinClosed = false;
-    let settled = false;
-    const finishInput = () => {
-      if (!stdinClosed) {
-        stdinClosed = true;
+    supervisor.add(child);
+    let stdout = ""; let stderr = ""; let lineBuffer = ""; let responseSeen = false; let settled = false;
+    let timeout;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true; clearTimeout(timeout); supervisor.remove(child);
+      if (error) reject(error); else resolvePromise(value);
+    };
+    const abort = async (error) => {
+      try { await supervisor.terminate(child); } catch (terminationError) { error = new Error(`${error.message}\ntermination failed: ${terminationError.message}`); }
+      finish(error);
+    };
+    const handleLine = (line) => {
+      if (!line.trim() || settled) return;
+      let message;
+      try { message = JSON.parse(line); } catch { void abort(new Error(`${label} emitted non-JSON RPC output: ${line}`)); return; }
+      if (message.type === "extension_error") { void abort(new Error(`${label} extension error: ${message.error ?? "unknown"}`)); return; }
+      if (message.type === "response" && message.id === request.id) {
+        if (message.success !== true) { void abort(new Error(`${label} response failed: ${JSON.stringify(message)}`)); return; }
+        responseSeen = true;
         child.stdin.end();
       }
     };
-    const rejectOnce = (error) => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGTERM");
-      reject(error);
-    };
-    const timer = setTimeout(() => rejectOnce(new Error(`${label} timed out\n${shortOutput(`${stdout}\n${stderr}`)}`)), 30_000);
-    const processLine = (line) => {
-      if (!line.trim()) return;
-      let message;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        rejectOnce(new Error(`${label} emitted non-JSON RPC output: ${line}`));
-        return;
-      }
-      if (message.type === "extension_error") {
-        rejectOnce(new Error(`${label} extension error: ${message.error ?? "unknown error"}`));
-        return;
-      }
-      if (message.type === "response" && message.id === request.id) {
-        if (message.success !== true) {
-          rejectOnce(new Error(`${label} response failed: ${JSON.stringify(message)}`));
-          return;
-        }
-        responseSeen = true;
-        finishInput();
-      }
-      if (message.type === "extension_ui_request" && message.method === "select" && typeof message.title === "string") {
-        agentTitle = message.title;
-        // `/subagents <name>` is a deterministic discovery diagnostic. Close
-        // its menu immediately; no model prompt is ever sent.
-        if (message.id) child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: message.id, result: "Done" })}\n`);
-      }
-    };
+    timeout = setTimeout(() => { void abort(new Error(`${label} timed out\n${shortOutput(`${stdout}\n${stderr}`)}`)); }, RPC_TIMEOUT_MS);
     child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      lineBuffer += text;
+      const text = chunk.toString(); stdout += text; lineBuffer += text;
       let newline;
       while ((newline = lineBuffer.indexOf("\n")) >= 0) {
-        const line = lineBuffer.slice(0, newline).replace(/\r$/, "");
-        lineBuffer = lineBuffer.slice(newline + 1);
-        processLine(line);
+        const line = lineBuffer.slice(0, newline).replace(/\r$/, ""); lineBuffer = lineBuffer.slice(newline + 1); handleLine(line);
       }
     });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => rejectOnce(new Error(`${label} could not start: ${error.message}`)));
-    child.on("close", (code) => {
-      clearTimeout(timer);
+    child.once("error", (error) => { void abort(new Error(`${label} could not start: ${error.message}`)); });
+    child.once("close", (code, signal) => {
       if (settled) return;
-      settled = true;
-      if (lineBuffer.trim()) processLine(lineBuffer);
-      if (code !== 0) {
-        reject(new Error(`${label} failed (exit ${code})\n${shortOutput(`${stdout}\n${stderr}`)}`));
-      } else if (!responseSeen) {
-        reject(new Error(`${label} did not return its RPC response\n${shortOutput(stdout)}`));
-      } else {
-        resolvePromise({ stdout, stderr, agentTitle });
-      }
+      if (lineBuffer.trim()) handleLine(lineBuffer);
+      if (settled) return;
+      if (code !== 0) finish(new Error(`${label} failed (exit ${code}${signal ? `, ${signal}` : ""})\n${shortOutput(`${stdout}\n${stderr}`)}`));
+      else if (!responseSeen) finish(new Error(`${label} did not return its RPC response\n${shortOutput(stdout)}`));
+      else finish(undefined, { stdout, stderr });
     });
     child.stdin.write(`${JSON.stringify(request)}\n`);
   });
 }
 
-function writeAgentDiagnostic(root, packageRoot) {
-  const diagnostic = join(root, "pi-subagents-discovery-diagnostic.ts");
-  writeFileSync(diagnostic, [
-    `import { discoverAgentsAll } from ${JSON.stringify(join(packageRoot, "src", "agents", "agents.ts"))};`,
-    "export default function compatibilityDiscovery(pi: any) {",
-    "  pi.on(\"session_start\", async (_event: any, ctx: any) => {",
-    "    const found = discoverAgentsAll(ctx.cwd);",
-    "    const agents = [...found.user, ...found.package].map((agent: any) => ({ name: agent.name, package: agent.packageName, source: agent.source, filePath: agent.filePath }));",
-    "    ctx.ui.notify(`WFPICOM_COMPAT_AGENTS=${JSON.stringify(agents)}`, \"info\");",
-    "  });",
-    "}",
-    "",
-  ].join("\n"), { mode: 0o600 });
-  return diagnostic;
+function notification(messages, prefix, label) {
+  const entry = messages.find((message) => message.type === "extension_ui_request" && message.method === "notify" && typeof message.message === "string" && message.message.startsWith(prefix));
+  if (!entry) fail(`${label} emitted no ${prefix} marker`);
+  return entry.message.slice(prefix.length);
 }
-
-async function assertAgentDiscovery(target, env, expectedSource, expectedRoot, packageRoot, root, executable = "pi") {
-  const diagnostic = writeAgentDiagnostic(root, packageRoot);
-  const result = await rpcOnce(target, env, { id: "agent-discovery", type: "get_state" }, {
-    label: "pi-subagents discovery diagnostic",
-    executable,
-    extraArgs: ["-e", diagnostic],
-  });
-  const notification = parseJsonLines(result.stdout, "pi-subagents discovery diagnostic")
-    .find((message) => message.type === "extension_ui_request" && message.method === "notify" && typeof message.message === "string" && message.message.startsWith("WFPICOM_COMPAT_AGENTS="));
-  if (!notification) fail("pi-subagents discovery diagnostic emitted no agent inventory");
-  const agents = JSON.parse(notification.message.slice("WFPICOM_COMPAT_AGENTS=".length));
-  const evidence = [];
-  for (const agent of EXPECTED_AGENTS) {
-    const found = agents.find((entry) => entry?.name === `pi-workflow.${agent}` && entry?.package === "pi-workflow" && entry?.source === expectedSource);
-    if (!found) fail(`pi-subagents did not discover namespaced ${agent} from ${expectedSource}`);
-    const expectedPath = join(expectedRoot, ".pi", "agents", `${agent}.md`);
-    assertEqual(resolve(found.filePath), expectedPath, `pi-subagents ${agent} discovery path`);
-    evidence.push({ agent, source: found.source, path: found.filePath });
-  }
-  return evidence;
-}
-
-async function resourceRegistry(target, env, expectedRoot, executable = "pi") {
-  const result = await rpcOnce(target, env, { id: "resource-registry", type: "get_commands" }, {
-    label: "Pi resource registry diagnostic",
-    executable,
-  });
-  const response = parseJsonLines(result.stdout, "Pi resource registry diagnostic")
-    .find((message) => message.type === "response" && message.id === "resource-registry");
+async function resourceRegistry(target, env, expectedRoot, tools, supervisor, root, executable = tools.pi) {
+  const diagnostic = writeRuntimeDiagnostic(root);
+  const result = await rpcOnce(target, env, tools, supervisor, { id: "resource-registry", type: "get_commands" }, { label: "Pi resource registry diagnostic", executable, extraArgs: ["-e", diagnostic] });
+  const messages = parseJsonLines(result.stdout, "Pi resource registry diagnostic");
+  const response = messages.find((message) => message.type === "response" && message.id === "resource-registry");
   const commands = response?.data?.commands;
   if (!Array.isArray(commands)) fail("Pi resource registry did not return commands");
+  const runtime = JSON.parse(notification(messages, "WFPICOM_RUNTIME_REGISTRY=", "Pi runtime registry"));
   const workflow = commands.find((entry) => entry?.name === "wf" && entry?.source === "extension");
   if (!workflow) fail("Pi resource registry did not register /wf");
-  const workflowPath = workflow.sourceInfo?.path ?? workflow.path;
-  assertEqual(resolve(workflowPath), join(expectedRoot, "extensions", "workflow.ts"), "/wf extension path");
+  assertEqual(resolve(workflow.sourceInfo?.path ?? workflow.path), join(expectedRoot, "extensions", "workflow.ts"), "/wf extension path");
+  const cache = commands.find((entry) => entry?.name === "wf-cache-status" && entry?.source === "extension");
+  if (!cache) fail("Pi resource registry did not register cache extension marker command");
+  assertEqual(resolve(cache.sourceInfo?.path ?? cache.path), join(expectedRoot, "extensions", "cache.ts"), "cache extension marker path");
+  notification(messages, "WF_CACHE_EXTENSION_LOADED:", "cache session hook");
   const skill = commands.find((entry) => entry?.name === "skill:bd-work" && entry?.source === "skill");
-  if (!skill) fail("Pi resource registry did not register workflow skills");
-  const skillPath = skill.sourceInfo?.path ?? skill.path;
-  if (!pathWithin(resolve(skillPath), join(expectedRoot, "skills"))) fail(`workflow skill path escaped package root: ${skillPath}`);
+  if (!skill || !pathWithin(resolve(skill.sourceInfo?.path ?? skill.path), join(expectedRoot, "skills"))) fail("Pi resource registry did not register workflow skills from package root");
+  const subagentTool = runtime.tools.find((entry) => entry?.name === "subagent");
+  if (!subagentTool) fail("isolated Pi did not load pi-subagents extension tool");
+  const subagentCommand = runtime.commands.find((entry) => entry?.name === "subagents") ?? commands.find((entry) => entry?.name === "subagents");
+  if (!subagentCommand) fail("isolated Pi did not register pi-subagents /subagents command");
+  const commandPath = subagentCommand.sourceInfo?.path;
+  if (typeof commandPath !== "string" || !commandPath.includes(`${sep}pi-subagents${sep}`)) fail("pi-subagents command was not registered from isolated pi-subagents package");
+  const subagentSkill = commands.find((entry) => entry?.name === "skill:pi-subagents" && entry?.source === "skill");
+  if (!subagentSkill) fail("isolated Pi did not register pi-subagents skill command");
   return {
-    wfExtension: workflowPath,
-    cacheExtension: join(expectedRoot, "extensions", "cache.ts"),
-    skill: skillPath,
+    wfExtension: workflow.sourceInfo?.path ?? workflow.path,
+    cacheExtension: cache.sourceInfo?.path ?? cache.path,
+    cacheHookMarker: "WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end",
+    skill: skill.sourceInfo?.path ?? skill.path,
+    piSubagents: { tool: "subagent", command: "subagents", commandPath, skill: subagentSkill.sourceInfo?.path ?? subagentSkill.path },
     commandCount: commands.length,
   };
 }
 
 function assertRootManifest(root) {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  if (manifest.name !== "pi-workflow" || !Array.isArray(manifest.keywords) || !manifest.keywords.includes("pi-package")) {
-    fail("candidate is not the pi-workflow Pi package");
-  }
+  if (manifest.name !== "pi-workflow" || !manifest.keywords?.includes("pi-package")) fail("candidate is not the pi-workflow Pi package");
   const pi = manifest.pi;
-  if (!Array.isArray(pi?.extensions) || !pi.extensions.includes("./extensions/workflow.ts") || !pi.extensions.includes("./extensions/cache.ts")) {
-    fail("candidate Pi manifest does not declare workflow/cache core extensions");
-  }
-  if (!Array.isArray(pi?.skills) || !pi.skills.includes("./skills")) fail("candidate Pi manifest does not declare core skills");
-  if (!Array.isArray(pi?.subagents?.agents) || !pi.subagents.agents.includes("./.pi/agents")) {
-    fail("candidate Pi manifest does not declare pi-subagents agents");
-  }
-  for (const file of ["extensions/workflow.ts", "extensions/cache.ts", "scripts/wfpi", "workflow.config.json"]) assertFile(join(root, file), `stable V1 resource ${file}`);
+  if (!pi?.extensions?.includes("./extensions/workflow.ts") || !pi.extensions.includes("./extensions/cache.ts")) fail("candidate Pi manifest lacks workflow/cache extension declarations");
+  if (!pi?.skills?.includes("./skills") || !pi?.subagents?.agents?.includes("./.pi/agents")) fail("candidate Pi manifest lacks skills or pi-subagents agent declarations");
+  for (const file of ["extensions/workflow.ts", "extensions/cache.ts", "scripts/wfpi", "workflow.config.json", "package-lock.json"]) assertFile(join(root, file), `stable V1 resource ${file}`);
   for (const agent of EXPECTED_AGENTS) assertFile(join(root, ".pi", "agents", `${agent}.md`), `workflow ${agent} agent`);
 }
-
-async function localSource(candidate, root) {
-  assertRootManifest(candidate);
-  const isolated = makeIsolatedEnv(root);
-  const target = await makeTargetRepository(root, isolated.env);
-  const subagents = await installSubagents(target, isolated);
-  const agentDir = join(candidate, ".pi", "agents");
-  const localEnv = { ...isolated.env, WF_AGENT_HOME: candidate };
-  const wfpi = join(candidate, "scripts", "wfpi");
-  assertFile(wfpi, "local-source wfpi launcher");
-  const registry = await resourceRegistry(target, localEnv, candidate, wfpi);
-  const agents = await assertAgentDiscovery(target, localEnv, "user", candidate, subagents.packageRoot, root, wfpi);
-  return {
-    target,
-    isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home },
-    piSubagents: subagents.packageRoot,
-    registry,
-    agents,
-    npmCommandOmitted: true,
-  };
+function packageLockDigest(root) { return createHash("sha256").update(readFileSync(join(root, "package-lock.json"))).digest("hex"); }
+function assertProductionInstall(root, lockBefore, label) {
+  assertEqual(packageLockDigest(root), lockBefore, `${label} package-lock.json must remain byte-for-byte unchanged`);
+  const typeScript = join(root, "node_modules", "typescript");
+  if (existsSync(typeScript)) fail(`${label} installed root dev dependency typescript despite --omit=dev`);
+  assertFile(join(root, "node_modules"), `${label} production node_modules`);
+  return { lockfileUnchanged: true, rootDevDependencyAbsent: true, productionInstall: true };
 }
 
-async function cloneParity(candidate, root) {
+async function localSource(candidate, root, tools, supervisor) {
   assertRootManifest(candidate);
-  const baseEnv = makeIsolatedEnv(root);
-  const candidateSha = (await command("git", ["rev-parse", "HEAD"], { cwd: candidate, env: baseEnv.env, label: "resolve candidate commit" })).stdout.trim();
+  const isolated = makeIsolatedEnv(root, tools);
+  const target = await makeTargetRepository(root, isolated, tools, supervisor);
+  const subagents = await installSubagents(target, isolated, tools, supervisor);
+  const wfpi = join(candidate, "scripts", "wfpi");
+  assertFile(wfpi, "local-source wfpi launcher");
+  // The launcher receives a validated absolute Pi executable and has no reason
+  // to fall back to PATH. This exercises its actual source mode behavior.
+  const localEnv = { ...isolated.env, WF_AGENT_HOME: candidate, WF_PI_EXECUTABLE: tools.pi };
+  const registry = await resourceRegistry(target, localEnv, candidate, tools, supervisor, root, wfpi);
+  return { target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, registry, npmCommandOmitted: !Object.hasOwn(readSettings(isolated.agent), "npmCommand") };
+}
+
+async function cloneParity(candidate, root, tools, supervisor) {
+  assertRootManifest(candidate);
+  const isolated = makeIsolatedEnv(root, tools);
+  const candidateSha = (await runCommand(supervisor, tools.git, ["rev-parse", "HEAD"], { cwd: candidate, env: isolated.env, label: "resolve candidate commit" })).stdout.trim();
   if (!/^[0-9a-f]{40}$/.test(candidateSha)) fail(`candidate commit is not a full SHA: ${candidateSha}`);
   const clone = join(root, "candidate-clone");
-  await command("git", ["clone", "--quiet", "--no-local", "--no-hardlinks", candidate, clone], {
-    cwd: root,
-    env: baseEnv.env,
-    timeoutMs: 120_000,
-    label: "clone exact candidate commit",
-  });
-  const cloneSha = (await command("git", ["rev-parse", "HEAD"], { cwd: clone, env: baseEnv.env, label: "read cloned candidate commit" })).stdout.trim();
+  await runCommand(supervisor, tools.git, ["clone", "--quiet", "--no-local", "--no-hardlinks", candidate, clone], { cwd: root, env: isolated.env, timeoutMs: 120_000, label: "clone exact candidate commit" });
+  const cloneSha = (await runCommand(supervisor, tools.git, ["rev-parse", "HEAD"], { cwd: clone, env: isolated.env, label: "read cloned candidate commit" })).stdout.trim();
   assertEqual(cloneSha, candidateSha, "clone parity commit");
-  const npm = await command("npm", ["install", "--omit=dev"], {
-    cwd: clone,
-    env: baseEnv.env,
-    timeoutMs: 180_000,
-    label: "candidate clone npm install --omit=dev",
-  });
-  assertFile(join(clone, "node_modules"), "candidate clone node_modules after omit-dev install");
-  const target = await makeTargetRepository(root, baseEnv.env);
-  const subagents = await installSubagents(target, baseEnv);
-  await command("pi", ["install", clone], {
-    cwd: target,
-    env: baseEnv.env,
-    label: "register cloned root as isolated Pi package",
-  });
-  const settings = readSettings(baseEnv.agent);
-  if (!settings.packages.some((entry) => typeof entry === "string" && entry !== "npm:pi-subagents")) {
-    fail("isolated Pi settings did not register the cloned root package");
-  }
-  const registry = await resourceRegistry(target, baseEnv.env, clone);
-  const agents = await assertAgentDiscovery(target, baseEnv.env, "package", clone, subagents.packageRoot, root);
-  return {
-    candidateSha,
-    clone,
-    target,
-    isolated: { agent: baseEnv.agent, sessions: baseEnv.sessions, home: baseEnv.home },
-    piSubagents: subagents.packageRoot,
-    npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`),
-    npmCommandOmitted: true,
-    registry,
-    agents,
-  };
+  const lockBefore = packageLockDigest(clone);
+  const npm = await runCommand(supervisor, tools.npm, ["install", "--omit=dev"], { cwd: clone, env: isolated.env, timeoutMs: 180_000, label: "candidate clone npm install --omit=dev" });
+  const production = assertProductionInstall(clone, lockBefore, "candidate clone");
+  const target = await makeTargetRepository(root, isolated, tools, supervisor);
+  const subagents = await installSubagents(target, isolated, tools, supervisor);
+  await runCommand(supervisor, tools.pi, ["install", clone], { cwd: target, env: isolated.env, timeoutMs: 120_000, label: "register cloned root as isolated Pi package" });
+  const settings = readSettings(isolated.agent);
+  if (!settings.packages.some((entry) => typeof entry === "string" && entry !== "npm:pi-subagents")) fail("isolated settings did not register cloned root package");
+  const registry = await resourceRegistry(target, isolated.env, clone, tools, supervisor, root);
+  return { candidateSha, clone, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`), npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
 }
 
 function parseGitSource(source) {
   const match = /^git:github\.com\/wiizard-chen\/workflow-agent@([0-9a-f]{40})$/.exec(source ?? "");
-  if (!match) {
-    fail("--source must be exactly git:github.com/wiizard-chen/workflow-agent@<40-lowercase-hex-sha>; SSH, credentials, and mutable refs are forbidden");
-  }
+  if (!match) fail("--source must be exactly git:github.com/wiizard-chen/workflow-agent@<40-lowercase-hex-sha>; SSH, credentials, and mutable refs are forbidden");
   return match[1];
 }
-
-async function piGitInstall(source, root) {
+async function piGitInstall(source, root, tools, supervisor) {
   const expectedSha = parseGitSource(source);
-  const isolated = makeIsolatedEnv(root);
-  const target = await makeTargetRepository(root, isolated.env);
-  const subagents = await installSubagents(target, isolated);
-  await command("pi", ["install", source], {
-    cwd: target,
-    env: isolated.env,
-    timeoutMs: 180_000,
-    label: "actual isolated Pi Git-package install",
-  });
+  const isolated = makeIsolatedEnv(root, tools);
+  const target = await makeTargetRepository(root, isolated, tools, supervisor);
+  const subagents = await installSubagents(target, isolated, tools, supervisor);
+  await runCommand(supervisor, tools.pi, ["install", source], { cwd: target, env: isolated.env, timeoutMs: 180_000, label: "actual isolated Pi Git-package install" });
   const settings = readSettings(isolated.agent);
-  if (!settings.packages.includes(source)) fail("isolated Pi settings did not retain the exact Git source");
+  if (!settings.packages.includes(source)) fail("isolated settings did not retain exact Git source");
   const installed = join(isolated.agent, "git", "github.com", "wiizard-chen", "workflow-agent");
   assertFile(join(installed, "package.json"), "Pi-installed Git package");
-  const installedSha = (await command("git", ["rev-parse", "HEAD"], { cwd: installed, env: isolated.env, label: "read Pi-installed Git package commit" })).stdout.trim();
+  const installedSha = (await runCommand(supervisor, tools.git, ["rev-parse", "HEAD"], { cwd: installed, env: isolated.env, label: "read Pi-installed Git package commit" })).stdout.trim();
   assertEqual(installedSha, expectedSha, "Pi-installed Git package commit");
-  assertFile(join(installed, "node_modules"), "Pi Git-package npm install output");
-  if (existsSync(join(installed, "node_modules", "typescript"))) {
-    fail("Pi Git-package install retained dev dependency typescript; expected npm install --omit=dev");
-  }
-  const registry = await resourceRegistry(target, isolated.env, installed);
-  const agents = await assertAgentDiscovery(target, isolated.env, "package", installed, subagents.packageRoot, root);
-  return {
-    expectedSha,
-    installed,
-    target,
-    isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home },
-    piSubagents: subagents.packageRoot,
-    npmCommandOmitted: true,
-    omitDevVerified: true,
-    registry,
-    agents,
-  };
+  const committedLock = (await runCommand(supervisor, tools.git, ["show", "HEAD:package-lock.json"], { cwd: installed, env: isolated.env, label: "read Pi Git-package committed lockfile" })).stdout;
+  const committedLockDigest = createHash("sha256").update(committedLock).digest("hex");
+  const production = assertProductionInstall(installed, committedLockDigest, "Pi Git-package install");
+  const registry = await resourceRegistry(target, isolated.env, installed, tools, supervisor, root);
+  return { expectedSha, installed, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
 }
 
+let signalCleanup;
+function removeAndAssert(root) {
+  rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  if (existsSync(root)) fail(`temporary compatibility state was not cleaned: ${root}`);
+}
 async function main() {
   const { mode, candidate: rawCandidate, source } = parseArgs(process.argv.slice(2));
   if (mode !== "pi-git-install" && !rawCandidate) fail(`--candidate is required for ${mode} mode`);
   const candidate = rawCandidate ? resolve(rawCandidate) : undefined;
-  if (candidate && !existsSync(candidate)) fail(`candidate does not exist: ${candidate}`);
-  if (candidate && !existsSync(join(candidate, ".git"))) fail(`candidate must be a Git checkout: ${candidate}`);
-
+  if (candidate && (!existsSync(candidate) || !existsSync(join(candidate, ".git")))) fail(`candidate must be an existing Git checkout: ${candidate}`);
+  const tools = resolveTools();
   const before = userConfigFingerprint();
   const root = mkdtempSync(join(tmpdir(), "workflow-agent-v2-package-compat-"));
-  let evidence;
-  let runError;
+  const supervisor = new ProcessSupervisor();
+  signalCleanup = async (signal) => {
+    try { await supervisor.terminateAll(); removeAndAssert(root); }
+    catch (error) { console.error(`package compatibility ${signal} cleanup failed: ${error.message}`); }
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  let evidence; let runError;
   try {
-    if (mode === "local-source") evidence = await localSource(candidate, root);
-    else if (mode === "clone-parity") evidence = await cloneParity(candidate, root);
-    else evidence = await piGitInstall(source, root);
+    if (mode === "local-source") evidence = await localSource(candidate, root, tools, supervisor);
+    else if (mode === "clone-parity") evidence = await cloneParity(candidate, root, tools, supervisor);
+    else evidence = await piGitInstall(source, root, tools, supervisor);
   } catch (error) {
     runError = error;
   } finally {
-    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+    await supervisor.terminateAll();
+    removeAndAssert(root);
   }
   const after = userConfigFingerprint();
-  if (before.piAgent !== after.piAgent || before.zshrc !== after.zshrc) {
-    fail(`user Pi configuration changed during isolated compatibility run: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
-  }
+  if (before.piConfiguration !== after.piConfiguration || before.zshrc !== after.zshrc) fail(`user Pi configuration changed during isolated compatibility run: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
   if (runError) throw runError;
-  if (existsSync(root)) fail(`temporary compatibility state was not cleaned: ${root}`);
-  console.log(JSON.stringify({
-    ok: true,
-    mode,
-    candidate: candidate ?? undefined,
-    source: source ?? undefined,
-    userConfig: { before, after, unchanged: true },
-    cleanup: { temporaryRoot: root, removed: true },
-    evidence,
-  }, null, 2));
+  console.log(JSON.stringify({ ok: true, mode, candidate, source, tools, userConfig: { before, after, unchanged: true, followsSymlinkTargets: true, sessionsIsolatedByPath: true }, cleanup: { temporaryRoot: root, removed: true, verifiedOnSuccessAndFailure: true }, evidence }, null, 2));
 }
-
-main().catch((error) => {
-  console.error(`package compatibility FAILED: ${error instanceof Error ? error.stack : String(error)}`);
-  process.exitCode = 1;
-});
+process.once("SIGINT", () => { if (signalCleanup) void signalCleanup("SIGINT"); });
+process.once("SIGTERM", () => { if (signalCleanup) void signalCleanup("SIGTERM"); });
+main().catch((error) => { console.error(`package compatibility FAILED: ${error instanceof Error ? error.stack : String(error)}`); process.exitCode = 1; });

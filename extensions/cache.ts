@@ -72,6 +72,23 @@ function pct(hit: number, total: number): string {
 }
 
 export default function cacheExtension(pi: ExtensionAPI): void {
+  // An opt-in marker lets hermetic no-model diagnostics prove that this exact
+  // extension was loaded and its session hook ran. Normal interactive sessions
+  // stay silent.
+  pi.on("session_start", async (_event: any, ctx: any) => {
+    cacheStats = { turns: 0, cacheRead: 0, input: 0 };
+    if (process.env.WF_CACHE_DIAGNOSTIC === "1") {
+      ctx?.ui?.notify?.("WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end", "info");
+    }
+  });
+
+  pi.registerCommand("wf-cache-status", {
+    description: "Show workflow cache extension diagnostic status",
+    handler: async (_args: string, ctx: any) => {
+      ctx?.ui?.notify?.("WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end", "info");
+    },
+  });
+
   // ── Hook A: 冻结 system prompt 里的 date(仅 DeepSeek)─────────────────────
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (!isDeepSeekModel(ctx)) return;          // glm/zai 等不动
@@ -105,8 +122,7 @@ export default function cacheExtension(pi: ExtensionAPI): void {
     }
   });
 
-  // ── session_start:重置 telemetry(新 session 重新计数)────────────────────
-  pi.on("session_start", async () => {
-    cacheStats = { turns: 0, cacheRead: 0, input: 0 };
-  });
+  // session_start is also the lifecycle hook used by the opt-in diagnostic
+  // marker above; telemetry state is reset there so a fresh session never
+  // inherits another session's counters.
 }
