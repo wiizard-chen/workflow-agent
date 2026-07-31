@@ -1,0 +1,1178 @@
+# V2 E01 — Workspace and Package Boundaries
+
+| Field | Value |
+|---|---|
+| Initiative | `workflow-agent-c2b` |
+| Epic | `workflow-agent-c2b.2` |
+| Map ID | `E01` |
+| Document version | `draft-v2` |
+| Product status | **DRAFT** |
+| Approval status | **NOT APPROVED** |
+| Engineering eligibility | **ENGINEERING INELIGIBLE** |
+| Primary repository | `workflow-agent` |
+| Delivery Units | 1 |
+| Target Active Engineering Time | `2h` |
+| Verification Profile | `standard` |
+| Approval manifest | Not created |
+| Authoritative approval hash | Not assigned |
+
+> This document is a draft product contract. It does not authorize task creation, implementation, branch creation, worktree creation, commit, push, pull request publication, or scheduling. Engineering eligibility requires explicit human approval of an exact immutable document manifest and successful Beads write/readback.
+
+## 1. Related Authority
+
+This PRD is subordinate to:
+
+- [Initiative Charter](../../INITIATIVE_CHARTER.md)
+- [Architecture RFC](../../ARCHITECTURE_RFC.md)
+- [Initial Epic Map](../../INITIAL_EPIC_MAP.md), entry E01
+
+If this PRD conflicts with an approved Initiative Charter or Architecture RFC invariant, the higher-level approved document wins and this PRD must be revised before approval.
+
+## 2. Background and Problem
+
+The current repository is a single Pi package centered on the V1 workflow implementation:
+
+```text
+workflow-agent/
+├── package.json
+├── extensions/
+├── skills/
+├── .pi/agents/
+├── scripts/
+└── test/
+```
+
+This structure works for the existing `wfpi` local-source launcher and for installation as a Pi package:
+
+```bash
+pi install git:github.com/wiizard-chen/workflow-agent --approve
+```
+
+V2 requires multiple independently compilable applications and shared libraries, including `workflowd`, `workflow-worker`, domain types, protocol contracts, and test infrastructure. Adding these directly to the existing V1 source tree without explicit package boundaries would create several risks:
+
+- V1 and V2 implementation concerns could become interleaved.
+- Daemon, Worker, domain, and protocol modules could develop circular dependencies.
+- V2 applications could accidentally depend on source-relative paths rather than stable package contracts.
+- Default repository tests could continue passing while omitting V2.
+- Introducing npm workspaces could accidentally break the root Pi package, `wfpi`, skills, or workflow-agent discovery.
+- V1 extension startup could become dependent on building or starting V2.
+
+E01 establishes the repository and package boundaries needed for later V2 Epics while preserving the current V1 product as an immediately usable Pi package.
+
+## 3. Goal
+
+Establish a V1-compatible npm monorepo structure in which:
+
+1. the repository root remains the existing `pi-workflow` Pi package;
+2. V2 applications and libraries live in explicit npm workspaces;
+3. every V2 workspace compiles and tests independently;
+4. V2 package dependencies form a strict directed acyclic graph;
+5. root quality gates cover both V1 and V2;
+6. `wfpi` and installed Pi-package usage remain functional without requiring a V2 build or a running `workflowd`.
+
+## 4. Success Outcome
+
+After E01:
+
+- existing users can continue using `wfpi` and the installed `pi-workflow` package as before;
+- contributors have stable locations for the first V2 applications and shared libraries;
+- future Epics can add behavior without redefining package boundaries;
+- accidental circular dependencies and source-relative cross-package imports are prevented;
+- one root-level quality gate validates both generations of the repository;
+- removing the E01 workspace scaffolding restores the previous V1-only repository structure without a state migration.
+
+## 5. User Stories
+
+### US-01 — Existing `wfpi` user
+
+As an existing `wfpi` user, I want the V2 workspace scaffolding to leave all current extension and agent entrypoints intact so that I can continue using `/wf`, `/plan`, and `/execute` without changing how I launch Pi.
+
+### US-02 — Installed Pi-package user
+
+As a user who installed this repository through `pi install`, I want the root package to remain a valid Pi package so that upgrading to a revision containing E01 does not remove extensions, skills, or workflow agents.
+
+### US-03 — V2 application developer
+
+As a V2 developer, I want `workflowd` and `workflow-worker` to have independent application packages so that they can later be built, tested, and started without importing each other’s private implementation.
+
+### US-04 — V2 shared-library developer
+
+As a developer implementing domain or protocol behavior, I want explicit shared package boundaries so that dependency direction is visible and circular dependencies fail during development.
+
+### US-05 — Reviewer or CI operator
+
+As a reviewer or CI operator, I want default repository quality commands to cover V1 and V2 so that a successful root test or typecheck cannot silently omit one generation.
+
+### US-06 — Maintainer reverting E01
+
+As a maintainer, I want E01 to contain no Runtime or persistent-state migration so that its scaffolding can be removed without changing V1 behavior or recovering external state.
+
+## 6. Frozen Scope
+
+### 6.1 Root package
+
+The repository root remains the existing Pi package:
+
+```text
+name = pi-workflow
+```
+
+The root package continues to own:
+
+```text
+extensions/
+skills/
+.pi/agents/
+scripts/
+test/
+workflow.config.json
+```
+
+The root `package.json` remains the authoritative Pi-package manifest and npm workspace root.
+
+### 6.2 npm workspaces
+
+The root package must declare npm workspaces covering:
+
+```text
+apps/*
+packages/*
+```
+
+E01 must use npm workspaces and the existing `package-lock.json` format. It must not introduce pnpm, Yarn, Bun, or a second lockfile.
+
+### 6.3 Required directory structure
+
+E01 creates the following structure:
+
+```text
+workflow-agent/
+├── apps/
+│   ├── workflowd/
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   └── index.ts
+│   │   └── test/
+│   └── workflow-worker/
+│       ├── package.json
+│       ├── tsconfig.json
+│       ├── src/
+│       │   └── index.ts
+│       └── test/
+├── packages/
+│   ├── v2-domain/
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   └── index.ts
+│   │   └── test/
+│   ├── v2-protocol/
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   └── index.ts
+│   │   └── test/
+│   └── v2-testkit/
+│       ├── package.json
+│       ├── tsconfig.json
+│       ├── src/
+│       │   └── index.ts
+│       └── test/
+├── tsconfig.base.json
+└── tsconfig.v2.json
+```
+
+Package-local test compilation may introduce a separate package-local test TypeScript configuration or test output directory where required. It must not weaken the production compiler settings.
+
+### 6.4 Required workspace package names
+
+| Directory | npm package name | Kind |
+|---|---|---|
+| `apps/workflowd` | `@pi-workflow/workflowd` | Application |
+| `apps/workflow-worker` | `@pi-workflow/workflow-worker` | Application |
+| `packages/v2-domain` | `@pi-workflow/v2-domain` | Shared production library |
+| `packages/v2-protocol` | `@pi-workflow/v2-protocol` | Shared production library |
+| `packages/v2-testkit` | `@pi-workflow/v2-testkit` | Test-only library |
+
+All five E01 workspace packages must use:
+
+```json
+{
+  "private": true,
+  "type": "module"
+}
+```
+
+E01 does not publish any workspace package to npm.
+
+### 6.5 Empty-package meaning
+
+“Empty” means that a workspace may contain:
+
+- a minimal typed entrypoint;
+- package metadata;
+- compiler configuration;
+- package exports;
+- a package-boundary smoke test;
+- comments that explain its intended boundary.
+
+It must not contain V2 Runtime, product, persistence, scheduling, broker, or workflow behavior.
+
+## 7. Package Boundary Contract
+
+### 7.1 Authoritative dependency direction
+
+The allowed production dependency graph is:
+
+```text
+@pi-workflow/v2-domain
+              ↑
+@pi-workflow/v2-protocol
+              ↑
+@pi-workflow/workflowd     @pi-workflow/workflow-worker
+```
+
+The diagram expresses allowed direction, not a requirement that every package immediately imports every allowed dependency.
+
+### 7.2 Domain package
+
+`@pi-workflow/v2-domain`:
+
+- must not depend on another internal V2 package;
+- must not depend on `workflowd`, `workflow-worker`, protocol, or testkit;
+- is reserved for pure domain types and functions added by later Epics;
+- contains no process, filesystem, network, database, Pi SDK, Beads, or GitHub behavior in E01.
+
+### 7.3 Protocol package
+
+`@pi-workflow/v2-protocol`:
+
+- may depend on `@pi-workflow/v2-domain`;
+- may use TypeBox when protocol schemas are implemented by later Epics;
+- must not depend on either application;
+- must not depend on `@pi-workflow/v2-testkit`;
+- contains no actual protocol schemas or transport behavior in E01.
+
+### 7.4 Application packages
+
+`@pi-workflow/workflowd` and `@pi-workflow/workflow-worker`:
+
+- may depend on domain and protocol packages;
+- must not depend on each other;
+- must not import one another through relative paths;
+- must not depend on `@pi-workflow/v2-testkit` as a production dependency;
+- must not start a daemon, Worker, Pi session, socket, or background process in E01.
+
+### 7.5 Testkit package
+
+`@pi-workflow/v2-testkit` is reserved for reusable test infrastructure such as:
+
+- temporary-directory fixtures;
+- process start/stop helpers;
+- eventually/polling assertions;
+- deterministic clock interfaces;
+- deterministic ID generators;
+- test cleanup helpers.
+
+It must not contain:
+
+- production domain decisions;
+- product state machines;
+- Runtime command handlers;
+- workflow policy;
+- application startup behavior;
+- test-only substitutes imported by production code.
+
+The testkit may depend on shared V2 packages where needed for testing. No production package may list testkit under production `dependencies`.
+
+### 7.6 Cross-workspace imports
+
+Cross-workspace imports must:
+
+- use declared npm workspace dependencies;
+- use the target package’s public `exports`;
+- resolve through the package name;
+- respect TypeScript project references.
+
+The following pattern is forbidden:
+
+```text
+../../packages/v2-domain/src/...
+```
+
+Imports of another workspace’s private source, test, build, or internal path are forbidden unless that path is explicitly part of the package’s public exports.
+
+### 7.7 Package exports
+
+Every workspace must define a public package entrypoint for its minimal scaffold.
+
+The export contract must point consumers to generated `dist` JavaScript and type declarations. Consumers must not require direct access to another workspace’s `src` directory.
+
+## 8. TypeScript and Build Contract
+
+### 8.1 Runtime target
+
+All V2 workspaces must use:
+
+- Node.js 22 or later;
+- native ECMAScript modules;
+- TypeScript target `ES2022`;
+- TypeScript `module: NodeNext`;
+- TypeScript `moduleResolution: NodeNext`;
+- `"type": "module"` in package metadata.
+
+Generated application JavaScript must be executable by Node without a bundler.
+
+### 8.2 Shared configuration
+
+A V2 shared TypeScript configuration must provide the common strict compiler baseline.
+
+The existing root `tsconfig.json` remains the V1 typecheck boundary. E01 must not silently broaden it to include V2 sources.
+
+### 8.3 Project references
+
+A root `tsconfig.v2.json` must:
+
+- reference all five V2 workspaces;
+- provide a deterministic V2 build graph;
+- reject TypeScript project-reference cycles;
+- support incremental project builds.
+
+TypeScript project references are not the authority for npm dependency policy. E01 must add a repository-owned deterministic boundary validator (for example, `scripts/validate-v2-boundaries.mjs`) that reads workspace manifests, project references, package exports, and source imports. That validator is authoritative for the allowed package DAG, undeclared dependencies, forbidden application-to-application edges, production-to-testkit edges, and relative deep imports. It must fail when npm dependency edges and TypeScript references disagree.
+
+Every V2 workspace must have an independent `tsconfig.json`. `typecheck:v2` must execute build mode from a clean V2 output state so referenced declarations are created in dependency order; it must not assume pre-existing `dist` files. `build:v2` may share that compiler operation, but script names and cleanup semantics must remain explicit.
+
+### 8.4 Source and output locations
+
+Production source belongs under:
+
+```text
+src/
+```
+
+Production build output belongs under:
+
+```text
+dist/
+```
+
+Build output must not be committed unless repository policy is explicitly changed in a later approved decision.
+
+Generated output from one workspace must not be written into another workspace.
+
+### 8.5 Declarations
+
+Shared packages must produce TypeScript declarations suitable for package consumers. Application packages must typecheck independently even if their declarations are not externally published.
+
+### 8.6 Node ESM imports
+
+Compiled output must use Node-executable ESM semantics. Source import conventions must not rely on a bundler resolving extensionless or private source imports that Node itself cannot execute.
+
+## 9. Test Contract
+
+### 9.1 V2 test framework
+
+V2 uses the Node.js built-in `node:test` runner.
+
+E01 must not introduce:
+
+- Vitest;
+- Jest;
+- Mocha;
+- a second custom general-purpose test runner.
+
+### 9.2 Test compilation
+
+TypeScript V2 tests must be compiled or otherwise executed through a deterministic Node 22-compatible mechanism. The resulting test command must run with `node --test`.
+
+A workspace test must not require a global TypeScript runtime loader that is absent from the declared repository dependencies.
+
+### 9.3 Workspace smoke tests
+
+Each V2 workspace must have a minimal smoke test that proves:
+
+- the package entrypoint can be loaded;
+- the package is recognized as native ESM;
+- public exports resolve through the package contract;
+- its independent test command exits successfully.
+
+The smoke tests must not simulate unimplemented Runtime behavior.
+
+### 9.4 V1 tests
+
+The current V1 test harness remains unchanged in purpose and coverage. E01 may wrap it in a new root script but must not migrate or rewrite it.
+
+## 10. Root Quality-Gate Contract
+
+The root package must expose the following script-level interfaces:
+
+| Command | Required meaning |
+|---|---|
+| `npm run test:v1` | Run the existing V1 test suite |
+| `npm run test:v2` | Run all V2 workspace tests |
+| `npm test` | Run V1 and V2 tests |
+| `npm run typecheck:v1` | Run the existing V1 TypeScript check |
+| `npm run typecheck:v2` | Typecheck all V2 workspaces |
+| `npm run typecheck` | Typecheck V1 and V2 |
+| `npm run build:v2` | Build all V2 workspaces using the project graph |
+| `npm run check` | Run the approved aggregate repository quality gate |
+
+The default `test` and `typecheck` commands must not omit V2.
+
+A failed V1 or V2 subcommand must cause the aggregate command to return a nonzero exit status.
+
+## 11. `wfpi` Compatibility Contract
+
+### 11.1 Paths that must remain stable
+
+E01 must not move or rename:
+
+```text
+extensions/workflow.ts
+extensions/cache.ts
+skills/
+.pi/agents/
+scripts/wfpi
+workflow.config.json
+```
+
+### 11.2 Local-source loading
+
+`scripts/wfpi` must continue to:
+
+- resolve `WF_AGENT_HOME` as the repository root;
+- load `extensions/workflow.ts`;
+- load `extensions/cache.ts`;
+- expose `.pi/agents` through `PI_SUBAGENT_EXTRA_AGENT_DIRS`;
+- preserve the caller’s current working directory as the target repository;
+- pass additional command-line arguments through to Pi.
+
+### 11.3 No V2 startup dependency
+
+V1 extension loading must not require:
+
+- running `npm run build:v2`;
+- the existence of generated V2 `dist` files;
+- starting `workflowd`;
+- starting `workflow-worker`;
+- opening a V2 SQLite database;
+- executing a V2 migration.
+
+A user must be able to use current V1 workflow behavior even when all V2 build output is absent.
+
+### 11.4 Local-source smoke environment
+
+The `wfpi` smoke test must:
+
+- create a temporary target Git repository;
+- set `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR` to temporary directories;
+- install or explicitly load `npm:pi-subagents` inside that same temporary Pi configuration before launching `wfpi`;
+- fail closed if isolated `pi-subagents` installation or loading is unavailable;
+- pass `--no-session` and a test-owned `--session-dir` where the selected Pi entrypoint supports them;
+- set `PI_SKIP_VERSION_CHECK=1` and `PI_TELEMETRY=0`;
+- avoid reading or writing the user's normal Pi settings, sessions, models, packages, or shell configuration;
+- verify extension command registration through a no-model RPC/diagnostic assertion;
+- verify `pi-subagents` consumes `PI_SUBAGENT_EXTRA_AGENT_DIRS` and discovers the namespaced agents from `.pi/agents`;
+- prove `WF_AGENT_HOME` and workflow/cache extension paths remain correct;
+- clean up all temporary state.
+
+The deterministic smoke must not send an ordinary model prompt. It must use an extension command, RPC, SDK diagnostic, or resource-discovery path that completes without provider credentials. The test must fail rather than fall back to the user's normal Pi configuration.
+
+## 12. Installed Pi-Package Compatibility Contract
+
+### 12.1 Root package identity
+
+The repository root must continue to declare:
+
+```text
+name = pi-workflow
+keyword = pi-package
+```
+
+The root `package.json` must continue to expose core Pi package resources through:
+
+- `pi.extensions` for `extensions/workflow.ts` and `extensions/cache.ts`;
+- `pi.skills` for `skills/`.
+
+The existing `pi.subagents.agents` field for `.pi/agents/` must also remain unchanged, but it is metadata consumed by the separately installed `pi-subagents` package rather than a core Pi extension/skill resource. The compatibility contract must test these two discovery layers separately and must not describe core Pi as natively discovering workflow agents.
+
+### 12.2 Child workspace isolation
+
+V2 child workspaces:
+
+- must be private;
+- must not declare Pi extensions, skills, prompts, themes, or workflow agents;
+- must not become alternative Pi package roots;
+- must not shadow the root `pi-workflow` package identity;
+- must not cause duplicate extension or agent discovery.
+
+### 12.3 Installation behavior
+
+Pi's Git-package installation path clones the repository and runs `npm install --omit=dev` when the root has `package.json`. E01 must therefore prove that exact dependency mode, not only `npm ci` in the developer checkout.
+
+The compatibility harness has two mandatory levels:
+
+1. **Candidate clone parity gate:** clone the exact candidate commit into a temporary directory, run `npm install --omit=dev`, and load that cloned root with isolated Pi configuration. This deterministic local gate runs before publish and verifies the candidate contents.
+2. **Actual Pi Git-package gate:** once the candidate commit is reachable through the test Git remote/PR branch, run `pi install git:<remote>@<candidate-sha>` with a temporary `PI_CODING_AGENT_DIR`, after first installing the required `npm:pi-subagents` package into that same temporary configuration. Assert the installed clone and resource discovery, then remove the temporary configuration.
+
+The actual Pi Git-package gate is required before E01 delivery can be accepted. External Git transfer wait time is excluded from Active Engineering Time, but failure is not skippable.
+
+The generated lockfile must be internally consistent, support `npm install --omit=dev`, and require no different package manager.
+
+### 12.4 Root package-load smoke
+
+Both the candidate clone parity gate and the actual Pi Git-package gate must use:
+
+```text
+PI_CODING_AGENT_DIR=<temporary>/agent
+PI_CODING_AGENT_SESSION_DIR=<temporary>/sessions
+PI_SKIP_VERSION_CHECK=1
+PI_TELEMETRY=0
+```
+
+They must use `--no-session`/test-owned session storage and no-model diagnostics. They must verify separately that:
+
+- core Pi discovers the workflow and cache extensions;
+- core Pi discovers workflow skills;
+- `pi-subagents`, installed in the isolated config, discovers the namespaced workflow agents through `pi.subagents.agents`;
+- V2 child workspaces register no Pi resources;
+- `/wf` command registration or an equivalent extension-registry assertion is present.
+
+A process exit code or model-generated response alone is insufficient evidence. No fallback to normal user configuration or credentials is permitted.
+
+## 13. Functional Requirements
+
+### FR-001 — Workspace discovery
+
+Running npm workspace discovery at the repository root must return exactly the five initial V2 workspaces defined by this PRD.
+
+### FR-002 — Independent package identity
+
+Each V2 workspace must have a unique approved package name, private package metadata, native ESM configuration, and a public entrypoint.
+
+### FR-003 — Independent compilation
+
+Each V2 workspace must be independently compilable using its package-local configuration and declared dependencies.
+
+### FR-004 — Aggregate V2 build
+
+The root V2 project-reference configuration must build all five workspaces in dependency order.
+
+### FR-005 — Dependency declaration
+
+Every internal package import must correspond to a declared workspace dependency and an allowed edge in the frozen dependency graph.
+
+### FR-006 — Boundary enforcement
+
+Automated validation must reject or detect:
+
+- an application importing the other application;
+- domain importing protocol;
+- production code importing testkit;
+- cross-workspace relative source imports;
+- undeclared internal workspace dependencies.
+
+### FR-007 — V2 test discovery
+
+The root V2 test command must discover and execute tests from every V2 workspace.
+
+### FR-008 — Full-repository default test
+
+The root default test command must fail if either V1 or V2 tests fail.
+
+### FR-009 — Full-repository default typecheck
+
+The root default typecheck command must fail if either V1 or V2 typechecking fails.
+
+### FR-010 — V1 package preservation
+
+The root package must remain directly loadable as the existing Pi package without a V2 build.
+
+### FR-011 — `wfpi` preservation
+
+The existing `wfpi` loading path and workflow-agent directory discovery must remain functional.
+
+### FR-012 — Lockfile consistency
+
+The repository must contain one npm lockfile representing the root package and all workspaces.
+
+### FR-013 — No runtime side effects
+
+Importing any new E01 entrypoint must not start a daemon, Worker, socket, timer, network request, database, subprocess, or persistent filesystem mutation.
+
+## 14. Non-Functional Requirements
+
+### NFR-001 — Backward compatibility
+
+E01 must not introduce an intentional breaking change to existing V1 users, commands, extensions, skills, agents, or setup instructions.
+
+### NFR-002 — Deterministic build
+
+Given the same source tree, Node version, npm lockfile, and TypeScript version, workspace discovery and build order must be deterministic.
+
+### NFR-003 — Isolation
+
+A package build or test must not write output into another workspace or the V1 source tree.
+
+### NFR-004 — Portability
+
+The workspace scaffold must support the Initiative’s initial macOS and Linux user-level execution targets.
+
+### NFR-005 — No hidden toolchain
+
+Building and testing E01 must not depend on an undeclared globally installed bundler or test framework.
+
+### NFR-006 — Auditability
+
+The root scripts and package boundaries must make it apparent whether a command covers V1, V2, or both.
+
+### NFR-007 — Bounded change surface
+
+The implementation must remain a package-structure change. Discovery of required Runtime behavior is evidence of scope expansion and must stop implementation pending PRD revision or decomposition.
+
+## 15. Explicit Non-Goals
+
+E01 does not implement or change:
+
+- V2 domain entities or state transitions;
+- command, query, or event schemas;
+- `workflowd` daemon behavior;
+- Worker lifecycle or Pi SDK sessions;
+- Unix sockets or JSON-RPC;
+- SQLite, WAL, migrations, event logs, or outboxes;
+- Artifact Store behavior;
+- Beads V2 adapters or governance Sagas;
+- scheduler, capacity, leases, fencing, Steps, or Attempts;
+- managed Git mirrors or worktrees;
+- Sandbox Runner;
+- Verification Profiles beyond declaring this Epic’s profile;
+- GitHub Broker or pull requests;
+- Document Bundle generation;
+- Dashboard or Product Session navigation;
+- release or observation adapters;
+- V1/V2 migration or cutover;
+- changes to `/wf`, `/plan`, `/execute`, or `/reload`;
+- moving existing V1 source files into workspaces;
+- migrating V1 tests to `node:test`;
+- adding a lint or formatting framework;
+- publishing workspace packages;
+- installing a user service;
+- changing user credentials or Pi global settings;
+- requiring a V2 build before V1 use.
+
+## 16. Acceptance Criteria
+
+### AC-001 — Expected workspace set
+
+From a clean checkout after `npm install`, npm reports the following workspace package identities and no unintended additional V2 workspaces:
+
+```text
+@pi-workflow/workflowd
+@pi-workflow/workflow-worker
+@pi-workflow/v2-domain
+@pi-workflow/v2-protocol
+@pi-workflow/v2-testkit
+```
+
+### AC-002 — Root Pi package identity preserved
+
+The root `package.json` still declares:
+
+- package name `pi-workflow`;
+- keyword `pi-package`;
+- core `pi.extensions` entries for workflow and cache;
+- core `pi.skills` entry for workflow skills;
+- unchanged `pi.subagents.agents` metadata for `.pi/agents/`, verified through isolated `pi-subagents` discovery rather than attributed to core Pi.
+
+### AC-003 — Stable V1 resource paths
+
+All of the following paths exist at their pre-E01 locations:
+
+```text
+extensions/workflow.ts
+extensions/cache.ts
+skills/
+.pi/agents/
+scripts/wfpi
+workflow.config.json
+```
+
+### AC-004 — Independent workspace build
+
+Each of the five workspaces can be built using its package-local configuration. Every successful build writes only to that workspace’s configured output directory.
+
+### AC-005 — Aggregate project-reference build
+
+The root V2 build command completes successfully from a clean build-output state and produces Node-executable ESM entrypoints and required declarations.
+
+### AC-006 — Native Node execution
+
+The compiled `workflowd` and `workflow-worker` scaffold entrypoints can be imported or invoked by Node 22 without a bundler or custom ESM loader and without starting persistent behavior.
+
+### AC-007 — Dependency graph enforcement
+
+Automated tests or static validation prove all of the following:
+
+- domain has no internal V2 dependency;
+- protocol does not depend on either application;
+- workflowd does not depend on workflow-worker;
+- workflow-worker does not depend on workflowd;
+- production packages do not depend on testkit;
+- no workspace imports another workspace through a relative source path.
+
+### AC-008 — Package-export resolution
+
+At least one consumer smoke test resolves each shared package through its npm package name and public exports rather than through its source directory.
+
+### AC-009 — V1 tests remain green
+
+The existing V1 test suite passes without deleting or weakening existing assertions.
+
+### AC-010 — V2 tests pass
+
+The V2 root test command executes at least one package-boundary smoke test for every V2 workspace and returns success.
+
+### AC-011 — Default tests cover both generations
+
+The root default test command invokes both the V1 and V2 test paths. An injected failure in either path causes a nonzero aggregate result.
+
+### AC-012 — Default typecheck covers both generations
+
+The root default typecheck invokes both V1 and V2 checking. An injected type error in either generation causes a nonzero aggregate result.
+
+### AC-013 — Local-source `wfpi` compatibility
+
+An isolated local-source smoke installs or explicitly loads `npm:pi-subagents` inside the temporary `PI_CODING_AGENT_DIR`, then demonstrates that `scripts/wfpi` loads workflow/cache extensions from `WF_AGENT_HOME` and that isolated `pi-subagents` consumes `PI_SUBAGENT_EXTRA_AGENT_DIRS` to discover the namespaced agents while operating on a temporary target repository.
+
+The smoke must fail closed if isolated `pi-subagents` is unavailable and must not depend on prebuilt V2 output, a running V2 daemon, a model call, or the user's global Pi packages.
+
+### AC-014 — Actual Pi Git-package compatibility
+
+Using a temporary Pi configuration, Pi installs `npm:pi-subagents` and then installs the exact candidate SHA through the supported `git:<remote>@<sha>` package path. The installed clone must have completed `npm install --omit=dev`, and deterministic no-model diagnostics must prove core extension/skill discovery plus `pi-subagents` namespaced agent discovery.
+
+### AC-015 — User environment remains unmodified
+
+Compatibility tests set temporary `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`, use `--no-session` or an explicit test session directory, and do not read or persist changes to the user's normal:
+
+```text
+~/.pi/agent/settings.json
+~/.pi/agent/models.json
+~/.pi/agent/sessions/
+~/.zshrc
+```
+
+All temporary settings, installed packages, clones, sessions, target repositories, and build artifacts are removed after the test. Falling back to user configuration is a test failure.
+
+### AC-016 — No E01 Runtime behavior
+
+Importing every new workspace entrypoint produces no persistent process, socket, timer, network request, SQLite file, Beads mutation, Git mutation, or user-home mutation.
+
+### AC-017 — Lockfile reproducibility
+
+A clean npm install using the committed lockfile succeeds, recognizes all workspaces, and does not generate a second package-manager lockfile.
+
+### AC-018 — Existing V1 typecheck remains green
+
+The pre-E01 V1 TypeScript scope continues to pass under the V1 typecheck command.
+
+### AC-019 — Diff hygiene
+
+Repository diff checks report no whitespace errors, generated build output, temporary HOME state, temporary repositories, or user-specific absolute paths.
+
+### AC-020 — Reversible scaffold
+
+Removing the five workspace directories and E01-only root workspace/build configuration restores the prior V1 package loading and test behavior without a data migration or external cleanup.
+
+## 17. Verification Contract
+
+### 17.1 Status
+
+The commands below are proposed verification inputs for the Draft PRD. They are not authoritative until the approved Document Bundle manifest freezes their exact strings, toolchain versions, environment assumptions, and expected evidence.
+
+### 17.2 Proposed deterministic gates
+
+Suggested aggregate gate:
+
+```bash
+npm ci &&
+npm run check &&
+git diff --check
+```
+
+Suggested explicit expanded gates:
+
+```bash
+npm ci
+npm run test:v1
+npm run test:v2
+npm test
+npm run typecheck:v1
+npm run typecheck:v2
+npm run typecheck
+npm run build:v2
+git diff --check
+```
+
+Suggested workspace enumeration check:
+
+```bash
+npm query .workspace
+```
+
+If the selected npm version does not provide stable `npm query` output for this purpose, the implementation may use a repository-owned deterministic Node script that reads and validates the workspace package manifests.
+
+Suggested clean-build check:
+
+```bash
+npm run clean:v2
+npm run build:v2
+```
+
+A `clean:v2` script is optional unless required to make clean-build verification deterministic. It must delete only known V2 build outputs and TypeScript build metadata.
+
+Suggested candidate-clone parity gate:
+
+```bash
+node scripts/test-v2-package-compat.mjs --candidate "$PWD" --mode clone-parity
+```
+
+The script must clone the exact candidate commit, run `npm install --omit=dev`, set isolated Pi config/session directories, and execute no-model discovery assertions.
+
+Required actual Pi Git-package gate after the candidate SHA is reachable on the test remote:
+
+```bash
+node scripts/test-v2-package-compat.mjs \
+  --mode pi-git-install \
+  --source "git:<test-remote>@<candidate-sha>"
+```
+
+The script must use Pi's `install` command in the isolated configuration, preinstall isolated `npm:pi-subagents`, and assert extension/skill/agent discovery. It must not use the developer checkout as a substitute for the installed clone.
+
+### 17.3 Required evidence
+
+The verification run must retain or report:
+
+- exact Node, npm, and TypeScript versions;
+- exact verification commands;
+- root commit SHA;
+- root package manifest hash;
+- workspace manifest hashes;
+- V1 test result;
+- V2 test result;
+- V1 typecheck result;
+- V2 typecheck/build result;
+- workspace enumeration;
+- dependency-boundary validation result;
+- local-source `wfpi` compatibility result;
+- root Pi-package discovery result;
+- diff hygiene result.
+
+### 17.4 Verification environment
+
+Compatibility smoke tests must use:
+
+- a temporary target Git repository;
+- temporary `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR` values;
+- `--no-session` or an explicit temporary session directory;
+- `PI_SKIP_VERSION_CHECK=1` and `PI_TELEMETRY=0`;
+- no model prompt and no provider credential;
+- no production repository, Beads workspace, GitHub credential, or release credential.
+
+Reading or falling back to the user's normal Pi configuration is forbidden. The candidate clone parity gate and actual Pi Git-package gate are both required; neither may be replaced by a successful process exit.
+
+### 17.5 Gate semantics
+
+- Any failed required command fails E01 verification.
+- A package-discovery assertion cannot be replaced by “Pi exited successfully.”
+- Missing Pi, Node, npm, TypeScript, or package-discovery capability blocks verification rather than being silently skipped.
+- No Agent statement may override a failed deterministic gate.
+- Any change to the final command, Node major version, package set, or package boundary after approval invalidates the prior verification evidence.
+
+## 18. Rollback and Stop Boundary
+
+E01 creates no external or persistent Runtime authority.
+
+The rollback boundary is:
+
+1. remove the new `apps/` and `packages/` workspace scaffolding;
+2. remove E01-only V2 TypeScript configuration;
+3. restore the prior root package scripts and workspace metadata;
+4. restore the prior lockfile;
+5. rerun V1 tests, V1 typecheck, local-source `wfpi` smoke, and root Pi-package load smoke.
+
+Rollback must not require:
+
+- SQLite migration reversal;
+- Beads governance compensation;
+- branch or PR cleanup outside the E01 Delivery Unit;
+- stopping a daemon;
+- deleting user data;
+- GitHub operations;
+- production credentials.
+
+Implementation must stop and request refinement if any required change would:
+
+- move an existing V1 resource path;
+- alter V1 command behavior;
+- require V2 Runtime behavior;
+- require a second package manager;
+- require a cross-package cycle;
+- make V1 startup depend on V2 build output;
+- exceed the bounded Epic budget without credible decomposition.
+
+## 19. Risks and Mitigations
+
+### R-001 — npm workspaces alter Pi Git-package installation
+
+**Risk:** Pi runs `npm install` after cloning Git packages. Workspace configuration or package scripts could make installation fail.
+
+**Mitigation:**
+
+- retain a valid root package;
+- use npm workspaces only;
+- keep all child packages private;
+- validate clean installation in an isolated clone or equivalent package-load fixture;
+- keep installation free from V2 Runtime startup scripts.
+
+### R-002 — Root package stops being recognized as a Pi package
+
+**Risk:** workspace restructuring could accidentally remove or relocate the root `pi` manifest.
+
+**Mitigation:**
+
+- freeze root package identity and Pi resources in this PRD;
+- add manifest assertions;
+- add root package-discovery smoke;
+- prohibit Pi manifests in child workspaces.
+
+### R-003 — `wfpi` resolves the wrong root
+
+**Risk:** future directory movement could break `WF_AGENT_HOME` and extension discovery.
+
+**Mitigation:**
+
+- do not move `scripts/wfpi` or V1 resources;
+- test explicit and script-relative `WF_AGENT_HOME` behavior;
+- execute the smoke from a separate temporary target repository.
+
+### R-004 — Root tests appear green while omitting V2
+
+**Risk:** developers continue using `npm test`, but it only runs V1.
+
+**Mitigation:**
+
+- redefine the default test and typecheck commands as aggregate gates;
+- retain explicit V1/V2 subcommands;
+- test aggregate failure propagation.
+
+### R-005 — TypeScript project references create undeclared build ordering
+
+**Risk:** packages compile only because stale `dist` or build metadata exists.
+
+**Mitigation:**
+
+- run clean-build verification;
+- declare workspace dependencies and project references consistently;
+- validate from a clean checkout or clean output state.
+
+### R-006 — Cross-package relative imports bypass exports
+
+**Risk:** future code imports another workspace’s `src` directly.
+
+**Mitigation:**
+
+- add deterministic boundary validation;
+- expose minimal package exports from E01;
+- reject relative imports that leave a workspace root.
+
+### R-007 — NodeNext configuration breaks existing V1 TypeScript
+
+**Risk:** changing the root compiler mode could unintentionally apply NodeNext rules to V1.
+
+**Mitigation:**
+
+- preserve the existing root V1 `tsconfig.json`;
+- put V2 NodeNext settings in a separate shared V2 configuration;
+- run V1 typecheck unchanged in purpose.
+
+### R-008 — Compatibility smoke depends on external model availability
+
+**Risk:** a model-backed `--print` smoke may fail for unrelated provider reasons.
+
+**Mitigation:**
+
+- prefer Pi diagnostics, RPC, or resource-discovery APIs;
+- separate package/extension discovery evidence from optional model-response evidence;
+- fail visibly if the required supported diagnostic capability is unavailable rather than claiming compatibility without evidence.
+
+### R-009 — E01 expands into Runtime implementation
+
+**Risk:** creating application packages invites implementation of daemon or Worker behavior.
+
+**Mitigation:**
+
+- restrict entrypoints to no-side-effect scaffolds;
+- enforce import side-effect tests;
+- stop at the first need for persistence, transport, session, or lifecycle behavior.
+
+### R-010 — Active Engineering Time exceeds the target
+
+**Risk:** isolated Pi-package compatibility automation may require more work than the package scaffold.
+
+**Mitigation and feasibility result:**
+
+A read-only repository and Pi implementation inspection was completed before approval:
+
+- `scripts/wfpi` resolves root-relative extension and agent paths directly;
+- the root Pi manifest can remain unchanged while npm workspaces are added;
+- Pi provides `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR` for isolation;
+- Pi's Git package path is confirmed to clone and run `npm install --omit=dev`;
+- core Pi resources and `pi-subagents` agent discovery can be asserted without implementing V2 Runtime behavior.
+
+The approved estimate is `2h` Active Engineering Time, allocated as:
+
+| Work item | Budget |
+|---|---:|
+| T1 root workspace/TypeScript orchestration | 25m |
+| T2 five package scaffolds | 25m |
+| T3 build/test/boundary validator | 30m |
+| T4 isolated clone and Pi Git-package compatibility harness | 30m |
+| T5 clean verification and documentation | 10m |
+| **Total** | **120m** |
+
+Queue, remote transfer, package installation wait, and reviewer wait are excluded, as defined by the Charter. If implementation evidence shows the active work cannot remain within `2h`, stop with `NEEDS_REFINEMENT`; if it credibly exceeds `4h`, return `MUST_DECOMPOSE`. Compatibility acceptance may not be weakened to preserve the estimate.
+
+## 20. Readiness Self-Check
+
+This section is a draft self-assessment, not the authoritative E58 Readiness artifact.
+
+| Readiness criterion | Draft result | Evidence |
+|---|---|---|
+| One primary result | Pass | Establish V2 package boundaries while preserving V1 package behavior |
+| One primary repository | Pass | `workflow-agent` |
+| One Delivery Unit | Pass | One root workspace/configuration change and one PR |
+| Independent acceptance boundary | Pass | Workspace build plus explicit V1/Pi-package compatibility gates |
+| Independent rollback boundary | Pass | Remove scaffold and restore root configuration/lockfile |
+| Explicit non-goals | Pass | Runtime, domain, protocol, daemon, Worker, and V1 behavior changes excluded |
+| Target Active Engineering Time | Pass | Read-only feasibility completed; frozen at `2h` with task-level allocation |
+| Estimated maximum | Pass | No Runtime behavior or external adapter implementation; stop at `2h` overrun signal and decompose before `4h` |
+| Task count target | Pass | Five tracer-bullet tasks proposed |
+| Verification Profile | Pass | `standard`, with mandatory compatibility smokes |
+| Credential requirement | Pass | No production credential is required |
+| Production effect | Pass | None |
+| Human approval | Missing | Draft has not been explicitly approved |
+| Immutable manifest | Missing | Approval manifest and hash have not been generated |
+| Beads approval readback | Missing | Epic remains engineering-ineligible |
+
+Draft readiness conclusion:
+
+```text
+NEEDS_HUMAN_APPROVAL
+ENGINEERING INELIGIBLE
+```
+
+The technical feasibility review is complete and the scope is bounded at `2h`. The only missing readiness inputs are exact human approval, immutable manifest binding, and Beads approval readback.
+
+## 21. Suggested Tracer-Bullet Tasks
+
+These entries are input to a later approved split. They do not create Beads tasks and do not authorize implementation.
+
+### T1 — Root npm workspace and TypeScript orchestration
+
+- add `apps/*` and `packages/*` workspaces;
+- preserve the root Pi manifest;
+- add the shared V2 TypeScript configuration;
+- add the root V2 project-reference graph;
+- preserve the V1 TypeScript boundary.
+
+### T2 — Scaffold five private V2 workspace packages
+
+- create the two application and three library packages;
+- add private native-ESM package metadata;
+- add minimal source entrypoints;
+- add package exports and declaration output;
+- encode declared workspace dependencies.
+
+### T3 — Add V2 build, test, and authoritative boundary validation
+
+- add package-local build/typecheck/test scripts;
+- add Node `node:test` smoke coverage;
+- add root V1/V2 aggregate commands;
+- implement the deterministic manifest/reference/import boundary validator;
+- make `typecheck:v2` build referenced declarations from a clean state.
+
+### T4 — Add isolated clone and actual Pi Git-package compatibility smoke
+
+- create temporary Pi config/session directories and target repository;
+- install/load `npm:pi-subagents` inside the isolated config for every local-source or installed-package agent assertion;
+- assert the `WF_AGENT_HOME` local-source path and namespaced agent discovery without a model call;
+- clone the candidate and run `npm install --omit=dev` parity gate;
+- install the exact candidate SHA through Pi's Git-package path once reachable;
+- assert core extensions/skills and separately assert isolated `pi-subagents` namespaced workflow-agent discovery.
+
+### T5 — Run clean-install verification and document package boundaries
+
+- regenerate and validate the npm lockfile;
+- run all frozen quality gates from a clean state;
+- verify no generated or temporary files leak into the diff;
+- document the V2 package DAG and V1 compatibility boundary;
+- produce verification evidence for review.
+
+## 22. Open Questions
+
+None.
+
+The following are approval-time bindings rather than unresolved product questions:
+
+- exact approved document hash;
+- exact Verification Contract command string and test Git remote;
+- exact Node/npm/TypeScript versions captured in the approval manifest;
+- Beads approval marker and readback evidence.
+
+## 23. User Approval
+
+### Current status
+
+```text
+DRAFT
+NOT APPROVED
+ENGINEERING INELIGIBLE
+```
+
+Approval must bind all of the following:
+
+- this exact Markdown content;
+- rendered approval HTML, if used;
+- Document Bundle manifest;
+- renderer version;
+- Verification Contract;
+- package and directory boundary;
+- V1/`wfpi` compatibility contract;
+- Active Engineering Time and exception state;
+- Beads Epic `workflow-agent-c2b.2`.
+
+### Approval checklist
+
+- [ ] I reviewed the exact E01 PRD content.
+- [ ] I approve the `apps/* + packages/*` workspace structure.
+- [ ] I approve the five private workspace package identities.
+- [ ] I approve the Node 22 native ESM and TypeScript project-reference contract.
+- [ ] I approve the strict package dependency DAG.
+- [ ] I approve making default root test/typecheck commands cover V1 and V2.
+- [ ] I approve the frozen `wfpi` and installed Pi-package compatibility requirements.
+- [ ] I approve the explicit non-goals and stop boundary.
+- [ ] I approve the final frozen Verification Contract.
+- [ ] I authorize E01 to become engineering-eligible only after manifest creation and Beads write/readback.
+
+| Approval field | Value |
+|---|---|
+| Human approver | Pending |
+| Decision | Pending |
+| Approval timestamp | Pending |
+| Document manifest ID | Pending |
+| Markdown SHA-256 | Pending |
+| Rendered HTML SHA-256 | Pending |
+| Verification Contract hash | Pending |
+| Beads operation marker | Pending |
+| Beads readback confirmation | Pending |
