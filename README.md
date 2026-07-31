@@ -59,7 +59,7 @@ workflow/
 
 | profile | main / PRD | dev 单 task 编码 | task reviewer | final reviewer |
 |---|---|---|---|---|
-| `gpt56`（默认） | `codex2api/gpt-5.6-sol` | `codex2api/gpt-5.6-terra` | `codex2api/gpt-5.6-luna` | `codex2api/gpt-5.6-luna` |
+| `gpt56`（默认） | `codex2api/gpt-5.6-sol` | `codex2api/gpt-5.6-luna` | `codex2api/gpt-5.6-terra` | `codex2api/gpt-5.6-terra` |
 | `deepseek-glm` | `deepseek/deepseek-v4-pro` / `zai/glm-5.2` | `deepseek/deepseek-v4-flash` | `zai/glm-5.2` | `zai/glm-5.2` |
 
 builtin `researcher/scout/oracle` 继续继承 pi-subagents 自身模型配置，不属于核心 profile 的权威 agent 链。

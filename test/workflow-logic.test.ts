@@ -839,25 +839,25 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   const cfgRaw = fs.readFileSync(new URL("../workflow.config.json", import.meta.url), "utf8");
   check("workflow.config.json is valid JSON", (() => { try { JSON.parse(cfgRaw); return true; } catch { return false; } })());
   const parsed = JSON.parse(cfgRaw);
-  check("gpt56 profile maps Sol/Terra/Luna roles and confirmed efforts", parsed.activeModelProfile === "gpt56"
+  check("gpt56 profile maps Sol/Luna/Terra roles and confirmed efforts", parsed.activeModelProfile === "gpt56"
     && parsed.modelProfiles?.gpt56?.main?.model === "codex2api/gpt-5.6-sol" && parsed.modelProfiles?.gpt56?.main?.effort === "xhigh"
     && parsed.modelProfiles?.gpt56?.prd?.model === "codex2api/gpt-5.6-sol" && parsed.modelProfiles?.gpt56?.prd?.effort === "high"
-    && parsed.modelProfiles?.gpt56?.dev?.model === "codex2api/gpt-5.6-terra" && parsed.modelProfiles?.gpt56?.dev?.effort === "high"
-    && parsed.modelProfiles?.gpt56?.reviewer?.model === "codex2api/gpt-5.6-luna" && parsed.modelProfiles?.gpt56?.reviewer?.effort === "xhigh"
-    && parsed.modelProfiles?.gpt56?.finalReviewer?.model === "codex2api/gpt-5.6-luna" && parsed.modelProfiles?.gpt56?.finalReviewer?.effort === "xhigh");
+    && parsed.modelProfiles?.gpt56?.dev?.model === "codex2api/gpt-5.6-luna" && parsed.modelProfiles?.gpt56?.dev?.effort === "high"
+    && parsed.modelProfiles?.gpt56?.reviewer?.model === "codex2api/gpt-5.6-terra" && parsed.modelProfiles?.gpt56?.reviewer?.effort === "xhigh"
+    && parsed.modelProfiles?.gpt56?.finalReviewer?.model === "codex2api/gpt-5.6-terra" && parsed.modelProfiles?.gpt56?.finalReviewer?.effort === "xhigh");
   check("legacy DeepSeek/GLM profile remains available with high effort", parsed.modelProfiles?.["deepseek-glm"]?.main?.model === "deepseek/deepseek-v4-pro"
     && parsed.modelProfiles?.["deepseek-glm"]?.dev?.model === "deepseek/deepseek-v4-flash"
     && parsed.modelProfiles?.["deepseek-glm"]?.prd?.model === "zai/glm-5.2"
     && Object.values(parsed.modelProfiles?.["deepseek-glm"] || {}).filter((entry: any) => entry?.model).every((entry: any) => entry.effort === "high"));
   const loaded = loadConfig();
-  check("runtime resolves active profile model and effort centrally", activeModelProfile(loaded).dev.model === "codex2api/gpt-5.6-terra"
+  check("runtime resolves active profile model and effort centrally", activeModelProfile(loaded).dev.model === "codex2api/gpt-5.6-luna"
     && activeModelProfile(loaded).main.effort === "xhigh"
-    && workflowAgentModel("pi-workflow.reviewer", loaded) === "codex2api/gpt-5.6-luna"
+    && workflowAgentModel("pi-workflow.reviewer", loaded) === "codex2api/gpt-5.6-terra"
     && workflowAgentEffort("pi-workflow.reviewer", loaded) === "xhigh");
   check("legacy string-form gpt56 receives confirmed role defaults", (() => {
     const profile = activeModelProfile({ ...loaded, modelProfiles: { gpt56: {
-      main: "codex2api/gpt-5.6-sol", prd: "codex2api/gpt-5.6-sol", dev: "codex2api/gpt-5.6-terra",
-      reviewer: "codex2api/gpt-5.6-luna", finalReviewer: "codex2api/gpt-5.6-luna",
+      main: "codex2api/gpt-5.6-sol", prd: "codex2api/gpt-5.6-sol", dev: "codex2api/gpt-5.6-luna",
+      reviewer: "codex2api/gpt-5.6-terra", finalReviewer: "codex2api/gpt-5.6-terra",
     } }, activeModelProfile: "gpt56" });
     return profile.main.effort === "xhigh" && profile.prd.effort === "high" && profile.dev.effort === "high"
       && profile.reviewer.effort === "xhigh" && profile.finalReviewer.effort === "xhigh";

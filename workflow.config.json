@@ -3,12 +3,12 @@
   "activeModelProfile": "gpt56",
   "modelProfiles": {
     "gpt56": {
-      "$comment": "GPT-5.6 分工:Sol 主 session/PRD,Terra 单 task 编码,Luna 代码与最终审查；main=xhigh,PRD/dev=high,审查=xhigh。",
+      "$comment": "GPT-5.6 分工:Sol 主 session/PRD,Luna 单 task 编码,Terra 代码与最终审查；main=xhigh,PRD/dev=high,审查=xhigh。",
       "main": { "model": "codex2api/gpt-5.6-sol", "effort": "xhigh" },
       "prd": { "model": "codex2api/gpt-5.6-sol", "effort": "high" },
-      "dev": { "model": "codex2api/gpt-5.6-terra", "effort": "high" },
-      "reviewer": { "model": "codex2api/gpt-5.6-luna", "effort": "xhigh" },
-      "finalReviewer": { "model": "codex2api/gpt-5.6-luna", "effort": "xhigh" }
+      "dev": { "model": "codex2api/gpt-5.6-luna", "effort": "high" },
+      "reviewer": { "model": "codex2api/gpt-5.6-terra", "effort": "xhigh" },
+      "finalReviewer": { "model": "codex2api/gpt-5.6-terra", "effort": "xhigh" }
     },
     "deepseek-glm": {
       "$comment": "原有 DeepSeek + GLM 分工,切换 activeModelProfile 即可恢复。",

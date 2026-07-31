@@ -23,9 +23,9 @@ export const DEFAULT_MODEL_PROFILES: Record<string, ModelProfile> = {
   gpt56: {
     main: { model: "codex2api/gpt-5.6-sol", effort: "xhigh" },
     prd: { model: "codex2api/gpt-5.6-sol", effort: "high" },
-    dev: { model: "codex2api/gpt-5.6-terra", effort: "high" },
-    reviewer: { model: "codex2api/gpt-5.6-luna", effort: "xhigh" },
-    finalReviewer: { model: "codex2api/gpt-5.6-luna", effort: "xhigh" },
+    dev: { model: "codex2api/gpt-5.6-luna", effort: "high" },
+    reviewer: { model: "codex2api/gpt-5.6-terra", effort: "xhigh" },
+    finalReviewer: { model: "codex2api/gpt-5.6-terra", effort: "xhigh" },
   },
   "deepseek-glm": {
     main: { model: "deepseek/deepseek-v4-pro", effort: "high" },

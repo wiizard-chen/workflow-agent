@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "documentBundleId": "workflow-agent-c2b.2-prd-v1",
+  "initiativeId": "workflow-agent-c2b",
+  "epicId": "workflow-agent-c2b.2",
+  "mapId": "E01",
+  "documentVersion": "draft-v2-approved-as-v1",
+  "approval": {
+    "status": "approved",
+    "principal": "Wzchen / Human Portfolio Governor",
+    "mode": "bootstrap-manual-chat-v1",
+    "statement": "批准 E01 PRD ccd1a1ac852d6596dafb3027fa71593e106b447abfaec1db08888d6fa7d10616   开始推进 v2",
+    "approvedAt": "2026-07-31T17:58:05Z",
+    "approvedMarkdownSha256": "ccd1a1ac852d6596dafb3027fa71593e106b447abfaec1db08888d6fa7d10616",
+    "statusSemantics": "The approved Markdown is an immutable pre-approval draft snapshot. Its DRAFT/PENDING prose records state at authoring time; this external manifest plus Beads write/readback is the approval authority and supersedes only lifecycle status, not product content.",
+    "bundleConfirmationStatus": "pending-human-confirmation"
+  },
+  "documents": {
+    "markdown": {
+      "path": "approved-prd.md",
+      "sha256": "ccd1a1ac852d6596dafb3027fa71593e106b447abfaec1db08888d6fa7d10616",
+      "mediaType": "text/markdown"
+    },
+    "html": {
+      "path": "approved-prd.html",
+      "sha256": "bba98d9dfed2a83d60925f415c886577da080e46042dd82107860463d6327da9",
+      "mediaType": "text/html"
+    },
+    "source": {
+      "path": "../PRD.md",
+      "sha256": "ccd1a1ac852d6596dafb3027fa71593e106b447abfaec1db08888d6fa7d10616",
+      "mediaType": "text/markdown"
+    }
+  },
+  "renderer": {
+    "id": "pi-workflow-bootstrap-preformatted-markdown-v1",
+    "version": 1,
+    "mode": "escaped-markdown-pre"
+  },
+  "verificationContract": {
+    "section": "PRD.md#17-verification-contract",
+    "sha256": "0ee0733417eceb71178c234cdd67c0242e87937f87780b95015e20f2f0945942",
+    "approvedCommands": [
+      "npm ci",
+      "npm run test:v1",
+      "npm run test:v2",
+      "npm test",
+      "npm run typecheck:v1",
+      "npm run typecheck:v2",
+      "npm run typecheck",
+      "npm run build:v2",
+      "node scripts/validate-v2-boundaries.mjs",
+      "node scripts/test-v2-package-compat.mjs --candidate \"$PWD\" --mode clone-parity",
+      "git diff --check"
+    ],
+    "deliveryGate": {
+      "commandTemplate": "node scripts/test-v2-package-compat.mjs --mode pi-git-install --source \"git:github.com/wiizard-chen/workflow-agent@<candidate-sha>\"",
+      "anonymousTestRemote": "https://github.com/wiizard-chen/workflow-agent.git",
+      "candidateShaAuthority": "Bound from the Delivery Unit commit and recorded in delivery evidence before the actual Pi Git-package gate; it is not an approval-time product input.",
+      "requirements": [
+        "temporary PI_CODING_AGENT_DIR and PI_CODING_AGENT_SESSION_DIR",
+        "PI_SKIP_VERSION_CHECK=1 and PI_TELEMETRY=0",
+        "temporary Pi settings must omit npmCommand so Pi uses npm install --omit=dev",
+        "GIT_TERMINAL_PROMPT=0",
+        "no SSH source, credential helper, provider credential, or user-global package fallback",
+        "install npm:pi-subagents in the same isolated configuration before agent discovery assertions"
+      ]
+    },
+    "taskStageGates": {
+      "T1": "npm run test:v1 && npm run typecheck:v1 && git diff --check",
+      "T2": "npm run test:v1 && npm run typecheck:v1 && npm run build:v2 && git diff --check",
+      "T3": "npm run test:v1 && npm run test:v2 && npm run typecheck && npm run build:v2 && node scripts/validate-v2-boundaries.mjs && git diff --check",
+      "T4": "npm run check && node scripts/test-v2-package-compat.mjs --candidate \"$PWD\" --mode clone-parity && git diff --check",
+      "T5": "npm ci && npm run check && node scripts/validate-v2-boundaries.mjs && node scripts/test-v2-package-compat.mjs --candidate \"$PWD\" --mode clone-parity && git diff --check"
+    },
+    "workflowVerifyCommand": "npm ci && npm run check && node scripts/validate-v2-boundaries.mjs && node scripts/test-v2-package-compat.mjs --candidate \"$PWD\" --mode clone-parity && git diff --check"
+  },
+  "governance": {
+    "beadsAuthority": true,
+    "requiresWriteReadback": true,
+    "engineeringEligibilityRequiresReadiness": true,
+    "note": "Bootstrap bundle used before E25 Document Bundle implementation; no production credential or runtime authority."
+  },
+  "toolchainPolicy": {
+    "node": {
+      "approvedObservedVersion": "v24.15.0",
+      "contractFloor": ">=22.19.0"
+    },
+    "npm": {
+      "approvedObservedVersion": "11.12.1",
+      "packageManager": "npm",
+      "lockfileVersion": 3
+    },
+    "typescript": {
+      "approvedObservedVersion": "5.9.3"
+    },
+    "git": {
+      "approvedObservedVersion": "2.42.1"
+    },
+    "pi": {
+      "approvedObservedVersion": "0.82.1",
+      "compatibilityFloor": "0.81.1"
+    },
+    "driftRule": "Major-version or package-install semantic drift requires readiness re-evaluation; observed patch drift is recorded in verification evidence."
+  },
+  "readinessBootstrap": {
+    "mode": "manual-bootstrap-before-E58",
+    "activeEngineeringMinutes": 120,
+    "verificationProfile": "standard",
+    "taskCount": 5,
+    "deliveryUnits": 1
+  },
+  "bootstrapExecution": {
+    "mode": "bootstrap-controlled-git-worktree-v1",
+    "reason": "E15/E16 managed mirror/worktree capability does not exist yet; bootstrap control is deterministic and limited to E01.",
+    "requirements": [
+      "Create branch v2/e01-workspace-boundaries from a recorded frozen base SHA.",
+      "Create one isolated git worktree outside the user checkout; the user checkout is never an E01 writer.",
+      "Install the exact approved bundle into the worktree and verify PRD/manifest hashes before any implementation claim.",
+      "Create a governance baseline commit containing the approved Initiative/E01 documents before Dev starts, so the implementation baseline is clean and attributable.",
+      "Run wfpi from the isolated worktree and bind E01 repo/cwd to that worktree; one Dev writer only.",
+      "The bootstrap manager may create/remove the branch/worktree and verify hashes but may not implement E01 code.",
+      "Unknown dirty state, hash drift, or branch/worktree reuse fails closed."
+    ],
+    "requiresExplicitGitCommitAuthority": true,
+    "requiresExplicitPushAuthorityForActualGitPackageGate": true,
+    "sunset": "This bootstrap mode is retired after E16 provides managed worktrees."
+  }
+}

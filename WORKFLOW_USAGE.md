@@ -479,9 +479,9 @@ workflow.config.json
 |---|---|---|
 | main | `codex2api/gpt-5.6-sol` | `xhigh` |
 | PRD writer | `codex2api/gpt-5.6-sol` | `high` |
-| dev | `codex2api/gpt-5.6-terra` | `high` |
-| task reviewer | `codex2api/gpt-5.6-luna` | `xhigh` |
-| final reviewer | `codex2api/gpt-5.6-luna` | `xhigh` |
+| dev | `codex2api/gpt-5.6-luna` | `high` |
+| task reviewer | `codex2api/gpt-5.6-terra` | `xhigh` |
+| final reviewer | `codex2api/gpt-5.6-terra` | `xhigh` |
 
 ### `deepseek-glm`
 
