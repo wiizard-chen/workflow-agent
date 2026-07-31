@@ -29,3 +29,6 @@ wt-*/
 .beads-credential-key
 .beads/proxieddb/
 .beads/interactions.jsonl
+
+# TypeScript incremental metadata
+*.tsbuildinfo

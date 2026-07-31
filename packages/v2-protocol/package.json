@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc --build tsconfig.json",
     "typecheck": "tsc --build tsconfig.json",
-    "test": "node --test"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@pi-workflow/v2-domain": "file:../v2-domain"
