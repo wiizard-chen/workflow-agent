@@ -25,10 +25,14 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const MODES = new Set(["local-source", "clone-parity", "pi-git-install"]);
 const EXPECTED_AGENTS = ["dev", "reviewer"];
-const USER_PI_CONFIG_ENTRIES = ["settings.json", "models.json", "models-store.json", "auth.json", "trust.json", "npm", "git", "extensions", "skills"];
+// This is the complete user-owned Pi state relevant to this harness. Sessions
+// are deliberately fingerprinted too: no-session must not be a claim made from
+// our temporary path; it must leave the user's real transcript tree unchanged.
+const USER_PI_CONFIG_ENTRIES = ["settings.json", "models.json", "models-store.json", "auth.json", "trust.json", "npm", "git", "extensions", "skills", "sessions"];
 const USER_ZSHRC = join(homedir(), ".zshrc");
 const TERMINATE_GRACE_MS = 1_500;
 const RPC_TIMEOUT_MS = 30_000;
@@ -141,43 +145,73 @@ function hashTree(path) {
   return hash.digest("hex");
 }
 function userConfigFingerprint() {
-  // Sessions and run-history are intentionally live files owned by the parent
-  // Pi process. We prove session isolation by path below; hashing them would
-  // falsely attribute a concurrently appended parent transcript to this test.
-  // Persistent user configuration, models, packages, extensions, and linked
-  // skills are all covered, with hashTree following their symlink targets.
+  // Follow symlinks and compare every relevant normal user Pi file, including
+  // ~/.pi/agent/sessions. This is intentionally a real before/after checksum,
+  // not an assertion based on the isolated session-dir pathname.
   const config = createHash("sha256");
-  for (const entry of USER_PI_CONFIG_ENTRIES) config.update(`${entry}\0${hashTree(join(homedir(), ".pi", "agent", entry))}\0`);
-  return { piConfiguration: config.digest("hex"), zshrc: hashTree(USER_ZSHRC) };
+  const entries = {};
+  for (const entry of USER_PI_CONFIG_ENTRIES) {
+    const digest = hashTree(join(homedir(), ".pi", "agent", entry));
+    entries[entry] = digest;
+    config.update(`${entry}\0${digest}\0`);
+  }
+  return { piConfiguration: config.digest("hex"), entries, zshrc: hashTree(USER_ZSHRC) };
+}
+function fingerprintsEqual(before, after) {
+  return before.piConfiguration === after.piConfiguration
+    && before.zshrc === after.zshrc
+    && JSON.stringify(before.entries) === JSON.stringify(after.entries);
 }
 
 class ProcessSupervisor {
-  constructor() { this.children = new Set(); }
-  add(child) { this.children.add(child); }
-  remove(child) { this.children.delete(child); }
-  async terminate(child) {
-    if (!child || child.exitCode !== null) return;
-    const pid = child.pid;
-    const signalGroup = (signal) => {
-      try {
-        if (pid && pid > 0) process.kill(-pid, signal);
-        else child.kill(signal);
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
+  constructor() { this.groups = new Set(); }
+  add(child) {
+    // detached:true gives the child a new process group whose pgid is the
+    // child pid. Keep this record after the leader exits: grandchildren may
+    // still be in that known group and must be cleaned up.
+    const group = { child, pgid: child.pid, terminating: undefined, leaderExited: false };
+    this.groups.add(group);
+    return group;
+  }
+  remove(group) { this.groups.delete(group); }
+  async terminate(group) {
+    if (!group || !group.pgid || group.pgid <= 0) return;
+    if (group.terminating) return group.terminating;
+    group.terminating = (async () => {
+      // Never use child.kill() as a fallback: after the leader has exited its
+      // pid may be reused. A negative pid only addresses the process group we
+      // created with detached:true; ESRCH means that known group is gone.
+      const signalGroup = (signal) => {
+        try {
+          process.kill(-group.pgid, signal);
+          return true;
+        } catch (error) {
+          if (error?.code === "ESRCH") return false;
+          throw error;
+        }
+      };
+      const groupWasAlive = signalGroup("SIGTERM");
+      if (groupWasAlive) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, TERMINATE_GRACE_MS));
+        // Always sweep the known group, even if its leader exited before this
+        // cleanup. A pgid is only retained until this immediate TERM→KILL
+        // sequence, avoiding a delayed signal to a recycled process group.
+        signalGroup("SIGKILL");
       }
-    };
-    signalGroup("SIGTERM");
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, TERMINATE_GRACE_MS));
-    // Always sweep the group: its leader can have exited while descendants
-    // inherited its process group.
-    signalGroup("SIGKILL");
-    await new Promise((resolvePromise) => {
-      if (child.exitCode !== null) resolvePromise();
-      else child.once("close", () => resolvePromise());
-    });
+    })();
+    try { await group.terminating; }
+    finally { this.remove(group); }
+  }
+  async leaderClosed(group) {
+    if (!group) return;
+    group.leaderExited = true;
+    // Sweep immediately while this pgid still denotes the group created by
+    // this harness; this covers leader-exit-with-descendants without keeping a
+    // stale numeric pgid around for later reuse.
+    await this.terminate(group);
   }
   async terminateAll() {
-    await Promise.allSettled([...this.children].map((child) => this.terminate(child)));
+    await Promise.allSettled([...this.groups].map((group) => this.terminate(group)));
   }
 }
 
@@ -186,7 +220,7 @@ function runCommand(supervisor, executable, args, options = {}) {
   if (!isAbsolute(executable)) fail(`${label} attempted PATH execution: ${executable}`);
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executable, args, { cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
-    supervisor.add(child);
+    const group = supervisor.add(child);
     let stdout = "";
     let stderr = "";
     let completed = false;
@@ -195,11 +229,10 @@ function runCommand(supervisor, executable, args, options = {}) {
       if (completed) return;
       completed = true;
       clearTimeout(timeout);
-      supervisor.remove(child);
       if (error) reject(error); else resolvePromise(result);
     };
     const abort = async (reason) => {
-      try { await supervisor.terminate(child); }
+      try { await supervisor.terminate(group); }
       catch (error) { reason = new Error(`${reason.message}\ntermination failed: ${error.message}`); }
       finish(reason);
     };
@@ -207,8 +240,10 @@ function runCommand(supervisor, executable, args, options = {}) {
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", (error) => { void abort(new Error(`${label} could not start: ${error.message}`)); });
-    child.once("close", (code, signal) => {
+    child.once("close", async (code, signal) => {
       if (completed) return;
+      try { await supervisor.leaderClosed(group); }
+      catch (error) { finish(new Error(`${label} cleanup failed: ${error.message}`)); return; }
       if (code !== 0) finish(new Error(`${label} failed (exit ${code}${signal ? `, ${signal}` : ""})\n${shortOutput(`${stdout}\n${stderr}`)}`));
       else finish(undefined, { stdout, stderr });
     });
@@ -292,14 +327,22 @@ function parseJsonLines(raw, label) {
   }
   return messages;
 }
-function writeRuntimeDiagnostic(root) {
+function writeRuntimeDiagnostic(root, piSubagentsRoot) {
   const diagnostic = join(root, "runtime-registry-diagnostic.ts");
+  // The discovery import is pinned to the same isolated package root whose
+  // runtime tool provenance we assert below. It cannot accidentally inspect a
+  // globally installed pi-subagents copy with the same tool name.
+  const agentsModule = pathToFileURL(join(piSubagentsRoot, "src", "agents", "agents.ts")).href;
   writeFileSync(diagnostic, [
+    `import { discoverAgentsAll } from ${JSON.stringify(agentsModule)};`,
     "export default function runtimeRegistryDiagnostic(pi: any) {",
     "  pi.on('session_start', async (_event: any, ctx: any) => {",
     "    const tools = pi.getAllTools().map((tool: any) => ({ name: tool.name, sourceInfo: tool.sourceInfo }));",
     "    const commands = pi.getCommands().map((command: any) => ({ name: command.name, sourceInfo: command.sourceInfo }));",
+    "    const discovery = discoverAgentsAll(ctx.cwd);",
+    "    const agents = [...discovery.user, ...discovery.project, ...discovery.package, ...discovery.builtin].filter((agent: any) => agent.name.startsWith('pi-workflow.')).map((agent: any) => ({ name: agent.name, source: agent.source, filePath: agent.filePath, packageName: agent.packageName, localName: agent.localName }));",
     "    ctx.ui.notify(`WFPICOM_RUNTIME_REGISTRY=${JSON.stringify({ tools, commands })}`, 'info');",
+    "    ctx.ui.notify(`WFPICOM_AGENT_DISCOVERY=${JSON.stringify(agents)}`, 'info');",
     "  });",
     "}", "",
   ].join("\n"), { mode: 0o600 });
@@ -308,22 +351,24 @@ function writeRuntimeDiagnostic(root) {
 
 /** A one-request RPC process; no prompt/model request is sent. */
 function rpcOnce(target, env, tools, supervisor, request, options = {}) {
-  const { label = "Pi RPC diagnostic", executable = tools.pi, extraArgs = [] } = options;
+  const { label = "Pi RPC diagnostic", executable = tools.pi, extraArgs = [], diagnostics = true } = options;
   if (!isAbsolute(executable)) fail(`${label} attempted PATH execution: ${executable}`);
   return new Promise((resolvePromise, reject) => {
+    const childEnv = { ...env, PI_OFFLINE: "1" };
+    if (diagnostics) childEnv.WF_CACHE_DIAGNOSTIC = "1";
     const child = spawn(executable, ["--mode", "rpc", "--no-session", "--session-dir", env.PI_CODING_AGENT_SESSION_DIR, ...extraArgs], {
-      cwd: target, env: { ...env, PI_OFFLINE: "1", WF_CACHE_DIAGNOSTIC: "1" }, detached: true, stdio: ["pipe", "pipe", "pipe"],
+      cwd: target, env: childEnv, detached: true, stdio: ["pipe", "pipe", "pipe"],
     });
-    supervisor.add(child);
+    const group = supervisor.add(child);
     let stdout = ""; let stderr = ""; let lineBuffer = ""; let responseSeen = false; let settled = false;
     let timeout;
     const finish = (error, value) => {
       if (settled) return;
-      settled = true; clearTimeout(timeout); supervisor.remove(child);
+      settled = true; clearTimeout(timeout);
       if (error) reject(error); else resolvePromise(value);
     };
     const abort = async (error) => {
-      try { await supervisor.terminate(child); } catch (terminationError) { error = new Error(`${error.message}\ntermination failed: ${terminationError.message}`); }
+      try { await supervisor.terminate(group); } catch (terminationError) { error = new Error(`${error.message}\ntermination failed: ${terminationError.message}`); }
       finish(error);
     };
     const handleLine = (line) => {
@@ -347,10 +392,12 @@ function rpcOnce(target, env, tools, supervisor, request, options = {}) {
     });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", (error) => { void abort(new Error(`${label} could not start: ${error.message}`)); });
-    child.once("close", (code, signal) => {
+    child.once("close", async (code, signal) => {
       if (settled) return;
       if (lineBuffer.trim()) handleLine(lineBuffer);
       if (settled) return;
+      try { await supervisor.leaderClosed(group); }
+      catch (error) { finish(new Error(`${label} cleanup failed: ${error.message}`)); return; }
       if (code !== 0) finish(new Error(`${label} failed (exit ${code}${signal ? `, ${signal}` : ""})\n${shortOutput(`${stdout}\n${stderr}`)}`));
       else if (!responseSeen) finish(new Error(`${label} did not return its RPC response\n${shortOutput(stdout)}`));
       else finish(undefined, { stdout, stderr });
@@ -364,8 +411,8 @@ function notification(messages, prefix, label) {
   if (!entry) fail(`${label} emitted no ${prefix} marker`);
   return entry.message.slice(prefix.length);
 }
-async function resourceRegistry(target, env, expectedRoot, tools, supervisor, root, executable = tools.pi) {
-  const diagnostic = writeRuntimeDiagnostic(root);
+async function resourceRegistry(target, env, expectedRoot, piSubagentsRoot, expectedAgentSource, tools, supervisor, root, executable = tools.pi) {
+  const diagnostic = writeRuntimeDiagnostic(root, piSubagentsRoot);
   const result = await rpcOnce(target, env, tools, supervisor, { id: "resource-registry", type: "get_commands" }, { label: "Pi resource registry diagnostic", executable, extraArgs: ["-e", diagnostic] });
   const messages = parseJsonLines(result.stdout, "Pi resource registry diagnostic");
   const response = messages.find((message) => message.type === "response" && message.id === "resource-registry");
@@ -376,25 +423,55 @@ async function resourceRegistry(target, env, expectedRoot, tools, supervisor, ro
   if (!workflow) fail("Pi resource registry did not register /wf");
   assertEqual(resolve(workflow.sourceInfo?.path ?? workflow.path), join(expectedRoot, "extensions", "workflow.ts"), "/wf extension path");
   const cache = commands.find((entry) => entry?.name === "wf-cache-status" && entry?.source === "extension");
-  if (!cache) fail("Pi resource registry did not register cache extension marker command");
+  if (!cache) fail("Pi resource registry did not register opt-in cache diagnostic command");
   assertEqual(resolve(cache.sourceInfo?.path ?? cache.path), join(expectedRoot, "extensions", "cache.ts"), "cache extension marker path");
   notification(messages, "WF_CACHE_EXTENSION_LOADED:", "cache session hook");
   const skill = commands.find((entry) => entry?.name === "skill:bd-work" && entry?.source === "skill");
   if (!skill || !pathWithin(resolve(skill.sourceInfo?.path ?? skill.path), join(expectedRoot, "skills"))) fail("Pi resource registry did not register workflow skills from package root");
+
+  // A same-named tool from an ambient/global extension is not sufficient.
+  // sourceInfo is Pi's provenance record, so require both package origin and
+  // the exact isolated pi-subagents index that installSubagents just installed.
   const subagentTool = runtime.tools.find((entry) => entry?.name === "subagent");
   if (!subagentTool) fail("isolated Pi did not load pi-subagents extension tool");
+  const subagentSource = subagentTool.sourceInfo;
+  if (!subagentSource || subagentSource.origin !== "package" || subagentSource.source !== "npm:pi-subagents") fail(`subagent tool provenance is not isolated npm:pi-subagents: ${JSON.stringify(subagentSource)}`);
+  assertEqual(resolve(subagentSource.path), join(piSubagentsRoot, "index.ts"), "isolated pi-subagents tool source path");
   const subagentCommand = runtime.commands.find((entry) => entry?.name === "subagents") ?? commands.find((entry) => entry?.name === "subagents");
   if (!subagentCommand) fail("isolated Pi did not register pi-subagents /subagents command");
   const commandPath = subagentCommand.sourceInfo?.path;
-  if (typeof commandPath !== "string" || !commandPath.includes(`${sep}pi-subagents${sep}`)) fail("pi-subagents command was not registered from isolated pi-subagents package");
+  assertEqual(resolve(commandPath ?? ""), join(piSubagentsRoot, "index.ts"), "isolated pi-subagents command source path");
   const subagentSkill = commands.find((entry) => entry?.name === "skill:pi-subagents" && entry?.source === "skill");
   if (!subagentSkill) fail("isolated Pi did not register pi-subagents skill command");
+  if (!pathWithin(resolve(subagentSkill.sourceInfo?.path ?? subagentSkill.path), join(piSubagentsRoot, "skills"))) fail("pi-subagents skill provenance is not from isolated package");
+
+  const discoveredAgents = JSON.parse(notification(messages, "WFPICOM_AGENT_DISCOVERY=", "pi-subagents agent discovery"));
+  for (const localName of EXPECTED_AGENTS) {
+    const runtimeName = `pi-workflow.${localName}`;
+    const agent = discoveredAgents.find((entry) => entry?.name === runtimeName);
+    if (!agent) fail(`pi-subagents did not discover namespaced workflow agent ${runtimeName}`);
+    assertEqual(agent.source, expectedAgentSource, `${runtimeName} discovery source`);
+    assertEqual(agent.packageName, "pi-workflow", `${runtimeName} package provenance`);
+    assertEqual(agent.localName, localName, `${runtimeName} local name`);
+    assertEqual(resolve(agent.filePath), join(expectedRoot, ".pi", "agents", `${localName}.md`), `${runtimeName} discovery path`);
+  }
+
+  // Repeat without WF_CACHE_DIAGNOSTIC. This is the targeted regression check
+  // that the production V1 registry remains untouched by this harness.
+  const normalResult = await rpcOnce(target, env, tools, supervisor, { id: "normal-v1-registry", type: "get_commands" }, { label: "Pi normal V1 registry diagnostic", executable, diagnostics: false });
+  const normalMessages = parseJsonLines(normalResult.stdout, "Pi normal V1 registry diagnostic");
+  const normalResponse = normalMessages.find((message) => message.type === "response" && message.id === "normal-v1-registry");
+  if (normalResponse?.data?.commands?.some((entry) => entry?.name === "wf-cache-status")) fail("WF_CACHE_DIAGNOSTIC-disabled V1 registry exposed wf-cache-status");
+  if (normalMessages.some((message) => message.type === "extension_ui_request" && String(message.message ?? "").startsWith("WF_CACHE_EXTENSION_LOADED:"))) fail("WF_CACHE_DIAGNOSTIC-disabled V1 registry emitted cache marker");
+
   return {
     wfExtension: workflow.sourceInfo?.path ?? workflow.path,
     cacheExtension: cache.sourceInfo?.path ?? cache.path,
     cacheHookMarker: "WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end",
+    normalV1CacheInstrumentationAbsent: true,
     skill: skill.sourceInfo?.path ?? skill.path,
-    piSubagents: { tool: "subagent", command: "subagents", commandPath, skill: subagentSkill.sourceInfo?.path ?? subagentSkill.path },
+    piSubagents: { tool: "subagent", sourceInfo: subagentSource, command: "subagents", commandPath, skill: subagentSkill.sourceInfo?.path ?? subagentSkill.path },
+    agents: discoveredAgents.filter((agent) => EXPECTED_AGENTS.some((name) => agent?.name === `pi-workflow.${name}`)),
     commandCount: commands.length,
   };
 }
@@ -409,12 +486,42 @@ function assertRootManifest(root) {
   for (const agent of EXPECTED_AGENTS) assertFile(join(root, ".pi", "agents", `${agent}.md`), `workflow ${agent} agent`);
 }
 function packageLockDigest(root) { return createHash("sha256").update(readFileSync(join(root, "package-lock.json"))).digest("hex"); }
-function assertProductionInstall(root, lockBefore, label) {
+function productionDependencyNames(root, label) {
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const names = Object.keys(manifest.devDependencies ?? {}).sort();
+  if (names.length === 0) fail(`${label} package.json has no devDependencies to verify`);
+  return names;
+}
+function assertNoResolvedDependency(tree, forbiddenNames, label) {
+  const forbidden = new Set(forbiddenNames);
+  const visit = (node, location) => {
+    if (!node || typeof node !== "object") return;
+    for (const [name, dependency] of Object.entries(node.dependencies ?? {})) {
+      if (forbidden.has(name)) fail(`${label} production npm resolution retained devDependency ${name} at ${location}`);
+      visit(dependency, `${location}>${name}`);
+    }
+  };
+  visit(tree, "root");
+}
+async function assertProductionInstall(root, lockBefore, label, tools, supervisor, env) {
   assertEqual(packageLockDigest(root), lockBefore, `${label} package-lock.json must remain byte-for-byte unchanged`);
-  const typeScript = join(root, "node_modules", "typescript");
-  if (existsSync(typeScript)) fail(`${label} installed root dev dependency typescript despite --omit=dev`);
   assertFile(join(root, "node_modules"), `${label} production node_modules`);
-  return { lockfileUnchanged: true, rootDevDependencyAbsent: true, productionInstall: true };
+  const devDependencies = productionDependencyNames(root, label);
+  for (const dependency of devDependencies) {
+    if (existsSync(join(root, "node_modules", dependency))) fail(`${label} installed root dev dependency ${dependency} despite --omit=dev`);
+  }
+  const listed = await runCommand(supervisor, tools.npm, ["ls", "--omit=dev", "--all", "--json"], { cwd: root, env, label: `${label} npm ls --omit=dev` });
+  let tree;
+  try { tree = JSON.parse(listed.stdout); }
+  catch { fail(`${label} npm ls --omit=dev emitted invalid JSON: ${shortOutput(listed.stdout)}`); }
+  assertNoResolvedDependency(tree, devDependencies, label);
+  return { lockfileUnchanged: true, productionInstall: true, devDependenciesAbsent: devDependencies, devDependenciesUnresolved: devDependencies };
+}
+
+function assertIsolatedSessionsUnused(isolated, label) {
+  const entries = readdirSync(isolated.sessions);
+  if (entries.length !== 0) fail(`${label} wrote persistent data to isolated session directory despite --no-session: ${entries.join(", ")}`);
+  return true;
 }
 
 async function localSource(candidate, root, tools, supervisor) {
@@ -427,8 +534,9 @@ async function localSource(candidate, root, tools, supervisor) {
   // The launcher receives a validated absolute Pi executable and has no reason
   // to fall back to PATH. This exercises its actual source mode behavior.
   const localEnv = { ...isolated.env, WF_AGENT_HOME: candidate, WF_PI_EXECUTABLE: tools.pi };
-  const registry = await resourceRegistry(target, localEnv, candidate, tools, supervisor, root, wfpi);
-  return { target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, registry, npmCommandOmitted: !Object.hasOwn(readSettings(isolated.agent), "npmCommand") };
+  const registry = await resourceRegistry(target, localEnv, candidate, subagents.packageRoot, "user", tools, supervisor, root, wfpi);
+  const sessionsUnused = assertIsolatedSessionsUnused(isolated, "local-source");
+  return { target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, registry, npmCommandOmitted: !Object.hasOwn(readSettings(isolated.agent), "npmCommand") };
 }
 
 async function cloneParity(candidate, root, tools, supervisor) {
@@ -442,14 +550,15 @@ async function cloneParity(candidate, root, tools, supervisor) {
   assertEqual(cloneSha, candidateSha, "clone parity commit");
   const lockBefore = packageLockDigest(clone);
   const npm = await runCommand(supervisor, tools.npm, ["install", "--omit=dev"], { cwd: clone, env: isolated.env, timeoutMs: 180_000, label: "candidate clone npm install --omit=dev" });
-  const production = assertProductionInstall(clone, lockBefore, "candidate clone");
+  const production = await assertProductionInstall(clone, lockBefore, "candidate clone", tools, supervisor, isolated.env);
   const target = await makeTargetRepository(root, isolated, tools, supervisor);
   const subagents = await installSubagents(target, isolated, tools, supervisor);
   await runCommand(supervisor, tools.pi, ["install", clone], { cwd: target, env: isolated.env, timeoutMs: 120_000, label: "register cloned root as isolated Pi package" });
   const settings = readSettings(isolated.agent);
   if (!settings.packages.some((entry) => typeof entry === "string" && entry !== "npm:pi-subagents")) fail("isolated settings did not register cloned root package");
-  const registry = await resourceRegistry(target, isolated.env, clone, tools, supervisor, root);
-  return { candidateSha, clone, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`), npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
+  const registry = await resourceRegistry(target, isolated.env, clone, subagents.packageRoot, "package", tools, supervisor, root);
+  const sessionsUnused = assertIsolatedSessionsUnused(isolated, "clone-parity");
+  return { candidateSha, clone, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`), npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
 }
 
 function parseGitSource(source) {
@@ -471,9 +580,10 @@ async function piGitInstall(source, root, tools, supervisor) {
   assertEqual(installedSha, expectedSha, "Pi-installed Git package commit");
   const committedLock = (await runCommand(supervisor, tools.git, ["show", "HEAD:package-lock.json"], { cwd: installed, env: isolated.env, label: "read Pi Git-package committed lockfile" })).stdout;
   const committedLockDigest = createHash("sha256").update(committedLock).digest("hex");
-  const production = assertProductionInstall(installed, committedLockDigest, "Pi Git-package install");
-  const registry = await resourceRegistry(target, isolated.env, installed, tools, supervisor, root);
-  return { expectedSha, installed, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, piSubagents: subagents.packageRoot, npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
+  const production = await assertProductionInstall(installed, committedLockDigest, "Pi Git-package install", tools, supervisor, isolated.env);
+  const registry = await resourceRegistry(target, isolated.env, installed, subagents.packageRoot, "package", tools, supervisor, root);
+  const sessionsUnused = assertIsolatedSessionsUnused(isolated, "pi-git-install");
+  return { expectedSha, installed, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
 }
 
 let signalCleanup;
@@ -507,9 +617,9 @@ async function main() {
     removeAndAssert(root);
   }
   const after = userConfigFingerprint();
-  if (before.piConfiguration !== after.piConfiguration || before.zshrc !== after.zshrc) fail(`user Pi configuration changed during isolated compatibility run: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+  if (!fingerprintsEqual(before, after)) fail(`user Pi configuration changed during isolated compatibility run: before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
   if (runError) throw runError;
-  console.log(JSON.stringify({ ok: true, mode, candidate, source, tools, userConfig: { before, after, unchanged: true, followsSymlinkTargets: true, sessionsIsolatedByPath: true }, cleanup: { temporaryRoot: root, removed: true, verifiedOnSuccessAndFailure: true }, evidence }, null, 2));
+  console.log(JSON.stringify({ ok: true, mode, candidate, source, tools, userConfig: { before, after, unchanged: true, followsSymlinkTargets: true, sessionsCompared: true }, cleanup: { temporaryRoot: root, removed: true, verifiedOnSuccessAndFailure: true }, evidence }, null, 2));
 }
 process.once("SIGINT", () => { if (signalCleanup) void signalCleanup("SIGINT"); });
 process.once("SIGTERM", () => { if (signalCleanup) void signalCleanup("SIGTERM"); });

@@ -72,22 +72,24 @@ function pct(hit: number, total: number): string {
 }
 
 export default function cacheExtension(pi: ExtensionAPI): void {
-  // An opt-in marker lets hermetic no-model diagnostics prove that this exact
-  // extension was loaded and its session hook ran. Normal interactive sessions
-  // stay silent.
+  // Diagnostics are strictly opt-in: normal V1 extension registration remains
+  // the original two hooks, with no additional slash command or UI marker.
+  const diagnosticsEnabled = process.env.WF_CACHE_DIAGNOSTIC === "1";
   pi.on("session_start", async (_event: any, ctx: any) => {
     cacheStats = { turns: 0, cacheRead: 0, input: 0 };
-    if (process.env.WF_CACHE_DIAGNOSTIC === "1") {
+    if (diagnosticsEnabled) {
       ctx?.ui?.notify?.("WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end", "info");
     }
   });
 
-  pi.registerCommand("wf-cache-status", {
-    description: "Show workflow cache extension diagnostic status",
-    handler: async (_args: string, ctx: any) => {
-      ctx?.ui?.notify?.("WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end", "info");
-    },
-  });
+  if (diagnosticsEnabled) {
+    pi.registerCommand("wf-cache-status", {
+      description: "Show workflow cache extension diagnostic status",
+      handler: async (_args: string, ctx: any) => {
+        ctx?.ui?.notify?.("WF_CACHE_EXTENSION_LOADED:before_agent_start,message_end", "info");
+      },
+    });
+  }
 
   // ── Hook A: 冻结 system prompt 里的 date(仅 DeepSeek)─────────────────────
   pi.on("before_agent_start", async (event: any, ctx: any) => {
