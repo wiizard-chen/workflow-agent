@@ -1,0 +1,21 @@
+{
+  "name": "@pi-workflow/workflowd",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "typecheck": "tsc --build tsconfig.json",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@pi-workflow/v2-domain": "file:../../packages/v2-domain",
+    "@pi-workflow/v2-protocol": "file:../../packages/v2-protocol"
+  }
+}

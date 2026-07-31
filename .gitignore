@@ -9,6 +9,10 @@ node_modules/
 # pi-subagents runtime artifacts (may contain prompts/transcripts/absolute paths)
 .pi-subagents/
 
+# generated V2 workspace build output
+apps/*/dist/
+packages/*/dist/
+
 # os / editor
 .DS_Store
 *.swp
