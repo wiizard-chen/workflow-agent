@@ -280,9 +280,9 @@ function makeIsolatedEnv(root, tools, extra = {}) {
     NPM_CONFIG_USERCONFIG: emptyNpmrc, NPM_CONFIG_GLOBALCONFIG: emptyGlobalNpmrc,
     npm_config_cache: npmCache, NPM_CONFIG_CACHE: npmCache,
     npm_config_prefix: npmPrefix, NPM_CONFIG_PREFIX: npmPrefix,
-    // This harness validates production installation without allowing npm to
-    // normalize/reorder the committed lockfile under a different npm version.
-    npm_config_package_lock: "false", NPM_CONFIG_PACKAGE_LOCK: "false",
+    // Keep npm's normal package-lock behavior. The isolated user/global npmrc
+    // files protect credentials and host configuration, but must never disable
+    // the candidate's committed lockfile.
     npm_config_loglevel: "error", npm_config_update_notifier: "false", npm_config_audit: "false", npm_config_fund: "false",
     npm_config_proxy: "", npm_config_https_proxy: "", npm_config_noproxy: "",
     NPM_CONFIG_PROXY: "", NPM_CONFIG_HTTPS_PROXY: "", NPM_CONFIG_NOPROXY: "",
@@ -486,6 +486,26 @@ function assertRootManifest(root) {
   for (const agent of EXPECTED_AGENTS) assertFile(join(root, ".pi", "agents", `${agent}.md`), `workflow ${agent} agent`);
 }
 function packageLockDigest(root) { return createHash("sha256").update(readFileSync(join(root, "package-lock.json"))).digest("hex"); }
+const PACKAGE_LOCK_ENV_KEYS = ["npm_config_package_lock", "NPM_CONFIG_PACKAGE_LOCK"];
+async function assertNormalPackageLock(root, label, tools, supervisor, env) {
+  // A package-lock=false environment variable makes npm silently bypass the
+  // lock. Fail before spawning npm so this regression cannot be disguised by
+  // a subsequently unchanged file hash.
+  const overrides = PACKAGE_LOCK_ENV_KEYS.filter((key) => Object.hasOwn(env, key));
+  if (overrides.length) fail(`${label} isolated npm environment must not override package-lock: ${overrides.join(", ")}`);
+  const configured = await runCommand(supervisor, tools.npm, ["config", "get", "package-lock"], { cwd: root, env, label: `${label} npm config get package-lock` });
+  assertEqual(configured.stdout.trim(), "true", `${label} npm must accept package-lock`);
+  // --package-lock-only parses the committed lock's production graph rather
+  // than consulting node_modules. This proves npm accepts the input before
+  // the normal --omit=dev install below changes the installation tree.
+  const listed = await runCommand(supervisor, tools.npm, ["ls", "--package-lock-only", "--omit=dev", "--all", "--json"], { cwd: root, env, label: `${label} npm ls --package-lock-only --omit=dev` });
+  let tree;
+  try { tree = JSON.parse(listed.stdout); }
+  catch { fail(`${label} npm lockfile production graph emitted invalid JSON: ${shortOutput(listed.stdout)}`); }
+  const devDependencies = productionDependencyNames(root, label);
+  assertNoResolvedDependency(tree, devDependencies, `${label} lockfile production graph`);
+  return { packageLockEnabled: true, lockfileProductionGraphAccepted: true, lockfileDevDependenciesUnresolved: devDependencies };
+}
 function productionDependencyNames(root, label) {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const names = Object.keys(manifest.devDependencies ?? {}).sort();
@@ -505,6 +525,7 @@ function assertNoResolvedDependency(tree, forbiddenNames, label) {
 }
 async function assertProductionInstall(root, lockBefore, label, tools, supervisor, env) {
   assertEqual(packageLockDigest(root), lockBefore, `${label} package-lock.json must remain byte-for-byte unchanged`);
+  const packageLock = await assertNormalPackageLock(root, label, tools, supervisor, env);
   assertFile(join(root, "node_modules"), `${label} production node_modules`);
   const devDependencies = productionDependencyNames(root, label);
   for (const dependency of devDependencies) {
@@ -515,7 +536,13 @@ async function assertProductionInstall(root, lockBefore, label, tools, superviso
   try { tree = JSON.parse(listed.stdout); }
   catch { fail(`${label} npm ls --omit=dev emitted invalid JSON: ${shortOutput(listed.stdout)}`); }
   assertNoResolvedDependency(tree, devDependencies, label);
-  return { lockfileUnchanged: true, productionInstall: true, devDependenciesAbsent: devDependencies, devDependenciesUnresolved: devDependencies };
+  return {
+    lockfileUnchanged: true,
+    productionInstall: true,
+    ...packageLock,
+    devDependenciesAbsent: devDependencies,
+    devDependenciesUnresolved: devDependencies,
+  };
 }
 
 function assertIsolatedSessionsUnused(isolated, label) {
@@ -549,6 +576,7 @@ async function cloneParity(candidate, root, tools, supervisor) {
   const cloneSha = (await runCommand(supervisor, tools.git, ["rev-parse", "HEAD"], { cwd: clone, env: isolated.env, label: "read cloned candidate commit" })).stdout.trim();
   assertEqual(cloneSha, candidateSha, "clone parity commit");
   const lockBefore = packageLockDigest(clone);
+  const lockfileBeforeInstall = await assertNormalPackageLock(clone, "candidate clone", tools, supervisor, isolated.env);
   const npm = await runCommand(supervisor, tools.npm, ["install", "--omit=dev"], { cwd: clone, env: isolated.env, timeoutMs: 180_000, label: "candidate clone npm install --omit=dev" });
   const production = await assertProductionInstall(clone, lockBefore, "candidate clone", tools, supervisor, isolated.env);
   const target = await makeTargetRepository(root, isolated, tools, supervisor);
@@ -558,7 +586,7 @@ async function cloneParity(candidate, root, tools, supervisor) {
   if (!settings.packages.some((entry) => typeof entry === "string" && entry !== "npm:pi-subagents")) fail("isolated settings did not register cloned root package");
   const registry = await resourceRegistry(target, isolated.env, clone, subagents.packageRoot, "package", tools, supervisor, root);
   const sessionsUnused = assertIsolatedSessionsUnused(isolated, "clone-parity");
-  return { candidateSha, clone, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`), npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
+  return { candidateSha, clone, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmInstall: shortOutput(`${npm.stdout}\n${npm.stderr}`), npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), lockfileBeforeInstall, production, registry };
 }
 
 function parseGitSource(source) {
@@ -580,10 +608,11 @@ async function piGitInstall(source, root, tools, supervisor) {
   assertEqual(installedSha, expectedSha, "Pi-installed Git package commit");
   const committedLock = (await runCommand(supervisor, tools.git, ["show", "HEAD:package-lock.json"], { cwd: installed, env: isolated.env, label: "read Pi Git-package committed lockfile" })).stdout;
   const committedLockDigest = createHash("sha256").update(committedLock).digest("hex");
+  const lockfileBeforeInstall = await assertNormalPackageLock(installed, "Pi Git-package install", tools, supervisor, isolated.env);
   const production = await assertProductionInstall(installed, committedLockDigest, "Pi Git-package install", tools, supervisor, isolated.env);
   const registry = await resourceRegistry(target, isolated.env, installed, subagents.packageRoot, "package", tools, supervisor, root);
   const sessionsUnused = assertIsolatedSessionsUnused(isolated, "pi-git-install");
-  return { expectedSha, installed, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), production, registry };
+  return { expectedSha, installed, target, isolated: { agent: isolated.agent, sessions: isolated.sessions, home: isolated.home }, sessionsUnused, piSubagents: subagents.packageRoot, npmCommandOmitted: !Object.hasOwn(settings, "npmCommand"), lockfileBeforeInstall, production, registry };
 }
 
 let signalCleanup;
