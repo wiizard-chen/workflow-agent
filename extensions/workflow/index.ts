@@ -2,7 +2,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { readRunSummary, formatUsageLine, readRepoBrief, reqPath, saveState } from "../lib.ts";
+import {
+  authoritativeArtifactDrift, commitPrdArtifacts, readRunSummary, formatUsageLine,
+  readRepoBrief, reqPath, restoreAuthoritativeArtifacts, saveState,
+} from "../lib.ts";
 import * as bd from "../bd.ts";
 import { registerWorkflowProviders } from "../providers.ts";
 import { registerManagerTools } from "./manager-tools.ts";
@@ -16,7 +19,7 @@ import {
   CONFIG, baseActiveTools, activeDevToolCallId, mgrHasSplit, mgrTasksProcessed,
   lastAssistantText, usageByModel, loadConfig, setConfig, setWorkflow,
   currentWorkflow, currentBaseActiveTools, currentActiveDevToolCallId,
-  currentManagerHasSplit, currentManagerTasksProcessed,
+  currentActiveDevClaim, currentManagerHasSplit, currentManagerTasksProcessed,
   setBaseActiveTools, setActiveDevToolCallId, setManagerSplit,
   setManagerTasksProcessed, incrementManagerTasksProcessed, setLastAssistantText,
   resetUsageByModel, trackUsage, setModeStatus, applyModeTools, readJson,
@@ -106,7 +109,9 @@ export default function workflowExtension(pi: ExtensionAPI): void {
       if (event?.toolName !== "subagent") return;
       const wf = currentWorkflow();
       const agent = String(event?.input?.agent || "");
-      if (agent === "pi-workflow.dev" && currentActiveDevToolCallId() === String(event?.toolCallId || "")) setActiveDevToolCallId(undefined);
+      const devCallMatches = agent === "pi-workflow.dev" && currentActiveDevToolCallId() === String(event?.toolCallId || "");
+      const trustedDevClaim = devCallMatches ? currentActiveDevClaim() : undefined;
+      if (devCallMatches) setActiveDevToolCallId(undefined);
       if (!wf) return;
       const result = event?.details?.results?.[0];
       const usage = result?.usage ?? event?.details?.totalChildUsage ?? event?.usage ?? null;
@@ -210,11 +215,73 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         return allowedTools.has(toolName);
       });
       const verify = agent === "pi-workflow.final-reviewer" ? readJson(reqPath(wf, "results", "verify.json")) : undefined;
-      const ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
+      let authoritativeInputsUnchanged = true;
+      let authoritativeDrift: string[] = [];
+      let authoritativeRestored: boolean | null = null;
+      let authoritativeRepairCommitSha: string | null = null;
+      let authoritativeError: string | null = null;
+      let claimTaskId: string | null = null;
+      let claimBaseline: string | null = null;
+      let claimFileNormalized: boolean | null = null;
+      if (agent === "pi-workflow.dev") {
+        const taskId = path.basename(inputOutput, ".json");
+        claimTaskId = taskId;
+        const baseline = trustedDevClaim?.taskId === taskId && trustedDevClaim.toolCallId === String(event?.toolCallId || "")
+          ? trustedDevClaim.baseline
+          : "";
+        claimBaseline = baseline || null;
+        if (!baseline) {
+          authoritativeInputsUnchanged = false;
+          authoritativeRestored = false;
+          authoritativeError = "缺少 tool_call 阶段捕获的可信 dev claim baseline,无法验证权威输入";
+        } else {
+          const beforeRestore = authoritativeArtifactDrift(wf, baseline);
+          if (!beforeRestore.ok) {
+            authoritativeInputsUnchanged = false;
+            authoritativeRestored = false;
+            authoritativeError = beforeRestore.error || "无法检查权威输入";
+          } else if (beforeRestore.paths.length > 0) {
+            authoritativeInputsUnchanged = false;
+            authoritativeDrift = beforeRestore.paths;
+            const restored = restoreAuthoritativeArtifacts(wf, baseline);
+            authoritativeRestored = restored.ok && restored.restored;
+            authoritativeRepairCommitSha = restored.repairCommitSha ?? null;
+            authoritativeError = restored.ok ? "dev 修改了冻结的 PRD/task 规格;已恢复,本次结果仍拒绝" : restored.error || "权威输入恢复失败";
+            ctx?.ui?.notify?.(
+              `dev 越权修改权威 workflow 输入,本次结果已拒绝。\n文件:\n${authoritativeDrift.join("\n")}` +
+              (authoritativeRestored ? `\n已从 claim baseline 恢复${authoritativeRepairCommitSha ? `并提交 ${authoritativeRepairCommitSha}` : ""}。` : `\n自动恢复失败:${authoritativeError}`),
+              "error",
+            );
+          }
+          // claim.json is ignored and child-writable. Normalize it only after
+          // protected-input restoration, and isolate failures so path sabotage
+          // can never skip drift repair or audit production.
+          const claimPath = reqPath(wf, "results", `${taskId}.claim.json`);
+          const priorClaim = readJson(claimPath);
+          try {
+            fs.rmSync(claimPath, { recursive: true, force: true });
+            fs.mkdirSync(path.dirname(claimPath), { recursive: true });
+            fs.writeFileSync(claimPath, JSON.stringify({
+              taskId,
+              baseline,
+              claimedAt: typeof priorClaim?.claimedAt === "string" ? priorClaim.claimedAt : null,
+              integrityRestoredAt: new Date().toISOString(),
+            }, null, 2) + "\n");
+            claimFileNormalized = true;
+          } catch (e) {
+            claimFileNormalized = false;
+            authoritativeInputsUnchanged = false;
+            const claimError = `claim runtime 文件恢复失败:${(e as Error).message}`;
+            authoritativeError = authoritativeError ? `${authoritativeError};${claimError}` : claimError;
+            ctx?.ui?.notify?.(claimError, "error");
+          }
+        }
+      }
+      let ok = !event?.isError && result?.exitCode === 0 && !result?.outputSaveError
         && exactOutput && fs.existsSync(expectedOutput) && resolvedModel === expected.model
         && resolvedEffort === expected.effort
-        && context === expectedContext && !!usage && toolsSafe;
-      fs.writeFileSync(auditPath, JSON.stringify({
+        && context === expectedContext && !!usage && toolsSafe && authoritativeInputsUnchanged;
+      const auditEnvelope = () => ({
         status: ok ? "completed" : "failed",
         agent,
         requestedModel: expected.model,
@@ -232,13 +299,34 @@ export default function workflowExtension(pi: ExtensionAPI): void {
         exactOutput,
         toolsSafe,
         toolCalls,
+        authoritativeInputsUnchanged,
+        authoritativeDrift,
+        authoritativeRestored,
+        authoritativeRepairCommitSha,
+        claimTaskId,
+        claimBaseline,
+        claimFileNormalized,
         verifyRunId: verify?.runId ?? null,
         verifySha256: agent === "pi-workflow.final-reviewer" ? sha256File(reqPath(wf, "results", "verify.json")) ?? null : null,
         exitCode: result?.exitCode ?? null,
-        error: result?.error ?? result?.outputSaveError ?? (event?.isError ? "subagent tool failed" : null),
+        error: authoritativeError ?? result?.error ?? result?.outputSaveError ?? (event?.isError ? "subagent tool failed" : null),
         completedAt: new Date().toISOString(),
-      }, null, 2) + "\n");
-    } catch (_e) { /* audit must not alter the subagent tool result */ }
+      });
+      fs.writeFileSync(auditPath, JSON.stringify(auditEnvelope(), null, 2) + "\n");
+      if (agent === "pi-workflow.prd-writer" && ok) {
+        const persisted = commitPrdArtifacts(wf);
+        if (!persisted.ok) {
+          ok = false;
+          authoritativeError = `PRD/audit Git 持久化失败:${persisted.error || "unknown error"}`;
+          fs.writeFileSync(auditPath, JSON.stringify(auditEnvelope(), null, 2) + "\n");
+          ctx?.ui?.notify?.(authoritativeError, "error");
+        } else if (persisted.committed) {
+          ctx?.ui?.notify?.(`PRD 与 prd-writer 审计已提交:${persisted.sha}`, "info");
+        }
+      }
+    } catch (e) {
+      ctx?.ui?.notify?.(`subagent 审计 hook 失败:${(e as Error).message}`, "error");
+    }
   });
 
   pi.on("agent_end", async (event: any) => {

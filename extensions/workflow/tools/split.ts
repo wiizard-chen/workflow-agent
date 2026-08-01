@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, buildRunSummary, commitArtifacts, commitSplitArtifacts,
+  emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -61,9 +62,13 @@ export function registerSplitTool(pi: ExtensionAPI): void {
       const existingTasks = bd.children(wf.repo, wf.epicId).filter((i) => i.issue_type === "task");
       const decision = splitDecision(existingTasks.map((i) => i.id), manifest, prdSha256);
       if (decision === "reuse") {
+        const persisted = commitSplitArtifacts(wf);
+        if (!persisted.ok) {
+          return { content: [{ type: "text", text: `错误:已有 task 图的规格/manifest 无法持久化到 Git:${persisted.error || "unknown error"}` }], details: {} };
+        }
         wf.subtaskIds = [...new Set([...(wf.subtaskIds || []), ...existingTasks.map((i) => i.id)])];
         saveState(wf);
-        return { content: [{ type: "text", text: `split 已完成,复用 ${existingTasks.length} 个 task:\n${existingTasks.map((i) => `${i.id} ${i.status} ${i.title}`).join("\n")}` }], details: {} };
+        return { content: [{ type: "text", text: `split 已完成,复用 ${existingTasks.length} 个 task${persisted.committed ? `;权威规格已提交 ${persisted.sha}` : ""}:\n${existingTasks.map((i) => `${i.id} ${i.status} ${i.title}`).join("\n")}` }], details: {} };
       }
       if (decision === "reject") {
         return { content: [{ type: "text", text: `错误:split state 不一致或不完整。为避免静默缺任务/重复任务,本工具拒绝继续。existingTasks=${existingTasks.length},manifestStatus=${manifest?.status || "missing"},manifest:${manifestPath}` }], details: {} };
@@ -111,11 +116,15 @@ export function registerSplitTool(pi: ExtensionAPI): void {
         }, null, 2) + "\n");
         return { content: [{ type: "text", text: `错误:split partial failure,已记录 ${created.length} 个已创建 task。拒绝自动重试以避免重复:\n${(e as Error).message}\nmanifest:${manifestPath}` }], details: {} };
       }
+      const persisted = commitSplitArtifacts(wf);
+      if (!persisted.ok) {
+        return { content: [{ type: "text", text: `错误:task 已创建,但规格/manifest 无法持久化到 Git。修复 Git 后重试 split 会复用现有 task 并再次提交:${persisted.error || "unknown error"}` }], details: {} };
+      }
       wf.subtaskIds = [...new Set([...(wf.subtaskIds || []), ...created.map((c) => c.id)])];
       saveState(wf);
       setManagerSplit(true);
       const summary = created.map((c) => `${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`).join("\n");
-      return { content: [{ type: "text", text: `已确定性创建 ${created.length} 个 task:\n${summary}\n\n现在严格串行处理 ready task:claim → pi-workflow.dev → pi-workflow.reviewer → close/reopen。` }], details: {} };
+      return { content: [{ type: "text", text: `已确定性创建 ${created.length} 个 task${persisted.committed ? `;权威规格已提交 ${persisted.sha}` : ""}:\n${summary}\n\n现在严格串行处理 ready task:claim → pi-workflow.dev → pi-workflow.reviewer → close/reopen。` }], details: {} };
     },
   });
 

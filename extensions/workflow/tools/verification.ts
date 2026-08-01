@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, buildRunSummary, commitArtifacts, commitSplitArtifacts,
+  emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -58,7 +59,7 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
       for (const stale of [finalPath, finalAuditPath]) if (fs.existsSync(stale)) fs.rmSync(stale, { force: true });
       const headBefore = gitHead(wf.repo);
       if (!headBefore) return { content: [{ type: "text", text: "错误:无法读取当前 HEAD" }], details: {} };
-      const diffResult = sh("git", ["diff", diffBase, headBefore], wf.repo);
+      const diffResult = sh("git", ["diff", diffBase, headBefore, "--", ".", ":!.workflow"], wf.repo);
       if (diffResult.code !== 0) return { content: [{ type: "text", text: `错误:生成 cumulative diff 失败:${diffResult.stderr}` }], details: {} };
       fs.writeFileSync(diffPath, diffResult.stdout);
       const startedAt = new Date().toISOString();
@@ -139,7 +140,8 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
         }
         if (review.verdict === "pass") {
           const committed = commitArtifacts(wf);
-          if (!committed.committed) throw new Error("workflow 最终工件提交失败或没有可提交工件");
+          if (!committed.ok) throw new Error(`workflow 最终工件提交失败:${committed.error || "unknown error"}`);
+          if (!committed.committed) throw new Error("workflow 最终工件没有可提交变更");
           return { content: [{ type: "text", text: `✓ 最终验证与 ${expectedFinal.model} effort=${expectedFinal.effort} review 均通过。runId:${verify.runId}\n报告:${reviewPath}\n工件 commit:${committed.sha}` }], details: {} };
         }
 
@@ -178,7 +180,9 @@ export function registerVerificationTools(pi: ExtensionAPI): void {
         }
         wf.subtaskIds = [...(wf.subtaskIds || []), ...created];
         saveState(wf);
-        return { content: [{ type: "text", text: `最终审查失败,已创建 ${created.length} 个 bug:\n${created.join("\n")}\n修复后重新 run_verify → final-reviewer → finalize_test。` }], details: {} };
+        const persisted = commitSplitArtifacts(wf);
+        if (!persisted.ok) throw new Error(`最终审查 bug 已创建,但规格无法持久化到 Git:${persisted.error || "unknown error"}`);
+        return { content: [{ type: "text", text: `最终审查失败,已创建 ${created.length} 个 bug${persisted.committed ? `;规格 commit ${persisted.sha}` : ""}:\n${created.join("\n")}\n修复后重新 run_verify → final-reviewer → finalize_test。` }], details: {} };
       } catch (e) {
         return { content: [{ type: "text", text: `错误:${(e as Error).message}` }], details: {} };
       }

@@ -52,6 +52,7 @@ acceptance: {level: none, reason: raw JSON artifact contract}
 - 严守验收标准。
 - 匹配仓库既有命名、风格、分层(读周围代码)。
 - 只做这一个 task。
+- **`.workflow/<reqId>/prd.md`、`subtasks/*.md`、`results/prd-generation.json`、`results/split.json` 是冻结的权威输入，绝对禁止修改。** `.workflow/` 下唯一允许写入的是经理指定的当前 task output JSON；若环境与 PRD/spec 冲突，报告 blocker，不得“顺手修文档”。扩展会在结束时从 claim baseline 校验并自动恢复越权改动，同时判本次 dev 失败。
 
 ### 3. 内部闭环验证(P0 安全门,你要自己做到过)
 

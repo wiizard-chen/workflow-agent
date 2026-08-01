@@ -251,9 +251,16 @@ node scripts/uninstall-skills.mjs           # 卸载(独立脚本)
 └── embeddeddolt/              # Dolt 数据库(被 .beads/.gitignore 忽略,不进 git)
 ```
 
-子任务 DAG(依赖、状态、归属)存在 bd 里,是权威;`.workflow/` 只放文本产物。代码改动走 git,每子任务一个 code commit,`.workflow/` 工件最后单独一个 commit。
+子任务 DAG(依赖、状态、归属)存在 bd 里,是权威;`.workflow/` 只放文本产物。代码改动走 git,每子任务一个 code commit。即使目标仓库用 `.gitignore` 忽略整个 `.workflow/`,扩展也会用窄化的 `git add -f -- <精确路径>` 分阶段持久化不可变工件:
 
-`results/summary.json` 由 `message_end` hook 实时累计(按 `provider/model` 分组的 turns / input / output / cacheRead / cacheWrite / cost + 整体 cache 命中率),每轮写一次,所以即使跑崩了也留得下数据。`/wf status` 会顺带显示这份汇总的单行摘要。
+- `/wf prd` 完成后只提交 `prd.md` + `results/prd-generation.json`。
+- split、`/wf task`、`/wf bug` 完成后只提交 `subtasks/*.md` + 存在时的 `results/split.json`。
+- 最终通过时提交上述冻结输入和 `verify.json` / `cumulative.diff` / `final-review*.json`。
+- `state.json`、`summary.json`、per-task claim/result/review 等运行中动态文件保持 ignored,不会让 Git 持续 dirty。扩展会在目标仓库的本地 `.git/info/exclude` 只安装动态路径规则（`_repo-brief.md`、`*/state.json`、`*/results/`，不忽略 `prd.md` 和 `subtasks/`），并自动把旧版本曾跟踪的动态文件迁出 Git；权威文件仍通过精确 `git add -f` 提交。
+
+进入 BUILD 后 PRD、PRD audit、split manifest 和 task specs 都是冻结输入。dev 启动前会绑定 claim baseline,结束后再次比较；若 dev 通过 `bash/write/edit` 越权修改,扩展会从 baseline 恢复(必要时创建窄化修复 commit),同时把该次 dev audit 标为 failed,task 不能 close。
+
+`results/summary.json` 由 `message_end` hook 实时累计(按 `provider/model` 分组的 turns / input / output / cacheRead / cacheWrite / cost + 整体 cache 命中率),每轮写一次,所以即使跑崩了也留得下数据。它属于本地 ignored 动态工件,不会进入自动 artifact commit；若升级时发现它仍是旧版 tracked 文件，telemetry 会先停止改写，下一次工件持久化会提交一次 untrack 迁移，避免 `bd_query → summary 变化 → worktree dirty` 循环。`/wf status` 会顺带显示这份汇总的单行摘要。
 
 ## PLAN 阶段联网(Playwright MCP + pi-web-access)
 

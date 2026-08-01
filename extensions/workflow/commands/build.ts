@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, buildRunSummary, commitArtifacts, commitAuthoritativeArtifacts,
+  commitPrdArtifacts, emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -158,6 +160,13 @@ export async function cmdExecute(pi: ExtensionAPI, ctx: ExtensionCommandContext,
     }
   }
 
+  const persistedPrd = commitPrdArtifacts(wf);
+  if (!persistedPrd.ok) {
+    ctx.ui.notify(`无法进入 build:canonical PRD 无法持久化到 Git:${persistedPrd.error || "unknown error"}`, "error");
+    return;
+  }
+  if (persistedPrd.committed) ctx.ui.notify(`canonical PRD 工件已提交:${persistedPrd.sha}`, "info");
+
   // Switch to build mode + lock the executor toolset.
   wf.mode = "build";
   wf.baseline = preservedBaseline(wf.baseline, gitHead(wf.repo));
@@ -233,15 +242,46 @@ export async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): 
   );
   if (!go) { ctx.ui.notify("已取消,未做任何改动。", "info"); return; }
 
-  // 1) Roll back code. Keep .workflow/ artifacts by stashing them out of the way:
-  //    reset --hard would nuke uncommitted artifact changes too, so commit them
-  //    first (they're the audit trail of what just happened).
-  commitArtifacts(wf);
+  // 1) Roll back code while preserving the complete local workflow trail.
+  //    Some authoritative artifacts are now selectively tracked even when the
+  //    host ignores `.workflow/*`; a hard reset to the pre-execute baseline
+  //    would delete them. Back up the requirement directory out-of-tree, reset,
+  //    then restore it as local artifacts instead of creating a commit that the
+  //    reset would immediately discard.
+  const artifactDir = reqPath(wf);
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-abort-"));
+  const artifactBackup = path.join(tempRoot, wf.reqId);
+  try {
+    if (fs.existsSync(artifactDir)) fs.cpSync(artifactDir, artifactBackup, { recursive: true, force: true });
+  } catch (e) {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    ctx.ui.notify(`回滚前备份 .workflow 工件失败:${(e as Error).message}`, "error");
+    return;
+  }
   const reset = sh("git", ["reset", "--hard", wf.baseline], wf.repo);
   if (reset.code !== 0) {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
     ctx.ui.notify(`git reset --hard 失败:\n${reset.stderr || reset.stdout}`, "error");
     return;
   }
+  try {
+    if (fs.existsSync(artifactBackup)) {
+      fs.mkdirSync(path.dirname(artifactDir), { recursive: true });
+      fs.cpSync(artifactBackup, artifactDir, { recursive: true, force: true });
+    }
+  } catch (e) {
+    ctx.ui.notify(
+      `代码已 reset 到 baseline,但恢复 .workflow 工件失败:${(e as Error).message}\n备份仍保留在:${artifactBackup}\n请先手工复制该目录,本次 abort 不会继续 reopen task。`,
+      "error",
+    );
+    return;
+  }
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+
+  // Re-persist only frozen inputs after the reset. Dynamic state/results stay
+  // ignored, while split/spec commits remain reachable from the current branch.
+  const repersistedArtifacts = commitAuthoritativeArtifacts(wf);
+  const artifactPersistError = repersistedArtifacts.ok ? "" : repersistedArtifacts.error || "unknown error";
 
   // 2) Reopen every non-closed-by-design task under the epic so the pipeline
   //    can be re-run from a clean slate.
@@ -270,12 +310,12 @@ export async function cmdAbort(pi: ExtensionAPI, ctx: ExtensionCommandContext): 
 
   ctx.ui.notify(
     `已回滚到 baseline ${wf.baseline.slice(0, 8)}。\n` +
-    `- 代码:git reset --hard 完成(HEAD 现在是 ${gitHead(wf.repo)?.slice(0, 8) ?? "?"})\n` +
+    `- 代码:git reset --hard 到 ${wf.baseline.slice(0, 8)} 完成;当前 HEAD ${gitHead(wf.repo)?.slice(0, 8) ?? "?"}${repersistedArtifacts.committed ? `(随后重提交权威工件 ${repersistedArtifacts.sha?.slice(0, 8)})` : ""}\n` +
     `- bd:reopen 了 ${reopened} 个 task${bdError ? `(bd 读取有问题:${bdError})` : ""}\n` +
-    `- .workflow/ 工件已保留(回滚前先提交了一次,作为审计记录)\n` +
+    `- .workflow/ 工件已通过临时备份跨 hard reset 保留${artifactPersistError ? `;但权威工件重提交失败:${artifactPersistError}` : ";PRD/spec/split 仍可从当前 Git 分支恢复"}\n` +
     `- 模式:已切回 plan\n` +
     `想重跑:修订 PRD 后 /execute,或先 /execute --dry-run 看计划。`,
-    "info",
+    artifactPersistError || bdError ? "warning" : "info",
   );
 }
 

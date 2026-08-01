@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, buildRunSummary, commitArtifacts, commitSplitArtifacts,
+  emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -91,9 +92,11 @@ export async function cmdBug(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg
     }
   }
 
+  const persisted = commitSplitArtifacts(wf);
+  if (!persisted.ok) ctx.ui.notify(`bug 已创建,但规格无法持久化到 Git:${persisted.error || "unknown error"}`, "error");
   const lines = created.map((c) => `  ${c.id}: ${c.title}`).join("\n");
   ctx.ui.notify(
-    `已建 ${created.length} 个 bug(挂 epic ${wf.epicId}):\n${lines}\n\n/execute 修复(经理会检查 epic 下的 open bug)`,
+    `已建 ${created.length} 个 bug(挂 epic ${wf.epicId})${persisted.committed ? `;规格 commit ${persisted.sha}` : ""}:\n${lines}\n\n/execute 修复(经理会检查 epic 下的 open bug)`,
     "info"
   );
 }
@@ -179,12 +182,14 @@ export async function cmdTask(pi: ExtensionAPI, ctx: ExtensionCommandContext, ar
   // Track the new task ids on wf so /wf status shows them.
   wf.subtaskIds = [...(wf.subtaskIds || []), ...created.map((c) => c.id)];
   saveState(wf);
+  const persisted = commitSplitArtifacts(wf);
+  if (!persisted.ok) ctx.ui.notify(`task 已创建,但规格无法持久化到 Git:${persisted.error || "unknown error"}`, "error");
 
   const lines = created.map((c) =>
     `  ${c.id}: ${c.title}${c.depends_on.length ? ` (依赖 ${c.depends_on.join(",")})` : ""}`
   ).join("\n");
   ctx.ui.notify(
-    `已建 ${created.length} 个 task(挂 epic ${wf.epicId}):\n${lines}\n\n/execute 让经理按安全单-writer顺序串行实现`,
+    `已建 ${created.length} 个 task(挂 epic ${wf.epicId})${persisted.committed ? `;规格 commit ${persisted.sha}` : ""}:\n${lines}\n\n/execute 让经理按安全单-writer顺序串行实现`,
     "info"
   );
 }

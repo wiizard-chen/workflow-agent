@@ -46,15 +46,21 @@ import { persistReviewerFeedback, reviewerRetryDecision } from "../extensions/wo
 import { confirmAndSaveSuggestedVerifyCommand } from "../extensions/workflow/commands/plan.ts";
 import {
   addUsage,
+  authoritativeArtifactDrift,
+  authoritativeArtifactPaths,
   buildRunSummary,
   cacheHitRate,
   commitArtifacts,
+  commitPrdArtifacts,
+  commitSplitArtifacts,
   emptyUsageTotals,
+  ensureWorkflowArtifactsIgnored,
   formatUsageLine,
   gitHead,
   isCommitIntegrated,
   validateIntegratedCommitRange,
   readRunSummary,
+  restoreAuthoritativeArtifacts,
   runVerify,
   saveState,
   writeRunSummary,
@@ -483,8 +489,10 @@ try {
   sh("git", ["config", "user.email", "t@example.com"], tmpRoot);
   sh("git", ["config", "user.name", "Test"], tmpRoot);
   fs.writeFileSync(path.join(tmpRoot, "README.md"), "hello\n");
+  fs.writeFileSync(path.join(tmpRoot, ".gitignore"), "node_modules/\n");
   sh("git", ["add", "-A"], tmpRoot);
   sh("git", ["commit", "-q", "-m", "init"], tmpRoot);
+  fs.appendFileSync(path.join(tmpRoot, ".git", "info", "exclude"), "# pi-workflow generated artifacts; immutable files are force-added\n/.workflow/\n");
 
   const CONFIG: WorkflowConfig = {
     providers: {},
@@ -498,7 +506,7 @@ try {
   };
 
   const baseState: WorkflowState = {
-    reqId: "req-1", name: "test req", repo: tmpRoot, mode: "build",
+    reqId: "req-个股页面", name: "test req", repo: tmpRoot, mode: "build",
     createdAt: new Date().toISOString(), epicId: "bd-epic-1", subtaskIds: [],
   };
 
@@ -524,18 +532,120 @@ try {
     const s: WorkflowState = { ...baseState };
     const before = gitHead(tmpRoot);
     check("gitHead() returns a real 40-char sha for HEAD", !!before && /^[0-9a-f]{40}$/.test(before!), before);
+    ensureRequirementDirs(s);
     saveState(s);
-    const art = commitArtifacts(s);
-    check("commitArtifacts() commits when .workflow/<reqId>/ has untracked content", art.committed === true, JSON.stringify(art));
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "prd.md"), "# signed PRD\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "prd-generation.json"), JSON.stringify({ status: "completed", outputSha256: "test" }) + "\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "summary.json"), "{\"mutable\":true}\n");
+    fs.writeFileSync(path.join(tmpRoot, "UNRELATED.md"), "staged user change\n");
+    sh("git", ["add", "UNRELATED.md"], tmpRoot);
+
+    const prdCommit = commitPrdArtifacts(s);
+    check("commitPrdArtifacts() force-commits ignored PRD/audit", prdCommit.ok && prdCommit.committed, JSON.stringify(prdCommit));
+    const trackedAfterPrd = sh("git", ["ls-files", "-z", ".workflow"], tmpRoot).stdout.split("\0").filter(Boolean);
+    check("PRD persistence tracks only prd.md + prd-generation.json", trackedAfterPrd.length === 2
+      && trackedAfterPrd.some((file) => file.endsWith("/prd.md"))
+      && trackedAfterPrd.some((file) => file.endsWith("/results/prd-generation.json")), JSON.stringify(trackedAfterPrd));
+    check("mutable state/summary remain ignored after PRD commit", !trackedAfterPrd.some((file) => /state\.json|summary\.json/.test(file)));
+    const localExclude = fs.readFileSync(path.join(tmpRoot, ".git", "info", "exclude"), "utf8");
+    check("artifact persistence installs local dynamic-only ignores when host .gitignore has none", localExclude.split(/\r?\n/).includes("/.workflow/*/results/")
+      && localExclude.split(/\r?\n/).includes("/.workflow/*/state.json")
+      && !localExclude.split(/\r?\n/).includes("/.workflow/"));
+    check("local excludes keep canonical PRD/spec paths visible", sh("git", ["check-ignore", "--no-index", "-q", "--", path.join(".workflow", s.reqId, "prd.md")], tmpRoot).code !== 0
+      && sh("git", ["check-ignore", "--no-index", "-q", "--", path.join(".workflow", s.reqId, "subtasks", "future.md")], tmpRoot).code !== 0
+      && sh("git", ["check-ignore", "--no-index", "-q", "--", path.join(".workflow", s.reqId, "results", "summary.json")], tmpRoot).code === 0);
+    const excludePath = path.join(tmpRoot, ".git", "info", "exclude");
+    fs.writeFileSync(excludePath, "# BEGIN pi-workflow generated runtime artifacts\n/custom-user-rule/\n");
+    ensureWorkflowArtifactsIgnored(s);
+    const repairedExclude = fs.readFileSync(excludePath, "utf8");
+    check("malformed managed exclude block does not swallow later user rules", repairedExclude.includes("/custom-user-rule/")
+      && repairedExclude.includes("# END pi-workflow generated runtime artifacts"));
+    check("selective artifact commit preserves unrelated staged changes", sh("git", ["diff", "--cached", "--name-only"], tmpRoot).stdout.trim() === "UNRELATED.md");
+    sh("git", ["reset", "-q", "HEAD", "--", "UNRELATED.md"], tmpRoot);
+    fs.rmSync(path.join(tmpRoot, "UNRELATED.md"), { force: true });
+
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "01-one.md"), "# one\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "02-two.md"), "# two\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "split.json"), JSON.stringify({ status: "complete" }) + "\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "bd-1.claim.json"), "{\"mutable\":true}\n");
+    const splitCommit = commitSplitArtifacts(s);
+    check("commitSplitArtifacts() force-commits ignored specs/manifest", splitCommit.ok && splitCommit.committed, JSON.stringify(splitCommit));
+    const trackedAfterSplit = sh("git", ["ls-files", "-z", ".workflow"], tmpRoot).stdout.split("\0").filter(Boolean);
+    check("split persistence excludes mutable claim results", trackedAfterSplit.some((file) => file.endsWith("/subtasks/01-one.md"))
+      && trackedAfterSplit.some((file) => file.endsWith("/results/split.json"))
+      && !trackedAfterSplit.some((file) => file.endsWith("claim.json")), JSON.stringify(trackedAfterSplit));
+
+    // Simulate an upgrade from the old whole-directory artifact commit, where
+    // dynamic ignored files were already tracked and therefore stayed dirty.
+    sh("git", ["add", "-f", "--",
+      path.join(".workflow", s.reqId, "state.json"),
+      path.join(".workflow", s.reqId, "results", "summary.json"),
+      path.join(".workflow", s.reqId, "results", "bd-1.claim.json"),
+    ], tmpRoot);
+    sh("git", ["commit", "-q", "-m", "legacy whole-directory workflow artifacts"], tmpRoot);
+    const trackedSummaryBeforeTelemetry = fs.readFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "summary.json"), "utf8");
+    writeRunSummary(s, buildRunSummary(s, {}));
+    check("telemetry does not rewrite a legacy tracked summary before migration", fs.readFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "summary.json"), "utf8") === trackedSummaryBeforeTelemetry);
+    saveState({ ...s, mode: "plan" });
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "summary.json"), "{\"mutable\":\"changed\"}\n");
+    const migrated = commitPrdArtifacts(s);
+    const trackedAfterMigration = sh("git", ["ls-files", "-z", ".workflow"], tmpRoot).stdout.split("\0").filter(Boolean);
+    check("artifact persistence migrates legacy tracked dynamic files back to ignored", migrated.ok && migrated.committed
+      && !trackedAfterMigration.some((file) => /state\.json|summary\.json|claim\.json/.test(file)), JSON.stringify({ migrated, trackedAfterMigration }));
+    check("legacy dynamic files remain in the worktree after index migration", fs.existsSync(path.join(tmpRoot, ".workflow", s.reqId, "state.json"))
+      && fs.existsSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "summary.json")));
+    writeRunSummary(s, buildRunSummary(s, {}));
+    check("telemetry summary stays local and leaves workflow status clean after migration", sh("git", ["status", "--porcelain", "--", ".workflow"], tmpRoot).stdout.trim() === "");
+
+    const claimBaseline = gitHead(tmpRoot)!;
+    const claimPath = path.join(tmpRoot, ".workflow", s.reqId, "results", "bd-1.claim.json");
+    fs.writeFileSync(claimPath, JSON.stringify({ taskId: "bd-1", baseline: claimBaseline }) + "\n");
+    const trustedBaselineCapturedBeforeDev = claimBaseline;
+    const prdRel = path.join(".workflow", s.reqId, "prd.md");
+    sh("git", ["update-index", "--assume-unchanged", "--", prdRel], tmpRoot);
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "prd.md"), "# dev tampered PRD\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "01-one.md"), "# dev tampered spec\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "99-untracked-dev-spec.md"), "# unauthorized new spec\n");
+    fs.writeFileSync(path.join(tmpRoot, "code.txt"), "valid code change\n");
+    sh("git", ["add", "-A"], tmpRoot);
+    sh("git", ["commit", "-q", "-m", "dev accidentally changed workflow inputs"], tmpRoot);
+    const maliciousRebasedClaim = gitHead(tmpRoot)!;
+    fs.writeFileSync(claimPath, JSON.stringify({ taskId: "bd-1", baseline: maliciousRebasedClaim }) + "\n");
+    check("adversarial dev can rewrite ignored claim file but not parent-captured baseline", JSON.parse(fs.readFileSync(claimPath, "utf8")).baseline !== trustedBaselineCapturedBeforeDev);
+    const drift = authoritativeArtifactDrift(s, trustedBaselineCapturedBeforeDev);
+    check("authoritativeArtifactDrift() detects committed, ignored-untracked, and assume-unchanged mutations", drift.ok
+      && drift.paths.some((file) => file.endsWith("/prd.md"))
+      && drift.paths.some((file) => file.endsWith("/subtasks/01-one.md"))
+      && drift.paths.some((file) => file.endsWith("/subtasks/99-untracked-dev-spec.md")), JSON.stringify(drift));
+    const restored = restoreAuthoritativeArtifacts(s, trustedBaselineCapturedBeforeDev);
+    check("restoreAuthoritativeArtifacts() restores and repair-commits dev mutations", restored.ok && restored.restored && !!restored.repairCommitSha, JSON.stringify(restored));
+    check("restored PRD/spec exactly match claim baseline and removes unauthorized new spec", fs.readFileSync(path.join(tmpRoot, ".workflow", s.reqId, "prd.md"), "utf8") === "# signed PRD\n"
+      && fs.readFileSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "01-one.md"), "utf8") === "# one\n"
+      && !fs.existsSync(path.join(tmpRoot, ".workflow", s.reqId, "subtasks", "99-untracked-dev-spec.md")));
+    check("restoration clears assume-unchanged/skip-worktree hiding flags", !/^[a-zS]/.test(sh("git", ["ls-files", "-v", "--", prdRel], tmpRoot).stdout.trim()));
+    const afterRestore = authoritativeArtifactDrift(s, trustedBaselineCapturedBeforeDev);
+    check("authoritative inputs are clean after restoration", afterRestore.ok && afterRestore.paths.length === 0, JSON.stringify(afterRestore));
+    check("valid code from violating dev commit is not discarded", fs.readFileSync(path.join(tmpRoot, "code.txt"), "utf8") === "valid code change\n");
+    check("authoritativeArtifactPaths() excludes dynamic task results", !authoritativeArtifactPaths(s).some((file) => file.endsWith("claim.json")));
+
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "verify.json"), "{}\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "cumulative.diff"), "diff\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "final-review.json"), "{}\n");
+    fs.writeFileSync(path.join(tmpRoot, ".workflow", s.reqId, "results", "final-review.audit.json"), "{}\n");
+    const finalArtifacts = commitArtifacts(s);
+    check("commitArtifacts() persists frozen inputs + final evidence", finalArtifacts.ok && finalArtifacts.committed, JSON.stringify(finalArtifacts));
+    const finalTracked = sh("git", ["ls-files", "-z", ".workflow"], tmpRoot).stdout.split("\0").filter(Boolean);
+    check("final artifact commit still excludes mutable state/summary/per-task results", !finalTracked.some((file) => /state\.json|summary\.json|claim\.json/.test(file)), JSON.stringify(finalTracked));
+    const art2 = commitArtifacts(s);
+    check("commitArtifacts() is a no-op on second call", art2.ok && art2.committed === false, JSON.stringify(art2));
+
     const after = gitHead(tmpRoot);
-    check("commitArtifacts() advances HEAD", after !== before, `${before} -> ${after}`);
+    check("artifact commits advance HEAD", after !== before, `${before} -> ${after}`);
     check("isCommitIntegrated() accepts a commit reachable from HEAD", !!after && isCommitIntegrated(tmpRoot, after!));
     check("isCommitIntegrated() rejects an unknown commit", !isCommitIntegrated(tmpRoot, "0000000000000000000000000000000000000000"));
     check("validateIntegratedCommitRange() accepts a real post-baseline diff", !!before && !!after && validateIntegratedCommitRange(tmpRoot, before!, after!).ok);
     check("validateIntegratedCommitRange() rejects baseline reused as commit", !!after && validateIntegratedCommitRange(tmpRoot, after!, after!).reason === "no-new-commit");
     check("validateIntegratedCommitRange() rejects an unknown commit", !!before && validateIntegratedCommitRange(tmpRoot, before!, "0000000000000000000000000000000000000000").ok === false);
-    const art2 = commitArtifacts(s);
-    check("commitArtifacts() is a no-op (nothing to commit) on second call", art2.committed === false, JSON.stringify(art2));
   }
 
   // --- cost/cache telemetry (P1: restored observability) -------------------
@@ -763,8 +873,18 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
   check("subagent capability guard enforces workflow cwd and serial dev lease", /cwd 必须精确[\s\S]*activeDevToolCallId/.test(src));
   check("workflow fails closed on higher-precedence agent shadow/override", /function assertWorkflowAgentsUnshadowed[\s\S]*workflow agent 被高优先级定义覆盖[\s\S]*settings override/.test(src));
   check("PRD child model/usage is persisted from subagent tool details", /pi\.on\("tool_result"[\s\S]*prd-generation\.json[\s\S]*resolvedModel[\s\S]*usage/.test(src));
+  check("successful PRD generation force-persists canonical PRD + audit", /agent === "pi-workflow\.prd-writer" && ok[\s\S]*commitPrdArtifacts\(wf\)/.test(src));
+  check("split creation and reuse persist immutable specs/manifest", (src.match(/commitSplitArtifacts\(wf\)/g) || []).length >= 4);
+  check("dev audit fails and restores PRD/spec drift from parent-captured claim baseline", /currentActiveDevClaim\(\)[\s\S]*trustedDevClaim[\s\S]*authoritativeArtifactDrift\(wf, baseline\)[\s\S]*restoreAuthoritativeArtifacts\(wf, baseline\)/.test(src)
+    && /claimBaseline/.test(src) && /authoritativeInputsUnchanged/.test(src));
+  check("claim-file normalization cannot skip protected-input restoration", /authoritativeArtifactDrift\(wf, baseline\)[\s\S]*claimPath = reqPath[\s\S]*claim runtime 文件恢复失败/.test(src)
+    && /subagent 审计 hook 失败/.test(src));
+  check("task close uses audit-bound trusted baseline instead of mutable claim.json", /baseline = resultAudit\.claimBaseline\.trim\(\)/.test(src)
+    && /resultAudit\.claimTaskId !== taskId/.test(src));
+  check("task close requires an unchanged-authoritative-input dev audit", /resultAudit\.authoritativeInputsUnchanged !== true/.test(src));
   check("final reviewer has a separate actual-model audit envelope", /final-review\.audit\.json/.test(src));
   check("final evidence is bound to runId/head/command/hashes and configured reviewer audit", /randomUUID\(\)[\s\S]*prdSha256[\s\S]*diffSha256[\s\S]*expectedFinal[\s\S]*resolvedEffort[\s\S]*verifyRunId/.test(src));
+  check("cumulative code diff excludes precommitted .workflow artifacts", /git[\s\S]*diff[\s\S]*":!\.workflow"/.test(src));
   check("bd_task mutations are scoped to active epic children", /assertActiveChildIssue\(taskId\)/.test(src));
   check("task close requires commit-bound reviewer pass + audit", /review\?\.taskId === taskId[\s\S]*review\?\.baseline === baseline[\s\S]*review\?\.commitSha === commitSha/.test(src));
   check("external PRD switches authoritative epic and isolates a new req directory", /wf\.reqId = `\$\{nowStamp\(\)\}-\$\{slug\(epicTitle\)\}`[\s\S]*wf\.epicId = epicIdOverride[\s\S]*resetUsageByModel\(\)[\s\S]*ensureRequirementDirs\(wf\)[\s\S]*fs\.copyFileSync\(originalPath, canonicalPrdPath\)/.test(src));
@@ -789,7 +909,9 @@ console.log("\nregression guards — P0/P1 fixes stay wired:");
     check("cmdAbort() asks for confirmation before resetting", /ui\.confirm/.test(abort[0]));
     check("cmdAbort() runs git reset --hard", /"reset",\s*"--hard"/.test(abort[0]));
     check("cmdAbort() reopens bd tasks", /bd\.reopen/.test(abort[0]));
-    check("cmdAbort() preserves .workflow artifacts by committing them first", /commitArtifacts/.test(abort[0]));
+    check("cmdAbort() preserves tracked/ignored .workflow artifacts across hard reset", /mkdtempSync[\s\S]*cpSync[\s\S]*reset[\s\S]*cpSync/.test(abort[0]));
+    check("cmdAbort() re-persists frozen artifacts after reset", /commitAuthoritativeArtifacts\(wf\)/.test(abort[0]));
+    check("cmdAbort() retains the out-of-tree backup when post-reset copy fails", /备份仍保留在:[^\n]*artifactBackup[\s\S]*本次 abort 不会继续 reopen/.test(abort[0]));
   }
   check('"abort" is wired into the /wf dispatcher', /case "abort":/.test(src));
 

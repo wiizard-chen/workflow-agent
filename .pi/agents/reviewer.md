@@ -30,7 +30,7 @@ acceptance: {level: none, reason: raw JSON artifact contract}
 经理在你的 task 指令里会告诉你:
 - 要审查哪个 task(及其验收标准,通常指向规格文件)
 - dev 改了哪些文件(或让你自己跑 git diff 看)
-- 基线 commit(baseline,即 dev 改动之前的 HEAD)
+- 基线 commit 必须取自 `<taskId>.audit.json` 的 `claimBaseline`(这是 extension 在 dev 启动前捕获的可信值)。`claim.json` 只用于交叉阅读,若两者不一致以 audit 为准并报告问题。
 
 ### 2. 读改动
 
@@ -60,7 +60,7 @@ acceptance: {level: none, reason: raw JSON artifact contract}
 ```
 
 字段:
-- **taskId/baseline/commitSha**:必须逐字复制经理提供的 claim/dev 证据,把 verdict 绑定到精确 commit range。
+- **taskId/baseline/commitSha**:必须逐字复制经理提供的 dev audit/result 证据；baseline 使用 audit.claimBaseline，把 verdict 绑定到精确 commit range。
 - **verdict**: "pass" 或 "fail"
 - **issues**: 问题清单,每条 `{severity: "blocker"|"major"|"minor", file, line, desc}`。pass 时通常为空。
 - **summary**: 一句话总结

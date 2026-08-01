@@ -247,6 +247,8 @@ PLAN 讨论规则包括：
 .workflow/<reqId>/results/prd-generation.json
 ```
 
+生成成功后，扩展会只对这两个不可变文件执行窄化的 `git add -f` + commit；即使仓库忽略整个 `.workflow/`，PRD 仍可从 Git 恢复。`state.json`、`summary.json` 和 task 运行结果不会随之进入 Git。目标仓库没有对应 `.gitignore` 规则时，扩展会只在本地 `.git/info/exclude` 忽略 `_repo-brief.md`、`*/state.json`、`*/results/`；`prd.md` 与 `subtasks/` 不会被本地规则隐藏，也不会改动项目的 tracked `.gitignore`。
+
 ### PRD 一致性审查
 
 ```text
@@ -738,8 +740,10 @@ bd show <issue-id>
 权威状态分工：
 
 - Beads：epic、task、依赖、blocker、状态
-- Git：代码改动和 task commit
-- `.workflow/`：PRD、规格、验证、审查与审计工件
+- Git：代码改动、PRD/audit、冻结 task specs/split manifest 和最终 evidence
+- `.workflow/` 动态文件：state、summary、per-task claim/result/review 等运行态工件；扩展用本地 `.git/info/exclude` 只忽略 `_repo-brief.md`、`*/state.json` 和 `*/results/`，不忽略 PRD/spec，并把旧版已跟踪的动态文件自动迁出 Git
+
+不可变工件采用分阶段窄化 commit，不会跟踪整个 `.workflow/`：PRD 完成时提交 PRD + generation audit；split/轻量 task/bug 创建后提交 specs + split manifest；最终通过时提交 final evidence。BUILD dev 若修改 PRD 或既有 spec，扩展会按 claim baseline 自动恢复并判该次 dev audit 失败。
 
 ---
 

@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, authoritativeArtifactDrift, buildRunSummary, commitArtifacts,
+  commitAuthoritativeArtifacts, emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -166,6 +167,27 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
           if (!getVerifyCommand(CONFIG, wf)) {
             return { content: [{ type: "text", text: "✗ claim 被拒绝:未配置验证命令。先 /wf verify <cmd>。" }], details: {} };
           }
+          const prdPath = reqPath(wf, "prd.md");
+          const prdAudit = readJson(reqPath(wf, "results", "prd-generation.json"));
+          if (prdAudit?.outputSha256 && prdAudit.outputSha256 !== sha256File(prdPath)) {
+            return { content: [{ type: "text", text: "✗ claim 被拒绝:canonical PRD 与 prd-writer 审计 hash 不一致。先恢复 PRD 或重新 /wf prd。" }], details: {} };
+          }
+          const splitManifest = readJson(reqPath(wf, "results", "split.json"));
+          if (splitManifest?.prdSha256 && splitManifest.prdSha256 !== sha256File(prdPath)) {
+            return { content: [{ type: "text", text: "✗ claim 被拒绝:split manifest 绑定的 PRD 已变化。必须重新规划 task 图。" }], details: {} };
+          }
+          const persisted = commitAuthoritativeArtifacts(wf);
+          if (!persisted.ok) {
+            return { content: [{ type: "text", text: `✗ claim 被拒绝:权威 PRD/task 工件无法持久化到 Git:${persisted.error || "unknown error"}` }], details: {} };
+          }
+          const persistedHead = gitHead(repo);
+          if (!persistedHead) {
+            return { content: [{ type: "text", text: "✗ claim 被拒绝:持久化后无法读取 Git HEAD。" }], details: {} };
+          }
+          const preClaimDrift = authoritativeArtifactDrift(wf, persistedHead);
+          if (!preClaimDrift.ok || preClaimDrift.paths.length > 0) {
+            return { content: [{ type: "text", text: `✗ claim 被拒绝:权威输入未冻结:${preClaimDrift.error || preClaimDrift.paths.join(", ")}` }], details: {} };
+          }
           const agent = `manager-${wf.reqId}`;
           const ok = bd.claim(repo, taskId, agent);
           if (!ok) {
@@ -202,29 +224,29 @@ export function registerBeadsTools(pi: ExtensionAPI): void {
           // Prove this task produced a non-empty commit range after its claim,
           // and that the resulting commit is integrated into target HEAD.
           const resultPath = reqPath(wf, "results", `${taskId}.json`);
-          const claimPath = reqPath(wf, "results", `${taskId}.claim.json`);
           let commitSha = "";
           let baseline = "";
           try {
             const result = readJson(resultPath);
             const resultAudit = readJson(reqPath(wf, "results", `${taskId}.audit.json`));
-            const claim = readJson(claimPath);
-            if (!result || !resultAudit || !claim) throw new Error("JSON artifact 无法解析");
+            if (!result || !resultAudit) throw new Error("JSON artifact 无法解析");
             const expectedDev = workflowAgentConfig("pi-workflow.dev");
             if (resultAudit.status !== "completed" || resultAudit.requestedModel !== expectedDev.model
               || resultAudit.requestedEffort !== expectedDev.effort || resultAudit.resolvedModel !== expectedDev.model
               || resultAudit.resolvedEffort !== expectedDev.effort
               || resultAudit.profile !== CONFIG.activeModelProfile
-              || resultAudit.context !== "fresh" || resultAudit.outputSha256 !== sha256File(resultPath) || resultAudit.toolsSafe !== true) {
-              throw new Error("dev agent/model/tool/output audit 无效");
+              || resultAudit.context !== "fresh" || resultAudit.outputSha256 !== sha256File(resultPath)
+              || resultAudit.toolsSafe !== true || resultAudit.authoritativeInputsUnchanged !== true
+              || resultAudit.claimTaskId !== taskId || typeof resultAudit.claimBaseline !== "string" || !resultAudit.claimBaseline.trim()) {
+              throw new Error("dev agent/model/tool/output/authoritative-input/trusted-baseline audit 无效");
             }
             commitSha = typeof result?.commitSha === "string" ? result.commitSha.trim() : "";
-            baseline = claim?.taskId === taskId && typeof claim?.baseline === "string" ? claim.baseline.trim() : "";
+            baseline = resultAudit.claimBaseline.trim();
           } catch (e) {
             bd.reopen(repo, taskId);
-            track(`✗ close 被拒:dev 结果或 claim baseline 缺失/无效,已自动 reopen。`);
+            track(`✗ close 被拒:dev 结果或可信 baseline audit 缺失/无效,已自动 reopen。`);
             return {
-              content: [{ type: "text", text: `✗ close 被拒绝:结果或 claim baseline 缺失/无效,已自动 reopen ${taskId}。\n${(e as Error).message}` }],
+              content: [{ type: "text", text: `✗ close 被拒绝:结果或可信 baseline audit 缺失/无效,已自动 reopen ${taskId}。\n${(e as Error).message}` }],
               details: {},
             };
           }

@@ -96,7 +96,7 @@ subagent({
   context: "fresh",
   cwd: "<目标 repo 绝对路径>",
   output: "<results>/<taskId>.review.json",
-  task: "读取 <taskId>.claim.json 和 <taskId>.json，审查 baseline..<commitSha>，对照规格返回 taskId/baseline/commitSha/verdict/issues/summary JSON。"
+  task: "读取 <taskId>.claim.json、<taskId>.json 和 <taskId>.audit.json；baseline 必须使用 audit.claimBaseline，审查 baseline..<commitSha>，对照规格返回 taskId/baseline/commitSha/verdict/issues/summary JSON。"
 })
 ```
 

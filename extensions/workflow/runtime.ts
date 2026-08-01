@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  addUsage, buildRunSummary, commitArtifacts, emptyUsageTotals, formatUsageLine,
+  addUsage, authoritativeArtifactDrift, buildRunSummary, commitArtifacts,
+  emptyUsageTotals, formatUsageLine,
   getVerifyCommand, gitHead, isGitRepo, nowStamp, readRepoBrief, readRunSummary,
   repoBriefPath, reqPath, runVerify, saveState, sh, slug, writeRunSummary,
   validateIntegratedCommitRange,
@@ -236,6 +237,8 @@ export let CONFIG = loadConfig();
 export let wf: WorkflowState | undefined;
 export let baseActiveTools: string[] = [];
 export let activeDevToolCallId: string | undefined;
+export interface TrustedDevClaim { toolCallId: string; taskId: string; baseline: string; }
+export let activeDevClaim: TrustedDevClaim | undefined;
 // Tool-call tracking: detect "session did zero work" (no split, no bd_task) so we
 // can warn instead of reporting a false success.
 export let mgrHasSplit = false;
@@ -251,13 +254,17 @@ export function setConfig(value: WorkflowConfig): void { CONFIG = value; }
 export function currentWorkflow(): WorkflowState | undefined { return wf; }
 export function currentBaseActiveTools(): string[] { return baseActiveTools; }
 export function currentActiveDevToolCallId(): string | undefined { return activeDevToolCallId; }
+export function currentActiveDevClaim(): TrustedDevClaim | undefined { return activeDevClaim; }
 export function currentManagerHasSplit(): boolean { return mgrHasSplit; }
 export function currentManagerTasksProcessed(): number { return mgrTasksProcessed; }
 export function currentLastAssistantText(): string { return lastAssistantText; }
 export function currentUsageByModel(): Record<string, UsageTotals> { return usageByModel; }
 export function setWorkflow(value: WorkflowState | undefined): void { wf = value; }
 export function setBaseActiveTools(value: string[]): void { baseActiveTools = value; }
-export function setActiveDevToolCallId(value: string | undefined): void { activeDevToolCallId = value; }
+export function setActiveDevToolCallId(value: string | undefined): void {
+  activeDevToolCallId = value;
+  if (!value) activeDevClaim = undefined;
+}
 export function setManagerSplit(value: boolean): void { mgrHasSplit = value; }
 export function setManagerTasksProcessed(value: number): void { mgrTasksProcessed = value; }
 export function incrementManagerTasksProcessed(): void { mgrTasksProcessed++; }
@@ -558,11 +565,18 @@ export function validateSubagentCall(event: any): string | undefined {
     const taskId = path.basename(output, ".json");
     try { assertActiveChildIssue(taskId); } catch (e) { return (e as Error).message; }
     if (!fs.existsSync(reqPath(wf, "results", `${taskId}.claim.json`))) return `缺少 ${taskId}.claim.json;先 bd_task(claim)`;
+    const claim = readJson(reqPath(wf, "results", `${taskId}.claim.json`));
+    const baseline = typeof claim?.baseline === "string" ? claim.baseline.trim() : "";
+    if (!baseline) return `缺少 ${taskId} 的有效 claim baseline`;
+    const drift = authoritativeArtifactDrift(wf, baseline);
+    if (!drift.ok) return `无法验证冻结的 PRD/task 输入:${drift.error || "unknown error"}`;
+    if (drift.paths.length > 0) return `冻结的 PRD/task 输入在 dev 启动前已变化:${drift.paths.join(", ")}`;
     const feedbackPath = reqPath(wf, "results", `${taskId}.review-feedback.json`);
     if (fs.existsSync(feedbackPath) && !String(input.task || "").includes(feedbackPath)) {
       return `dev 重试必须在 task 中引用并逐项处理 reviewer 反馈:${feedbackPath}`;
     }
     activeDevToolCallId = String(event?.toolCallId || "dev-running");
+    activeDevClaim = { toolCallId: activeDevToolCallId, taskId, baseline };
     return undefined;
   }
   if (agent === "pi-workflow.reviewer") {
