@@ -10,6 +10,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const WORKSPACES = [
   { directory: "packages/v2-domain", name: "@pi-workflow/v2-domain", kind: "production", allowed: [] },
+  { directory: "packages/v2-readiness", name: "@pi-workflow/v2-readiness", kind: "production", allowed: ["@pi-workflow/v2-domain"] },
   { directory: "packages/v2-protocol", name: "@pi-workflow/v2-protocol", kind: "production", allowed: ["@pi-workflow/v2-domain"] },
   { directory: "packages/v2-testkit", name: "@pi-workflow/v2-testkit", kind: "testkit", allowed: ["@pi-workflow/v2-domain", "@pi-workflow/v2-protocol"] },
   { directory: "apps/workflowd", name: "@pi-workflow/workflowd", kind: "application", allowed: ["@pi-workflow/v2-domain", "@pi-workflow/v2-protocol"] },
@@ -133,7 +134,7 @@ function importSpecifiers(path) {
 
 function validateExports(workspace, manifest, errors) {
   const exports = packageExportPaths(manifest.exports);
-  if (workspace.name === "@pi-workflow/v2-domain") {
+  if (["@pi-workflow/v2-domain", "@pi-workflow/v2-readiness"].includes(workspace.name)) {
     const rawExports = manifest.exports;
     if (
       rawExports === null ||
@@ -143,7 +144,20 @@ function validateExports(workspace, manifest, errors) {
       !Object.hasOwn(rawExports, ".")
     ) {
       errors.push(
-        "@pi-workflow/v2-domain must export exactly the single \".\" entrypoint.",
+        `${workspace.name} must export exactly the single \".\" entrypoint.`,
+      );
+    }
+    if (
+      workspace.name === "@pi-workflow/v2-readiness" &&
+      JSON.stringify(rawExports) !== JSON.stringify({
+        ".": {
+          types: "./dist/index.d.ts",
+          import: "./dist/index.js",
+        },
+      })
+    ) {
+      errors.push(
+        "@pi-workflow/v2-readiness must expose only the exact types and import targets for its single entrypoint.",
       );
     }
   }
@@ -160,6 +174,25 @@ function validateExports(workspace, manifest, errors) {
     if (!subpath.startsWith(".") || paths.some((path) => !path.startsWith("./dist/") || path.includes(".."))) {
       errors.push(`${workspace.name} exports must expose only generated dist paths.`);
     }
+  }
+}
+
+function validateReadinessDependencies(manifest, errors) {
+  const dependencies = Object.keys(manifest.dependencies ?? {}).sort();
+  const nonProduction = [
+    ...Object.keys(manifest.devDependencies ?? {}),
+    ...Object.keys(manifest.optionalDependencies ?? {}),
+    ...Object.keys(manifest.peerDependencies ?? {}),
+  ].sort();
+  if (
+    dependencies.length !== 1 ||
+    dependencies[0] !== "@pi-workflow/v2-domain" ||
+    manifest.dependencies?.["@pi-workflow/v2-domain"] !== "file:../v2-domain" ||
+    nonProduction.length !== 0
+  ) {
+    errors.push(
+      "@pi-workflow/v2-readiness must depend directly and only on @pi-workflow/v2-domain.",
+    );
   }
 }
 
@@ -197,6 +230,9 @@ export function validateV2Boundaries(root = repositoryRoot) {
     if (manifest.name !== workspace.name) errors.push(`${workspace.directory} must be named ${workspace.name}.`);
     if (manifest.private !== true || manifest.type !== "module") errors.push(`${workspace.name} must be private native ESM.`);
     validateExports(workspace, manifest, errors);
+    if (workspace.name === "@pi-workflow/v2-readiness") {
+      validateReadinessDependencies(manifest, errors);
+    }
     if (!rootReferences.has(directory)) errors.push(`tsconfig.v2.json must reference ${workspace.directory}.`);
 
     const dependencyNames = internalDependencies(manifest);
@@ -251,7 +287,7 @@ export function validateV2Boundaries(root = repositoryRoot) {
     const directory = resolve(root, workspace.directory);
     if (!rootReferences.has(directory)) errors.push(`tsconfig.v2.json is missing ${workspace.directory}.`);
   }
-  if (rootReferences.size !== WORKSPACES.length) errors.push("tsconfig.v2.json must reference exactly the five approved V2 workspaces.");
+  if (rootReferences.size !== WORKSPACES.length) errors.push("tsconfig.v2.json must reference exactly the six approved V2 workspaces.");
   return errors;
 }
 
@@ -344,6 +380,86 @@ async function runNegativeFixtureTests(root) {
               types: "./dist/internal.d.ts",
               import: "./dist/internal.js",
             };
+          });
+        },
+      },
+      {
+        label: "v2-readiness extra public subpath",
+        expectedErrors: ["@pi-workflow/v2-readiness must export exactly the single \".\" entrypoint"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => {
+            manifest.exports["./internal"] = {
+              types: "./dist/internal.d.ts",
+              import: "./dist/internal.js",
+            };
+          });
+        },
+      },
+      {
+        label: "v2-readiness to protocol dependency",
+        expectedErrors: ["@pi-workflow/v2-readiness has forbidden dependency edge to @pi-workflow/v2-protocol"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-protocol"] = "file:../v2-protocol"; });
+          await mutateJson(join(candidate, "packages/v2-readiness/tsconfig.json"), (config) => { config.references.push({ path: "../v2-protocol" }); });
+        },
+      },
+      {
+        label: "protocol to v2-readiness dependency",
+        expectedErrors: ["@pi-workflow/v2-protocol has forbidden dependency edge to @pi-workflow/v2-readiness"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-protocol/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-readiness"] = "file:../v2-readiness"; });
+          await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references.push({ path: "../v2-readiness" }); });
+        },
+      },
+      {
+        label: "v2-readiness external direct dependency",
+        expectedErrors: ["must depend directly and only on @pi-workflow/v2-domain"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => { manifest.dependencies["forbidden-external"] = "1.0.0"; });
+        },
+      },
+      {
+        label: "v2-readiness non-local domain dependency",
+        expectedErrors: ["must depend directly and only on @pi-workflow/v2-domain"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => { manifest.dependencies["@pi-workflow/v2-domain"] = "^1.0.0"; });
+        },
+      },
+      {
+        label: "v2-readiness extra export condition",
+        expectedErrors: ["must expose only the exact types and import targets"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => {
+            manifest.exports["."].default = "./dist/index.js";
+          });
+        },
+      },
+      {
+        label: "v2-readiness domain dependency declared only for development",
+        expectedErrors: [
+          "must depend directly and only on @pi-workflow/v2-domain",
+          "production source imports @pi-workflow/v2-domain declared only in devDependencies or peerDependencies",
+        ],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-readiness/package.json"), (manifest) => {
+            delete manifest.dependencies["@pi-workflow/v2-domain"];
+            manifest.devDependencies = { "@pi-workflow/v2-domain": "file:../v2-domain" };
+          });
+        },
+      },
+      {
+        label: "v2-readiness deep import",
+        expectedErrors: ["deep-imports non-exported @pi-workflow/v2-domain/internal"],
+        mutate: async (candidate) => {
+          await writeFile(join(candidate, "packages/v2-readiness/src/forbidden.ts"), 'import "@pi-workflow/v2-domain/internal";\n');
+        },
+      },
+      {
+        label: "missing v2-readiness root project reference",
+        expectedErrors: ["tsconfig.v2.json is missing packages/v2-readiness"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "tsconfig.v2.json"), (config) => {
+            config.references = config.references.filter(({ path }) => path !== "./packages/v2-readiness");
           });
         },
       },

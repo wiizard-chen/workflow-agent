@@ -13,17 +13,18 @@
   "scripts": {
     "setup": "bash scripts/setup.sh",
     "test:v1": "node --experimental-strip-types test/workflow-logic.test.ts",
-    "test:v2": "npm --workspace=@pi-workflow/v2-domain run test && npm --workspace=@pi-workflow/v2-protocol run test && npm --workspace=@pi-workflow/v2-testkit run test && npm --workspace=@pi-workflow/workflowd run test && npm --workspace=@pi-workflow/workflow-worker run test",
+    "test:v2": "npm --workspace=@pi-workflow/v2-domain run test && npm --workspace=@pi-workflow/v2-readiness run test && npm --workspace=@pi-workflow/v2-protocol run test && npm --workspace=@pi-workflow/v2-testkit run test && npm --workspace=@pi-workflow/workflowd run test && npm --workspace=@pi-workflow/workflow-worker run test",
     "test": "npm run test:v1 && npm run test:v2",
     "typecheck:v1": "tsc --project tsconfig.json",
     "typecheck:v2": "npm run clean:v2 && tsc --build tsconfig.v2.json",
     "typecheck": "npm run typecheck:v1 && npm run typecheck:v2",
     "build:v2": "tsc --build tsconfig.v2.json",
-    "check": "npm test && npm run typecheck && node scripts/validate-v2-boundaries.mjs",
+    "check": "npm test && npm run typecheck && npm run validate:v2-boundaries",
     "skills:install": "node scripts/install-skills.mjs",
     "skills:uninstall": "node scripts/uninstall-skills.mjs",
     "skills:list": "node scripts/install-skills.mjs --list",
-    "clean:v2": "node scripts/clean-v2-output.mjs"
+    "clean:v2": "node scripts/clean-v2-output.mjs",
+    "validate:v2-boundaries": "node scripts/validate-v2-boundaries.mjs"
   },
   "pi": {
     "extensions": [

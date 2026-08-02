@@ -1,0 +1,207 @@
+{
+  "acceptanceCriteria": [
+    {
+      "id": "AC-001",
+      "title": "Candidate binding",
+      "statement": "Runtime and type tests prove exact subject ID/revision, Bundle ref/Manifest SHA-256, repository/base revision, policy/profile revision, requirement set, and applicability binding; deterministic RFC 8785 SHA-256; malformed/extra-field rejection; and digest change for every bound-field change."
+    },
+    {
+      "id": "AC-002",
+      "title": "Applicability",
+      "statement": "Tests prove every Epic is `applicable`, every Initiative has one explicit exact-policy applicability record, missing/ambiguous/mismatched policy fails closed, and `not_applicable` remains separate from disposition and freshness."
+    },
+    {
+      "id": "AC-003",
+      "title": "Evidence qualification",
+      "statement": "Tests prove applicable candidates require semantic, quantitative, and repository-feasibility layers; feasibility binds E02 `RoleRunId`/`LaunchPermitId` and repository baseline; Product AI/trust labels cannot create authority; invalid, ambiguous, poisoned, or wrong-candidate evidence fails closed."
+    },
+    {
+      "id": "AC-004",
+      "title": "Disposition and precedence",
+      "statement": "A complete decision table proves the closed set and exact `must_decompose > needs_refinement > blocked > ready` reduction, including semantic findings, quantitative boundaries, repository blocking, missing evidence, contradictory input, and combinations."
+    },
+    {
+      "id": "AC-005",
+      "title": "Exception",
+      "statement": "Tests prove only one Human Governor decision may waive an exact `121..240` minute finding with matching `DecisionRef`, rationale, and authority; semantic failure, `>240`, stale, missing evidence, provenance/integrity failure, invalidation, duplication, or mismatch cannot be waived."
+    },
+    {
+      "id": "AC-006",
+      "title": "Provenance",
+      "statement": "Tests prove opaque source binding, the only legal exception → authority edge, closed producer/kind matrix, Product AI/trust-label attacks, feasibility role/permit binding, Human Governor actor/scope matching, candidate/source revisions, duplicate-ref collision handling, and fail-closed unresolved/self authority references."
+    },
+    {
+      "id": "AC-007",
+      "title": "Immutability",
+      "statement": "Tests prove all successful nested output is copied/frozen, caller input is not frozen/mutated, evidence/assessments are never overwritten, hashes use canonical content, and invalid caller values return typed data rather than throw."
+    },
+    {
+      "id": "AC-008",
+      "title": "Lineage and retry",
+      "statement": "Tests prove complete-history validation, first/head/successor rules, monotonic sequence, predecessor ref/hash, evidence-set fingerprint, duplicate/fork/gap rejection, same-candidate retry only after `blocked`, and new candidate after `needs_refinement`, `must_decompose`, `ready`, or `not_applicable`."
+    },
+    {
+      "id": "AC-009",
+      "title": "Freshness",
+      "statement": "Tests cover the exact current-context schema, all nine stale reasons alone/in combination, canonical order, invalidation/source absence/head change, malformed/duplicate/missing/extra context rejection, zero-reason `current`, assessment byte preservation, and absence of clock/TTL/I/O."
+    },
+    {
+      "id": "AC-010",
+      "title": "Consumption handoff",
+      "statement": "Tests prove the exact qualification schema/reason order, only current-head/current/integrity-valid `ready` qualifies, explicit Initiative non-applicability returns `not_required`, Epic never does, structural versus well-formed mismatch behavior fails closed, and no downstream authority is invoked."
+    },
+    {
+      "id": "AC-011",
+      "title": "Package and E02 boundary",
+      "statement": "Workspace/type tests prove the exact Section 9 type/value allowlist, one `.` entrypoint, only E02 direct dependency, no subpath/internal/crypto re-exports, and byte-for-byte unchanged E02 production source/package manifest/exports/declarations/public key set. The sole E02 test-file exception is the fixture-scoping repair named in Section 12; it cannot change E02 production or weaken the existing attack matrix."
+    },
+    {
+      "id": "AC-012",
+      "title": "Strict delivery evidence",
+      "statement": "Clean-room build, runtime/type attack suites, package/export inspection, boundary validator, frozen-fixture E02 verifier test, new E70 cumulative verifier, Bundle check, generated hash readback, allowed-path audit, no-side-effect scan, and `git diff --check` pass from the frozen E02 commit with independent evidence."
+    }
+  ],
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "approvalStatus": "not-approved",
+    "deliveryUnits": 1,
+    "engineeringEligibility": "ineligible",
+    "epic": "workflow-agent-c2b.6",
+    "initiative": "workflow-agent-c2b",
+    "mapId": "E70",
+    "maximumTasks": 5,
+    "status": "pending-human-confirmation",
+    "targetActiveEngineeringTime": "2h",
+    "title": "Readiness and governance evidence",
+    "verificationProfile": "strict",
+    "version": "draft-v2"
+  },
+  "schemaVersion": 2,
+  "publicExports": {
+    "types": [
+      "Sha256Digest",
+      "SourceRevision",
+      "ReadinessSubject",
+      "ReadinessApplicability",
+      "CreateReadinessCandidateBindingInput",
+      "ReadinessCandidateBinding",
+      "EvidenceKind",
+      "EvidenceProducerKind",
+      "EvidenceProducer",
+      "SemanticEvidencePayload",
+      "QuantitativeEvidencePayload",
+      "RepositoryFeasibilityEvidencePayload",
+      "ApplicabilityPolicyEvidencePayload",
+      "QuantitativeExceptionEvidencePayload",
+      "AuthorityEvidencePayload",
+      "GovernanceEvidencePayload",
+      "CreateGovernanceEvidenceInput",
+      "GovernanceEvidence",
+      "ReadinessDisposition",
+      "ReadinessReasonCode",
+      "ReadinessEvidenceBinding",
+      "ReadinessAssessment",
+      "AssessReadinessInput",
+      "ReadinessFreshness",
+      "ReadinessStaleReason",
+      "ReadinessEvidenceCurrentState",
+      "ReadinessAssessmentHead",
+      "ReadinessCurrentContext",
+      "ReadinessFreshnessProjection",
+      "ProjectReadinessFreshnessInput",
+      "ReadinessConsumerPurpose",
+      "ReadinessRequirement",
+      "ReadinessQualificationReason",
+      "ReadinessQualification",
+      "QualifyReadinessForConsumptionInput",
+      "ReadinessResult",
+      "ReadinessRejectionCode",
+      "ReadinessRejectionReason",
+      "ReadinessRejection"
+    ],
+    "values": [
+      "createReadinessCandidateBinding",
+      "createGovernanceEvidence",
+      "assessReadiness",
+      "projectReadinessFreshness",
+      "qualifyReadinessForConsumption"
+    ]
+  },
+  "scope": {
+    "included": [
+      "exact candidate binding",
+      "immutable governance evidence qualification",
+      "immutable hash-linked ReadinessAssessment",
+      "pure explicit-input freshness projection",
+      "fail-closed downstream consumer qualification"
+    ],
+    "nonGoals": [
+      "No E58 semantic/quantitative evaluator or risk scorer.",
+      "No E59 repository analyzer, codebase reader, or feasibility role execution.",
+      "No E19 policy resolver, policy store, or authorization engine.",
+      "No E74 Product lifecycle, ApprovalAttempt, approval decision, or activation.",
+      "No E71 eligibility decision, queue, Scheduling, capacity, priority, or Allocation.",
+      "No E73 plan, preflight, execution, compensation, or reconciliation.",
+      "No E75–E83 lifecycle or projection authority.",
+      "No protocol, JSON Schema transport boundary, RPC, daemon, SQLite, persistence, migration, Beads adapter, event store, or materialized view.",
+      "No Runtime, Worker, role launcher, permit issuer, lease, fence, Scheduler, Permission, Git/GitHub broker, or third-party backend.",
+      "No clock, timestamp chronology, timeout, TTL, randomness, environment, cwd, filesystem, Git, GitHub, network, or process-state read.",
+      "No writable universal status, lifecycle, eligibility, Product, queue, Engineering, or closure field.",
+      "No dependency or export changes to `@pi-workflow/v2-domain`.",
+      "No approval inference from filenames, chat history, Product AI output, self-reported trust, or generated Bundle existence.",
+      "No implementation outside the Section 12 allowed change surface."
+    ]
+  },
+  "sectionHashes": {
+    "1-authority-dependency-baseline-and-frozen-decisions": "153297bf882563339a4054821193b88af7e1440dfe7fc74d5eb06c8989bbad8d",
+    "10-explicit-non-goals-and-stop-boundary": "831d421fab527fee698c1173863f541e359312e284163bf762771bcf357c195b",
+    "11-acceptance-criteria-continuous-reduced-set": "c02e4e988d002e55150571ac886ae04fa9e54d6a3937cf8ea4bfb3b3f43ebf92",
+    "12-delivery-plan-allowed-change-surface-and-verification-contract": "82306a1c3caf3c999155670377d91c36844e51f836483119c554525e534842f6",
+    "13-approval-and-next-gate": "864981980d4cf8f75830bfc34ecc0103138d72ef05bccf38a657afd738dcf7cf",
+    "2-bounded-result-and-package-boundary": "b95af1b6e37d766686ecb47502a2482266647c74511da479d11fa7787277979c",
+    "3-exact-candidate-binding": "baf1ee2a3a481b7ff40334180229d3d12eaf4b355e7bcac043c690804ca64c7e",
+    "4-1-immutable-evidence-envelope": "1f2b1b03b64c2b3914805389a0a007fde4581ed2f9c8ed3798804d31ac4423fc",
+    "4-2-closed-payloads": "97f350dfd3d5800476acc9632bb445b09292b118ce9536b9c919bb865ce72c41",
+    "4-3-mandatory-evidence-and-fail-closed-behavior": "1446cbddba993a470ca5b893fe16c361e71eb7e25d78256e3eed3fa4524bdd2b",
+    "4-governance-evidence-model-and-qualification": "f4dd61fb4e1390ece04e6ec15bb080fbcecfb8aa1ae8d0332eda5c21a9ba947f",
+    "5-1-immutable-assessment": "6710330e8e4120a094aec15aa3bd30cc43feaec5d18057438512188d437ffe8a",
+    "5-2-quantitative-exception": "1bcb632ff1f8a3c64c6316d9fecacdf514848189b76a941eb76025298c6f22cd",
+    "5-assessment-disposition-exception-and-immutability": "7cdac66624c4fe4266de4d660b3ebdc772fc5a58e40f6a80f38ebc38575dc700",
+    "6-lineage-retry-and-duplicate-protection": "263e61628ca9855e211a794dc6a96689e52507df4bf9514a24171542e389aa41",
+    "7-freshness-projection": "8a6c66c8d04ff5ea4dbf631c97fd5ebdbf2d054b7df8471eef16df4f257ce3fd",
+    "8-consumer-qualification-and-authority-handoff": "05f187123426a6cfcd19fc0c788b0972f7ff6ca62e8397daa611f24b02226a82",
+    "9-typed-rejection-and-public-export-contract": "4ec0292c867e3cca310ae50d6bfed4829adc998a6d64dd89765ff167de653bd1",
+    "v2-e70-readiness-and-governance-evidence": "a757fe916b597c30cce410827b4df2398f39751ed9eca665c45698dd6c66b4f4"
+  },
+  "sourcePrdSha256": "8a549a06f13e708adf468fd4eb3e3905c25094737f6b4f61d1cd7efee9978593",
+  "traceability": {
+    "decisions": {
+      "R01": "Readiness binds an exact subject ID/revision, Bundle Manifest, repository/base revision, policy/profile revision, and requirement set using RFC 8785 canonical SHA-256.",
+      "R02": "Applicability, disposition, and freshness are orthogonal closed dimensions.",
+      "R03": "Assessments and governance evidence are immutable `EvidenceRef`-identified records; recalculation appends, never overwrites.",
+      "R04": "Freshness is a pure caller-input projection with no implicit clock or TTL.",
+      "R05": "Epic readiness requires semantic, quantitative, and repository-feasibility evidence; Initiative applicability must be explicit policy evidence.",
+      "R06": "Product AI and self-reported trust labels cannot establish evidence authority. Repository feasibility binds `RoleRunId` and `LaunchPermitId`.",
+      "R07": "Disposition precedence is `must_decompose > needs_refinement > blocked > ready`.",
+      "R08": "Only a quantitative estimate greater than 120 and at most 240 active minutes may use a Human Governor exception.",
+      "R09": "Assessment lineage is single-headed, hash-linked, and sequence-numbered; only the current head is consumable.",
+      "R10": "A `blocked` result may be retried against the same candidate; `needs_refinement` and `must_decompose` require a new candidate.",
+      "R11": "E70 is one pure package depending only on E02 and exposes exactly five public operations from a single `.` entrypoint.",
+      "R12": "Readiness never mutates Product, Approval, queue, Allocation, Engineering, closure, persistence, or an external system."
+    }
+  },
+  "verification": {
+    "commands": [
+      "npm run clean:v2",
+      "npm run build:v2",
+      "npm run typecheck:v2",
+      "npm run test:v2",
+      "npm run validate:v2-boundaries",
+      "node docs/v2/epics/E70/generate-bundle.mjs --check",
+      "node scripts/verify-e70-worktree.mjs",
+      "npm pack --dry-run --workspace @pi-workflow/v2-readiness",
+      "git diff --check"
+    ],
+    "profile": "strict"
+  }
+}

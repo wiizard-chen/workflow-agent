@@ -17,11 +17,12 @@ import {
   E02_MANIFEST_SHA256,
   parseNulFields,
   verifyCandidateChanges,
-  verifyE02Worktree,
 } from "../../../scripts/verify-e02-worktree.mjs";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(testDirectory, "../../..");
+const E02_CANDIDATE_COMMIT =
+  "536d98693506fc30ea2388d61e135e8c81262813";
 
 function git(root, args) {
   const result = spawnSync("git", args, {
@@ -79,8 +80,32 @@ function withFixture(run) {
   }
 }
 
+function verifyFrozenE02Fixture() {
+  const parent = mkdtempSync(join(tmpdir(), "e02-exact-candidate-"));
+  const root = join(parent, "repository");
+  try {
+    git(parent, ["clone", "--quiet", "--no-local", workspaceRoot, root]);
+    git(root, ["checkout", "--quiet", "--detach", E02_CANDIDATE_COMMIT]);
+    assert.equal(git(root, ["rev-parse", "HEAD"]), E02_CANDIDATE_COMMIT);
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/verify-e02-worktree.mjs"],
+      { cwd: root, encoding: "utf8", env: process.env },
+    );
+    assert.equal(
+      result.status,
+      0,
+      `frozen E02 verifier failed:\n${result.stdout}${result.stderr}`,
+    );
+    assert.equal(result.stderr, "");
+    return JSON.parse(result.stdout);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+}
+
 test("E02 verifier accepts the exact candidate and frozen Bundle evidence", () => {
-  const evidence = verifyE02Worktree(workspaceRoot);
+  const evidence = verifyFrozenE02Fixture();
   assert.equal(evidence.status, "verified");
   assert.equal(evidence.baseline.requiredCommit, E01_BASELINE_COMMIT);
   assert.equal(evidence.bundle.manifestSha256, E02_MANIFEST_SHA256);

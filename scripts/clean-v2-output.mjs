@@ -7,6 +7,7 @@ const workspaces = [
   "apps/workflowd",
   "apps/workflow-worker",
   "packages/v2-domain",
+  "packages/v2-readiness",
   "packages/v2-protocol",
   "packages/v2-testkit",
 ];
