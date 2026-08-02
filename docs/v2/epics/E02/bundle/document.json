@@ -1,0 +1,289 @@
+{
+  "acceptanceCriteria": [
+    {
+      "id": "AC-001",
+      "statement": "`TaskAttemptId`, `StepAttemptId`, `RoleRunId`, and `LaunchPermitId` are distinct branded types; no public or documented generic `AttemptId` exists.",
+      "title": "Distinct identities:"
+    },
+    {
+      "id": "AC-002",
+      "statement": "constructors/transitions require caller-supplied timestamps, revisions, actor/reason/evidence/bundle/decision references and perform no implicit clock, ID, hash, or actor generation.",
+      "title": "Caller-supplied scalars:"
+    },
+    {
+      "id": "AC-003",
+      "statement": "`createRevisionEnvelope` always creates revision `0`; `validateRevisionEnvelope` accepts only non-negative safe-integer existing revisions; malformed inputs reject; outputs are defensive frozen copies; successful primitives produce exactly `revision + 1`.",
+      "title": "Revisioned immutable envelopes:"
+    },
+    {
+      "id": "AC-004",
+      "statement": "the exact Section 3.3 records validate as one canonical snapshot; missing/mismatched parents, duplicate/multiple ownership, invalid ordinals, parent/repository migration, missing Task ownership, and Unit repository mismatch return their frozen rejection codes.",
+      "title": "Hierarchy invariants:"
+    },
+    {
+      "id": "AC-005",
+      "statement": "E02 exports only `TaskAttemptId` identity/reference support; no TaskAttempt record, lifecycle, acceptance, retry, or execution matrix is present.",
+      "title": "Deferred TaskAttempt boundary:"
+    },
+    {
+      "id": "AC-006",
+      "statement": "every primitive returns the exact Section 3.4 discriminated union; `DomainTransitionRecord` binds the full caller context and before/after revisions; E02 failures use only the closed kernel codes and contain no partial next state or record.",
+      "title": "Generic typed result:"
+    },
+    {
+      "id": "AC-007",
+      "statement": "the reusable helper exercises the exact success/stale protocol and reports only the closed violation codes; it rejects changes to any attribute, undeclared dimension, or immutable/audit field other than revision and `updatedAt`.",
+      "title": "Single-dimension helper:"
+    },
+    {
+      "id": "AC-008",
+      "statement": "Section 3.2 fixtures produce byte-identical canonical text across insertion order, timezone, locale, environment, cwd, and filesystem changes; every listed invalid JSON value fails at a deterministic path.",
+      "title": "Determinism:"
+    },
+    {
+      "id": "AC-009",
+      "statement": "importing the public package and running canonicalization/validation/transition helpers performs no process, timer, network, filesystem, database, VCS, Beads, or Runtime effect.",
+      "title": "Zero side effects:"
+    },
+    {
+      "id": "AC-010",
+      "statement": "the runtime and type exports match the two exact Section 3.5 allowlists through the single package entrypoint; no public subpath, generic brand, private helper, or deferred record/lifecycle export exists.",
+      "title": "Export boundary:"
+    },
+    {
+      "id": "AC-011",
+      "statement": "source/export inspection permits only the E02-owned shared identity seams named by the closed scalar contract; it confirms their records/lifecycles plus supersession, plans, Readiness, projections, Attention/Blocker, Scheduling, Engineering/Task, Delivery, Release, Outcome, closure, and display remain with their named later Epics.",
+      "title": "Scope audit:"
+    },
+    {
+      "id": "AC-012",
+      "statement": "every Section 7 gate passes; tracked and enumerated untracked files are whitespace-clean; the generated Bundle, source/authority/renderer hashes, E01 freeze, changed-path allowlist, and exact Manifest hash read back without mutation.",
+      "title": "Strict evidence:"
+    }
+  ],
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "approvalStatus": "not-approved",
+    "deliveryUnits": 1,
+    "engineeringEligibility": "ineligible",
+    "epic": "workflow-agent-c2b.3",
+    "initiative": "workflow-agent-c2b",
+    "mapId": "E02",
+    "maximumTasks": 5,
+    "status": "draft",
+    "targetActiveEngineeringTime": "1.5–2h",
+    "title": "Domain identities, hierarchy, and primitive transition kernel",
+    "verificationProfile": "strict",
+    "version": "draft-v3"
+  },
+  "schemaVersion": 2,
+  "scope": {
+    "included": [
+      "branded identities and caller-supplied scalar references/timestamps",
+      "immutable revisioned envelopes and canonical ordering",
+      "Portfolio→Initiative→Epic→DeliveryUnit→Task ownership and parent/repository invariants",
+      "generic expected-revision result, typed rejection, DomainTransitionRecord, and single-dimension conformance helper",
+      "deterministic zero-side-effect public exports and tests"
+    ],
+    "nonGoals": [
+      "Portfolio lifecycle or Product lifecycle;",
+      "`ApprovalAttempt` records or approval decisions;",
+      "`ChangeRequest` records, application, or approval;",
+      "supersession behavior or predecessor/successor lifecycle;",
+      "TaskAttempt records or lifecycle (E79 owns these; E02 only exposes `TaskAttemptId`);",
+      "ordered plans or preflight (E73 owns these);",
+      "Readiness or governance evidence (E70);",
+      "Attention or Blocker facts (E77);",
+      "Scheduling, eligibility, queue, or Allocation (E70/E71);",
+      "Engineering lifecycle or Task lifecycle (E78);",
+      "Delivery facets (E72);",
+      "Release (E80);",
+      "Outcome (E81);",
+      "closure (E82);",
+      "display (E83);",
+      "persistence, RPC, Beads, Git, GitHub, Runtime orchestration, Worker execution, Scheduler, Lease, Permission, adapter, network, filesystem mutation, timers, or third-party backend selection."
+    ]
+  },
+  "sectionHashes": {
+    "1-related-authority-and-frozen-traceability": "35c06beecb7fa66ccb464df4b6e46cc0ffc58d5f2f051039d485cece3d542272",
+    "2-bounded-result": "8932202a4fdde7e21af814caa27afd97c6e0b774daa405c7947ecc97aae75f0d",
+    "3-1-identities-and-scalar-inputs": "75be3004cd724a4156d298ad7b4a571765571a0efd65bda42060f1bd79eb7a1a",
+    "3-2-immutable-envelopes-and-canonical-values": "20014f4d6c12b66059b7ff05066cb03219679697c1d9e1423565bf01387068a1",
+    "3-3-hierarchy-and-ownership": "d3ff518b38207c4d5f24ceb6cb74e04fc3a93d84b8c7d411a0847baf7af257ab",
+    "3-4-generic-primitive-transition-kernel": "d4a81875065c8e64cb1777bc49116a490e042cc5535783eaf7bf928175a70c67",
+    "3-5-deterministic-exports-and-tests": "752ffb6fab797ed4bf906063302484ff09abedab261bdcf58063826682edb00d",
+    "3-included-scope": "9348585c5e7cf10eb2e5400db58695ff4125c828fc88887d0e79ad2efe366bba",
+    "4-explicit-non-goals-and-authority-handoff": "cf64644f9ccce603fea518157517347c6bc19459ba85c7794f763238ee6294c2",
+    "5-users-and-bounded-implementation-tasks": "73dd22c05d434f3e5b811c976aab78fe17e875e9b4f023fc0b9bf26f58d30448",
+    "6-acceptance-criteria-continuous-reduced-set": "343470692941fe4635738689ad515a9fcd119dbf55ffe993b37fbb4e226ee6fe",
+    "7-strict-verification-contract": "ffdf6e6c15914c5ad93b2a5e640efc3709ebecdd95122bdbbb30b334444c3737",
+    "8-dependencies-stop-boundary-and-risks": "848978d8f6ce3e7925130f020f6f6044e91260f821e5730aeb64906babb07b92",
+    "9-approval-posture": "cd788db2ef9bb6ca75a7894fdf077eee1f06d2e7753bf2c83245efb5eb88cfe9",
+    "maximum-five-tasks": "43ba95f1643f7c6294d9cde7c87caec2c112f7ddfb59db8708642fd103ba7018",
+    "user-stories": "242d1c1d759573e9bb510ab28d0ad7445338945ab8a6eee16045581301b488d0",
+    "v2-e02-domain-identities-hierarchy-and-primitive-transition-kernel": "52799e19225290460524973ab6aca8b19ec585ff1effeabd3ccc4990037d3b72"
+  },
+  "sourcePrdSha256": "b61d2642e66183a8eb772d9986fffbf4f56fe7932b1a016c279fe2845c136b58",
+  "traceability": {
+    "decisions": {
+      "D01": [
+        "E02",
+        "E73"
+      ],
+      "D02": [
+        "E02",
+        "E70",
+        "E71",
+        "E72",
+        "E73",
+        "E74",
+        "E75",
+        "E76",
+        "E77",
+        "E78",
+        "E79",
+        "E80",
+        "E81",
+        "E82",
+        "E83"
+      ],
+      "D03": [
+        "E70",
+        "E71",
+        "E72",
+        "E77",
+        "E78",
+        "E82",
+        "E83"
+      ],
+      "D04": [
+        "E75"
+      ],
+      "D05": [
+        "E72",
+        "E74",
+        "E75",
+        "E76",
+        "E77",
+        "E78",
+        "E79",
+        "E80",
+        "E81",
+        "E82"
+      ],
+      "D06": [
+        "E77"
+      ],
+      "D07": [
+        "E78",
+        "E79"
+      ],
+      "D08": [
+        "E83"
+      ],
+      "D09": [
+        "E02"
+      ],
+      "D10": [
+        "E70",
+        "E74"
+      ],
+      "D11": [
+        "E70",
+        "E71"
+      ],
+      "D12": [
+        "E72"
+      ],
+      "D13": [
+        "E80"
+      ],
+      "D14": [
+        "E81"
+      ],
+      "D15": [
+        "E73"
+      ],
+      "D16": [
+        "E02",
+        "E78"
+      ],
+      "D17": [
+        "E78",
+        "E77"
+      ],
+      "D18": [
+        "E02",
+        "E70",
+        "E71",
+        "E72",
+        "E73",
+        "E74",
+        "E75",
+        "E76",
+        "E77",
+        "E78",
+        "E79",
+        "E80",
+        "E81",
+        "E82",
+        "E83"
+      ],
+      "D19": [
+        "E74"
+      ],
+      "D20": [
+        "E76"
+      ],
+      "D21": [
+        "E02",
+        "E70",
+        "E71",
+        "E72",
+        "E73",
+        "E74",
+        "E75",
+        "E76",
+        "E77",
+        "E78",
+        "E79",
+        "E80",
+        "E81",
+        "E82",
+        "E83"
+      ]
+    },
+    "ownerEpics": [
+      "E02",
+      "E70",
+      "E71",
+      "E72",
+      "E73",
+      "E74",
+      "E75",
+      "E76",
+      "E77",
+      "E78",
+      "E79",
+      "E80",
+      "E81",
+      "E82",
+      "E83"
+    ]
+  },
+  "verification": {
+    "commands": [
+      "node docs/v2/epics/E02/generate-bundle.mjs --check",
+      "npm --workspace=@pi-workflow/v2-domain run test",
+      "npm --workspace=@pi-workflow/v2-domain run typecheck",
+      "npm run test:v2",
+      "npm run typecheck:v2",
+      "node scripts/validate-v2-boundaries.mjs",
+      "node scripts/verify-e02-worktree.mjs",
+      "git diff --check",
+      "git diff --exit-code -- docs/v2/epics/E01",
+      "npm ci && npm run check && node scripts/validate-v2-boundaries.mjs && git diff --check"
+    ],
+    "profile": "strict"
+  }
+}

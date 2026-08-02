@@ -133,6 +133,20 @@ function importSpecifiers(path) {
 
 function validateExports(workspace, manifest, errors) {
   const exports = packageExportPaths(manifest.exports);
+  if (workspace.name === "@pi-workflow/v2-domain") {
+    const rawExports = manifest.exports;
+    if (
+      rawExports === null ||
+      typeof rawExports !== "object" ||
+      Array.isArray(rawExports) ||
+      Object.keys(rawExports).length !== 1 ||
+      !Object.hasOwn(rawExports, ".")
+    ) {
+      errors.push(
+        "@pi-workflow/v2-domain must export exactly the single \".\" entrypoint.",
+      );
+    }
+  }
   const publicEntry = exports.get(".");
   if (!publicEntry) {
     errors.push(`${workspace.name} must export a public "." entrypoint.`);
@@ -319,6 +333,27 @@ async function runNegativeFixtureTests(root) {
         expectedErrors: ["declares @pi-workflow/v2-domain without its TypeScript project reference"],
         mutate: async (candidate) => {
           await mutateJson(join(candidate, "packages/v2-protocol/tsconfig.json"), (config) => { config.references = []; });
+        },
+      },
+      {
+        label: "v2-domain extra public subpath",
+        expectedErrors: ["must export exactly the single \".\" entrypoint"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-domain/package.json"), (manifest) => {
+            manifest.exports["./internal"] = {
+              types: "./dist/internal.d.ts",
+              import: "./dist/internal.js",
+            };
+          });
+        },
+      },
+      {
+        label: "v2-domain null public subpath",
+        expectedErrors: ["must export exactly the single \".\" entrypoint"],
+        mutate: async (candidate) => {
+          await mutateJson(join(candidate, "packages/v2-domain/package.json"), (manifest) => {
+            manifest.exports["./hidden"] = null;
+          });
         },
       },
       {

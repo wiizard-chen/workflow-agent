@@ -77,6 +77,12 @@ These are not treated as isolated V1 bugs. They are consequences of the V1 owner
 | ADR-021 | V2 is built side-by-side and adopted per Initiative with an atomic generation guard. |
 | ADR-022 | Initiative may span repositories, but every bounded Epic binds one primary repository. |
 | ADR-023 | Beads uses core issue types plus `workflow.kind` metadata rather than custom types. |
+| ADR-024 | Reuse is preferred only behind a V2-owned SPI and qualification gate; no third-party package is adopted by implication. |
+| ADR-025 | `workflowd` is the only V2 execution/enforcement control-plane authority: it authenticates, serializes, validates, persists, and brokers commands according to Domain-owned contracts. Domain epics own transition semantics and authoritative business facts; neither Runtime nor external backends own approvals or evidence acceptance. |
+| ADR-026 | Permission evaluation is an in-session PEP behind `PermissionBackend`, bounded by an immutable operator ceiling and fail-closed compatibility rules. |
+| ADR-027 | Role execution, workspace lifecycle, and durable execution use separate versioned `RoleExecutionBackend`, `WorkspaceBackend`, and `DurableExecutionBackend` SPIs. |
+| ADR-028 | Permission, durable, and workspace candidates require contract, provenance, integrator, isolation, fault, and authority qualification before adoption. |
+| ADR-029 | Domain authority is layered and dimension-local across the exact 15 bounded epics E02 and E70–E83: E02 owns identities, hierarchy, immutable envelopes, canonical ordering, and the generic primitive transition kernel; E74 owns Product/Approval; E75 ChangeRequest; E76 supersession; E70 Readiness; E77 Attention/Blocker; E71 Scheduling/Allocation; E78 Engineering/Task; E79 TaskAttempt; E72 Delivery; E80 Release; E81 Outcome; E82 closure; E83 display; E73 ordered plans/preflight. Distinct TaskAttempt, StepAttemptRecord, and RoleRunRecord/LaunchPermit contracts have no generic AttemptId, derived projections have no mutation authority, and external backends never become authority. |
 
 ---
 
@@ -84,7 +90,7 @@ These are not treated as isolated V1 bugs. They are consequences of the V1 owner
 
 These invariants are implementation acceptance criteria, not guidance.
 
-1. **Lead intent, Runtime authority.** The Engineering Lead may choose among legal tactical actions and propose plans. Only `workflowd` may create attempts, allocate capacity, grant leases, transition lifecycle state, approve effects, or broker mutations.
+1. **Domain semantics, Runtime enforcement.** The Engineering Lead may choose among legal tactical actions and propose plans. E02 and E70–E83 define transition semantics and own their authoritative Domain facts. Only `workflowd` may authenticate, serialize, enforce permissions and expected revisions, execute accepted transition commands, persist the resulting facts, grant leases, or broker effects; those mechanics do not give Runtime approval or evidence-acceptance authority.
 2. **Single active Runtime generation.** An Initiative is authoritative in V1 or V2, never both. The generation marker is written to and read back from governance Beads. V1 must reject V2-owned work and V2 must reject active V1 ownership.
 3. **Bounded Epic fail-closed.** An Epic that violates single-result, independent acceptance, rollback, or size constraints cannot be forced into BUILD.
 4. **One Unit, one writer, one branch, one worktree, one PR.** Multiple tasks may execute serially inside a Unit. Parallel writers in one Unit are forbidden.
@@ -96,7 +102,7 @@ These invariants are implementation acceptance criteria, not guidance.
 10. **No host-general mutation tools for Dev.** Dev file and command tools are jailed to the current Unit and cannot access Runtime state, Beads, `.git`, other worktrees, or user home.
 11. **No protection bypass.** Runtime may enable GitHub auto-merge but cannot bypass branch protection, required reviews, checks, or merge queues.
 12. **Short integration lease.** The base-branch integration lease covers fetch/update/rebase, verification, push, and merge/queue request. It is released while waiting for GitHub. A changed base requires reacquisition and revalidation.
-13. **Immutable approved inputs.** Approved PRD bundles, Policy Snapshots, Attempts, Launch Permits, and Verification definitions are immutable.
+13. **Immutable approved inputs.** Approved PRD bundles, Policy Snapshots, TaskAttempts, StepAttemptRecords, RoleRunRecords, Launch Permits, and Verification definitions are immutable.
 14. **No silent degradation.** Missing sandbox, model, credential, tool, adapter, or verification capability blocks execution. Host execution, model migration, and verification downgrade require explicit governed policy.
 15. **Single active executor machine.** A Portfolio has one active `workflowd` execution authority. Remote workers may be added later under that control plane; multiple active control planes are out of scope.
 16. **Sensitive artifact policy.** Logs, transcripts, CI output, and documents are subject to redaction, access, and retention policy. Full thinking content is not published to Docs or Dashboard by default.
@@ -134,9 +140,9 @@ CLI / Diagnostics ─────────┘                              �
 
 It owns:
 
-- Runtime mutation authority;
+- exclusive Runtime command-execution and enforcement authority, not Domain semantic or fact ownership;
 - SQLite and migrations;
-- Command handlers and projections;
+- Command handlers and projection materialization;
 - scheduler, capacity, and budgets;
 - leases and fencing;
 - worker lifecycle;
@@ -144,7 +150,7 @@ It owns:
 - Inbox and event routing;
 - reconciliation and recovery.
 
-It does not load models, execute repository code, or host an Engineering Lead.
+It does not load models, execute repository code, or host an Engineering Lead. Domain owners define legal transitions and authoritative facts; `workflowd` executes and records those contracts but cannot decide approval or evidence acceptance.
 
 ### 5.2 `workflow-worker`
 
@@ -201,7 +207,7 @@ SQLite holds transactional Runtime facts, including:
 - durable outbox operations;
 - leases and fencing tokens;
 - scheduler entries, capacity, and budgets;
-- Steps and Attempts;
+- Steps, TaskAttempts, StepAttemptRecords, RoleRunRecords, and LaunchPermits;
 - Inbox items and decisions;
 - GitHub resource projections and cursors;
 - release and observation operation projections;
@@ -254,19 +260,21 @@ SQLite, artifacts, session JSONL, logs, Docs, and Beads must not contain plainte
 
 ## 8. Authority Model
 
-| Fact | Authority | Confirmation rule |
-|---|---|---|
-| Initiative Charter approval | Portfolio Beads | write + readback before domain event |
-| Epic PRD approval | Repository Beads | write + readback before scheduling eligibility |
-| Change Request and governance decision | Beads | write + readback |
-| Job, Worker, Lease, Step, heartbeat | SQLite | local transaction |
-| Product conversation | Product Session Store | append-only Pi session file + binding |
-| Approved document version | Document Bundle manifest | exact manifest hash |
-| Branch, PR, review, checks, merge | GitHub | API reconciliation |
-| Release and rollback | external Release Adapter system | operation status confirmation |
-| Metrics and outcome | Observation Adapter source | raw samples + deterministic evaluation |
+`Authority` has two distinct meanings here. The Domain owner defines transition semantics and owns the resulting authoritative business fact. The confirmation/persistence system proves the bounded input or durably records that fact; it does not acquire Domain semantic ownership.
 
-An outbox transports intent to external authorities. It never redefines which system is authoritative.
+| Fact | Domain semantic/fact owner | Confirmation or persistence rule |
+|---|---|---|
+| Initiative Charter approval | E74 Product/Approval | Portfolio Beads write + readback before domain event |
+| Epic PRD approval | E74 Product/Approval | Repository Beads write + readback before scheduling eligibility |
+| Change Request and governance decision | E75 ChangeRequest; E74 for Product/Approval decisions | Beads write + readback |
+| Job, Worker, Lease, Step, heartbeat | Runtime execution domain | SQLite local transaction |
+| Product conversation | Product Session domain | append-only Product Session Store file + binding |
+| Approved document version | E74 approval binding | exact Document Bundle manifest hash |
+| Branch, PR, review, checks, merge | E72 Delivery | GitHub API reconciliation |
+| Release and rollback | E80 Release | external Release Adapter operation-status confirmation |
+| Metrics and outcome | E81 Outcome | Observation Adapter raw samples + deterministic evaluation |
+
+An outbox transports intent to confirmation systems. It never redefines the Domain semantic owner, and Runtime validation of a response never creates an approval or evidence-acceptance fact.
 
 ---
 
@@ -387,34 +395,108 @@ Protocol, tools, artifacts, policies, adapters, and evidence use shared runtime 
 
 ## 11. State Model
 
-A single `status` enum is prohibited for complex aggregates.
+A single `status` enum is prohibited for complex aggregates. Domain authority is layered and dimension-local: each authoritative fact has one owner, while cross-family summaries are versioned pure projections. Runtime may execute and enforce Domain-owned transitions and mechanically validate evidence schema, integrity, applicability inputs, and freshness. Runtime, Beads, UI, session transcripts, adapter observations, and third-party backends may persist, transport, or report bounded facts, but they never define transition semantics or own an approval, evidence-acceptance/disposition fact, or projection.
 
-### 11.1 Epic dimensions
+### 11.1 ADR-029 — exact bounded domain ownership
 
-- Product/Governance: `draft`, `readiness-review`, `awaiting-approval`, `approved`, `change-proposed`, `awaiting-change-approval`, `cancelled`, `superseded`.
-- Scheduling: `not-eligible`, `eligible`, `queued`, `allocated`, `slot-released`.
-- Engineering: `not-started`, `starting`, `running`, `paused`, `blocked`, `replanning`, `implementation-complete`, `failed`, `cancelled`.
-- Delivery: `not-started`, `building`, `pr-open`, `awaiting-checks`, `changes-requested`, `ready-to-merge`, `merged`, `integrated`.
-- Release: `not-required`, `not-started`, `ready`, `releasing`, `released`, `rolled-back`, `failed`.
-- Outcome: `not-required`, `pending`, `observing`, `verified`, `failed`.
-- Attention: `none`, `warning`, `needs-decision`, `critical`.
+ADR-029 fixes the following **exact 15 bounded epics** and preserves their authority boundaries:
 
-### 11.2 Delivery Unit dimensions
+| Epic | Bounded authoritative result | Boundary |
+|---:|---|---|
+| E02 | Domain kernel | no Portfolio/Product lifecycle or any family lifecycle |
+| E70 | Readiness | does not mutate Product, queue, Engineering, or closure |
+| E71 | Scheduling/Allocation | does not own Engineering, Task, or Delivery facts |
+| E72 | Delivery | delivery is not Release or Outcome |
+| E73 | plan/preflight | validates intent; does not authorize or execute effects |
+| E74 | Product/Approval | approval does not schedule or activate work |
+| E75 | ChangeRequest | no implicit multi-aggregate primitive or same-store commit |
+| E76 | supersession | no automatic transfer of authority or evidence |
+| E77 | Attention/Blocker | signals/blocks do not directly mutate another dimension |
+| E78 | Engineering/Task | TaskAttempt success never automatically accepts a Task |
+| E79 | TaskAttempt record, lifecycle, result, and evidence | consumes E02 `TaskAttemptId`/owner ref; no generic `AttemptId`; not Runtime step/role execution |
+| E80 | Release | release is not Delivery or Outcome |
+| E81 | Outcome | observations cannot rewrite Delivery or Release authority |
+| E82 | closure | closure is derived, never a writable universal state |
+| E83 | display | display has no mutation authority |
 
-Engineering, PR, Release, and Outcome are tracked independently. Illegal transitions are rejected by explicit pure transition functions.
+E02 owns only the kernel row. E10, E20, and E70–E83 consume the applicable E02 contracts and must not redefine IDs, revisions, canonical ordering, parent ownership, or generic transition-result semantics.
 
-### 11.3 Display status
+### 11.2 Identity and execution-attempt boundaries
 
-UI derives a primary status using precedence similar to:
+There is no public generic `AttemptId`. E02 owns the distinct shared identity seams `TaskAttemptId`, `StepAttemptId`, `RoleRunId`, and `LaunchPermitId`. E79 consumes `TaskAttemptId` and owns the TaskAttempt record/lifecycle/result/evidence; Runtime E10 consumes `StepAttemptId` and owns the StepAttemptRecord/lifecycle; Runtime E20 consumes `RoleRunId` and `LaunchPermitId` and owns the RoleRunRecord, LaunchPermit record, and their lifecycles. A StepAttemptRecord is a causal execution record for one durable Runtime step; a RoleRunRecord is one role invocation authorized by one LaunchPermit; a TaskAttempt is a domain record and is not a Runtime permit or step record. These records are immutable, have distinct cardinalities and owners, and cannot be substituted for one another.
+
+### 11.3 Independent dimensions
+
+Every primitive transition changes one declared authoritative dimension plus revision/audit fields. Parent summaries are projections. Terminality is local: a Product, ChangeRequest, TaskAttempt, Delivery facet, ReleaseOperation, or OutcomeAssessment terminal state does not close or freeze other dimensions.
+
+| Dimension | Owner | Contract |
+|---|---:|---|
+| hierarchy identity/parent/repository invariants | E02 | immutable ownership and parent-kind checks |
+| Readiness/evidence | E70 | exact candidate, applicability, freshness, fail-closed evidence |
+| Scheduling/Allocation | E71 | eligibility, queue, capacity, Allocation are separate |
+| Delivery | E72 | candidate/review/checks/mergeability/integration facets |
+| plans/preflight | E73 | ordered dependency graph, revisions, speculative no-effect validation |
+| Product/Approval | E74 | Portfolio/Product transitions and frozen approval submissions |
+| ChangeRequest | E75 | approved baseline remains current until applied |
+| supersession | E76 | explicit acyclic predecessor/successor, no inheritance |
+| Attention/Blocker | E77 | first-class signals/facts and derived severity |
+| Engineering/Task | E78 | `paused` control and explicit Task acceptance |
+| TaskAttempt | E79 | TaskAttempt record/result/evidence; never auto-accepts Task |
+| Release | E80 | disposition separate from provider-confirmed operation |
+| Outcome | E81 | requirements, observations, assessments |
+| closure | E82 | required facets and unresolved effects projection |
+| display | E83 | deterministic primary/badges/reasons/source revisions |
+
+### 11.4 Readiness handoff and no-cycle approval
+
+E70 qualifies the exact candidate Bundle/target revision and emits immutable evidence with explicit applicability, disposition, freshness, and source revisions. E74 consumes that qualification: an applicable Epic approval binds exactly one `ready` assessment; an Initiative consumes Readiness only when its policy says it is applicable. Readiness is evidence, not Product authority.
+
+The approval decision and Product activation are separate E73 plan primitives. A plan may contain an E74 approval-decision step followed by an E74 Product-activation step, with E70 evidence consumed as a precondition; neither primitive calls the other or creates a cycle. Approval does not enqueue, allocate, start Engineering, create a TaskAttempt, or activate Delivery.
+
+### 11.5 Product and Approval boundary
+
+E74 owns Portfolio administrative states and Initiative/Epic Product states. Product state is:
 
 ```text
-critical > needs-decision > failed > paused > blocked > running
-> awaiting-checks > queued > observing > completed
+draft
+awaiting-approval
+approved
+cancelled
+superseded
 ```
 
-Beads core status is a compatibility projection. Detailed Workflow state is stored in `workflow.*` metadata and Runtime projections.
+`readiness-review`, `change-proposed`, and `awaiting-change-approval` are records/dispositions, not Product states. Initial approval uses immutable `ApprovalAttempt`; rejected, withdrawn, or expired submissions remain frozen and return Product to `draft`. Product `approved` does not imply scheduling, allocation, engineering, delivery, release, outcome, or closure.
 
----
+### 11.6 ChangeRequest transition matrix (E75)
+
+A ChangeRequest targets an already approved Product baseline. The current approved Bundle remains authoritative until `applied`.
+
+Legal edges are exactly:
+
+```text
+draft → proposed
+proposed → awaiting-approval
+awaiting-approval → approved
+awaiting-approval → rejected
+awaiting-approval → withdrawn
+approved → applying
+approved → superseded
+applying → applied
+applying → application-failed
+```
+
+`draft`, `proposed`, `awaiting-approval`, and `approved` are non-terminal only as listed above. `rejected`, `withdrawn`, `superseded`, `application-failed`, and `applied` are terminal; no terminal state reopens. `approved → applying` requires a bound ordered E73 plan. `applying → applied` requires validated completion facts for the required plan steps and invokes the target-bundle activation primitive; it is the only edge that activates the proposed Bundle. Approval and Product activation are separate E73 plan primitives. Application failure preserves the prior Bundle.
+
+E75 does not claim a multi-aggregate atomic primitive. Same-store atomic commit, if required for a later execution step, belongs to Runtime persistence/transaction work; cross-authority effects require an authority-aware Saga, stop-on-failure, compensation, or reconciliation. No implicit cascade from ChangeRequest updates Product, Scheduling, Engineering, Delivery, Release, Outcome, or closure.
+
+### 11.7 Supersession and evidence boundaries
+
+E76 requires a kind-compatible, acyclic predecessor/successor relation and makes terminality explicit. Supersession transfers no ApprovalAttempt, Readiness, ChangeRequest, queue, Allocation, lease, LaunchPermit, TaskAttempt, review, verification, Git, PR, Release, or Outcome authority. Applicability is revalidated by the owning Epic.
+
+### 11.8 Typed transitions, plans, and projections
+
+E02 provides the generic pure expected-revision result, typed rejection, `DomainTransitionRecord`, canonical ordering, and single-dimension conformance helper. E73 provides ordered plan schema/preflight and does not authorize effects. E70–E83 provide family-specific transitions and projections. Rejections contain no partially modified aggregate. Closure (E82) and display (E83) are versioned pure projections with source revisions and no mutation functions. Third-party observations are bounded inputs confirmed by V2-owned brokers.
+
 
 ## 12. Lease and Fencing Model
 
@@ -477,14 +559,14 @@ Exceptional states:
 failed, aborted, superseded, unknown
 ```
 
-A prepared Step freezes input hashes, expected HEAD, Attempt, policy, role, model, output location, and worker generation.
+A prepared Step freezes input hashes, expected HEAD, `StepAttemptId`, policy, role, model, output location, and worker generation.
 
 ### 13.2 Recovery principles
 
 - A session statement is not evidence that an effect occurred.
 - Existing effects are adopted after validation rather than recreated.
 - Unknown external effects are reconciled before retry.
-- Attempts and artifacts are immutable.
+- TaskAttempts, StepAttemptRecords, RoleRunRecords, LaunchPermits, and artifacts are immutable.
 
 ### 13.3 Representative recovery
 
@@ -528,12 +610,12 @@ Budgets apply at Portfolio, Initiative, Epic, and Step levels. They may include:
 
 - Active Engineering Time;
 - tokens and cost;
-- task and reviewer attempts;
+- TaskAttempt records, StepAttemptRecords, and RoleRunRecords;
 - CI runs;
 - Sandbox compute;
 - research calls.
 
-Time, attempt, retry, and CI limits have safe defaults. Monetary hard limits require explicit user configuration. Hard limits stop new permits and pause at a safe checkpoint.
+Time, TaskAttempt/StepAttempt/RoleRun retry, and CI limits have safe defaults. Monetary hard limits require explicit user configuration. Hard limits stop new permits and pause at a safe checkpoint.
 
 ---
 
@@ -572,7 +654,7 @@ Live JSONL is append-only mutable history, not an immutable artifact. PRD approv
 The Lead receives tools such as:
 
 - `analyze_codebase`;
-- `run_dev_attempt`;
+- `run_dev_role`;
 - `run_task_review`;
 - `run_final_review`;
 - `diagnose_ci_failure`;
@@ -582,7 +664,7 @@ The Lead receives tools such as:
 
 It does not receive a generic `subagent`, unrestricted shell, GitHub, Beads, or release tool.
 
-Before role execution, `workflowd` creates an immutable Attempt and one-time Launch Permit specifying:
+Before role execution, `workflowd` creates an immutable `RoleRunRecord` and one-time `LaunchPermit` specifying:
 
 - exact role and namespaced agent;
 - requested model and thinking effort;
@@ -597,6 +679,67 @@ Before role execution, `workflowd` creates an immutable Attempt and one-time Lau
 The Worker executes the permit through pi-subagents. Resolved model/effort, cwd, tool audit, output, and usage are validated before acceptance. Drift fails closed.
 
 ---
+
+## 16.1 Reuse-first backend policy
+
+V2 prefers reuse when a candidate can be pinned, bounded, and independently qualified. A third-party library, service, or orchestration runtime is an implementation candidate, not an authority. It may be adopted only behind a versioned V2-owned SPI and an accepted qualification result. A research spike, source review, successful demo, or S1/S1.1 local probe does not by itself change the selected implementation.
+
+`workflowd` remains the unique Runtime execution/enforcement authority. It owns Runtime permits, leases, fencing, Policy Snapshots, effect brokering, authority-aware saga mechanics, scheduler execution, evidence-validation mechanics, and Runtime recovery execution. It enforces Domain-defined transitions and returns validated observations to the owning Domain contract; E70–E83 retain scheduling, transition, approval, and evidence-acceptance/disposition semantics and facts. External backends may execute a bounded operation or persist/replay a bounded Step, but neither they nor `workflowd` can approve an observation or manufacture an evidence-acceptance fact.
+
+The authority restrictions apply equally to external Pi team packages, permission libraries, agent runtimes, durable workflow engines, and workspace managers. No external backend may own or directly mutate:
+
+- Beads governance, generation markers, or approval readback;
+- Git branches, commits, worktree policy, GitHub PR/merge state, or release operations outside V2 brokers;
+- human approval or human-presence grants;
+- immutable TaskAttempts, StepAttemptRecords, RoleRunRecords, LaunchPermits, verification definitions, evidence manifests, or evidence acceptance.
+
+This rule prevents a second scheduler or “helpful” backend from becoming an unreviewed control plane.
+
+## 16.2 PermissionBackend: in-session PEP only
+
+`PermissionBackend` is a narrow, in-session **Permission Policy Enforcement Point (PEP)**. It evaluates a proposed tool/action request and returns a structured `allow`, `ask`, or `deny` decision with policy version, reason, and provenance. It is not a sandbox, credential broker, scheduler, approval service, durable store, or effect broker. A PermissionBackend does not make an operation safe merely by returning `allow`.
+
+The resolved policy contains an immutable **operator ceiling**: the maximum capability set permitted by the human/operator configuration and Runtime security posture. Project policy, session policy, model instructions, per-call “yolo” mode, MCP candidates, and external adapters may narrow this ceiling; none may widen it. The ceiling is content-addressed in the Policy Snapshot and cannot be changed by a lower layer while active work continues.
+
+The session overlay is evaluated with the precedence `deny > ask > allow` across project/session rules and MCP-provided candidates. A candidate rule can add an `ask` or `deny`, but an `allow` cannot override a ceiling denial, a sandbox requirement, a missing permit, or a higher-precedence deny. `ask` means “pause for the governed confirmation path”; it is not an implicit allow and cannot be satisfied by model text.
+
+A **hard deny is terminal for that request**. It cannot be downgraded to `ask` or `allow` by project configuration, session overlay, yolo mode, a plugin, MCP metadata, retry, or backend fallback. The only legal next operation is a new request under a newly approved policy/version where the operator ceiling itself permits the action.
+
+Missing PermissionBackend, unsupported capability, malformed decision, provenance mismatch, or PermissionBackend version drift is `DENY` and blocks the affected operation. The Runtime must not silently substitute a permissive implementation. Requalification or an explicit Policy Migration is required before execution can resume.
+
+## 16.3 External backend SPIs
+
+The following are separate interfaces. Combining them behind one vendor SDK does not combine their authority.
+
+### RoleExecutionBackend
+
+`RoleExecutionBackend.execute(permit)` accepts one immutable, one-time Launch Permit and runs one named role `RoleRunRecord`. The permit binds role, model/effort, input hashes, worktree/session/output locators, capability ceiling, fencing token, expiry, cancellation, and artifact destination. The backend returns resolved version, exit/result status, usage, tool audit, and artifact hashes. It cannot create permits, recursively spawn unrestricted agents, mutate Beads/Git/GitHub, approve effects, or declare verification evidence accepted.
+
+### WorkspaceBackend
+
+`WorkspaceBackend.prepare|inspect|cleanup(unit, policy, fencing)` manages a Delivery Unit workspace and reports canonical path, branch/base identity, lease/fencing state, dirty state, and cleanup outcome. It must enforce the V2 path and lifecycle contract. It cannot select product scope, approve governance, bypass the Git Broker, publish/merge a PR, or delete unknown dirty state. Workspace isolation is not automatically process sandboxing.
+
+### DurableExecutionBackend
+
+`DurableExecutionBackend.prepare|append|checkpoint|recover(step)` may persist/replay bounded Steps, timers, retries, cancellation, and recovery observations. It must preserve immutable TaskAttempts, StepAttemptRecords, RoleRunRecords, idempotency keys, fencing, authority-aware Saga boundaries, and content-addressed artifact hashes. It cannot redefine domain transitions, confirm an external authority, approve an effect, or replace Beads, GitHub, release, observation, or evidence authority.
+
+Each SPI carries an interface version, candidate version/commit, capability declaration, Policy Snapshot hash, correlation ID, fencing token, and provenance fields. Unsupported fields or version drift fail closed. Adapters must be disableable without enabling host execution or bypassing V2 brokers.
+
+## 16.4 Qualification gate
+
+A candidate backend is eligible for adoption only after a pinned qualification record passes:
+
+1. contract and schema compatibility;
+2. operator-ceiling and capability-boundary checks;
+3. source/dependency/runtime provenance and artifact SHA-256 checks;
+4. integrator tests through the V2-owned SPI;
+5. restart, timeout, cancellation, duplicate request, stale fencing, version-drift, and unknown-effect fault tests;
+6. authority checks proving no direct Beads/Git/GitHub/approval/evidence ownership;
+7. safe disable, observability, cleanup, and resource-boundary checks.
+
+S1 source evidence establishes the candidate's documented boundary. S1.1 dynamic evidence establishes only the tested pinned version in the recorded environment. Missing or unhashable evidence is `unknown` and therefore fails closed. A qualified adapter still requires an accepted ADR before it becomes the selected implementation.
+
+A third-party role, durable, or workspace backend is **not a sandbox**. Code/build/test execution remains under the Sandbox Runner and its selected backend. Permission evaluation can deny an operation but cannot provide filesystem, process, network, or secret isolation.
 
 ## 17. Product Session Store
 
@@ -894,7 +1037,7 @@ Runtime audit records:
 - worker and session generations;
 - leases and fencing tokens;
 - agent role, requested/resolved model and effort, usage, and tool audit;
-- Steps, Attempts, commits, artifacts, verification, and reviews;
+- Steps, TaskAttempts, StepAttemptRecords, RoleRunRecords, commits, artifacts, verification, and reviews;
 - Beads, GitHub, Docs, release, and observation authoritative references;
 - Active Engineering Time, token, cost, CI, and compute budgets.
 
@@ -915,9 +1058,10 @@ The following remain implementation ADRs and are not silently fixed by this RFC:
 - session/artifact backup transport;
 - exact table schemas, RPC method list, and transition matrices;
 - retention periods and redaction implementation;
-- exact repository governance checkout layout.
+- exact repository governance checkout layout;
+- selected PermissionBackend, RoleExecutionBackend, WorkspaceBackend, and DurableExecutionBackend implementations after E67–E69 qualification.
 
-Each choice must preserve the invariants in Section 4.
+Each choice must preserve the invariants in Section 4. Third-party research is summarized in [Third-Party Reuse Survey](./THIRD_PARTY_REUSE_SURVEY.md). Research spikes do not silently select an implementation.
 
 ---
 
@@ -927,7 +1071,11 @@ V2 itself requires:
 
 ### 31.1 Unit tests
 
-- state transition matrices;
+- state transition matrices, dimension-local terminality, typed rejections, and pure plan preflight;
+- layered authority and immutable ApprovalAttempt/ChangeRequest history;
+- governance evidence applicability, Readiness freshness, Attention/Blocker separation, and eligibility inputs;
+- Scheduling/Allocation, Engineering/Task, and TaskAttempt decomposition and TaskAttempt acceptance rules;
+- Delivery/Release/Outcome decomposition and closure projection rules;
 - protocol schema and actor authorization;
 - command idempotency and expected version;
 - lease fencing and token monotonicity;
@@ -985,4 +1133,6 @@ During the run, the original Pi Product Session must remain free to construct a 
 
 The product goals and organizational boundaries that this RFC implements are defined in [Initiative Charter](./INITIATIVE_CHARTER.md).
 
-Every architectural subsystem and invariant is assigned to bounded delivery work in [Initial Epic Map](./INITIAL_EPIC_MAP.md).
+Third-party candidates, evidence classes, and adoption boundaries are recorded in [Third-Party Reuse Survey](./THIRD_PARTY_REUSE_SURVEY.md). The corresponding qualification gates are E67–E69 in the [Initial Epic Map](./INITIAL_EPIC_MAP.md).
+
+The exact 15 bounded domain epics and their authority boundaries are defined in Section 11 and [Initial Epic Map](./INITIAL_EPIC_MAP.md): E02 and E70–E83. Protocol/runtime consumers begin at E03 only after E83; the map `Dependencies` field is the sole scheduling authority. Third-party backends remain bounded implementations behind V2-owned SPIs and never own authority.

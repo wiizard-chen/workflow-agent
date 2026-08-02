@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-This document decomposes the V2 architecture into bounded implementation Epics. It is not a task list to execute blindly. Before an Epic is approved for engineering, its Product Session must confirm scope, repository change surface, acceptance, risk, Verification Profile, and Active Engineering Time.
+This document decomposes the V2 architecture into **83 bounded implementation Epics (E01–E83)**. It is not a task list to execute blindly. Before an Epic is approved for engineering, its Product Session must confirm scope, repository change surface, acceptance, risk, Verification Profile, and Active Engineering Time.
 
 The map intentionally creates an early walking skeleton and recurring integration gates. It does not postpone all cross-component risk until the final E2E.
 
@@ -39,8 +39,18 @@ The estimates below exclude queue time, GitHub wait, user decisions, release win
 ### 3.1 Parallel lanes
 
 ```text
-Foundation lane
-  Domain → Protocol → Store → Daemon → Artifact → Lease
+Foundation lane *(illustrative only; the `Dependencies` fields below are authoritative)*
+  E02 Domain kernel
+   ├─ E70 Readiness
+   ├─ E73 Plan/preflight
+   ├─ E76 Supersession
+   ├─ E77 Attention/Blocker
+   └─ E79 TaskAttempt
+      E70 + E73 + E76 → E74 Product/Approval → E75 ChangeRequest
+      E70 + E74 + E77 → E71 Scheduling/Allocation
+      E71 + E76 + E77 + E79 → E78 Engineering/Task
+      E78 + E79 → E72 Delivery → E80 Release → E81 Outcome
+      E70–E81 → E82 closure → E83 display → Protocol → Store → Daemon → Artifact → Lease
 
 Walking-skeleton lane
   Pi Worker → Git workspace → Local vertical slice
@@ -56,6 +66,11 @@ Product UX lane
 
 Release/migration lane
   Release → Observation → V1 Import → Cutover → Fault Matrix → Real E2E
+
+Qualification/reuse lane
+  Permission PEP qualification → policy/role/sandbox consumers
+  Durable backend spike → Runtime store decision
+  Workspace backend spike → repository/worktree decision
 ```
 
 ### 3.2 Early vertical slice
@@ -95,19 +110,19 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Acceptance:** V1 tests/typecheck still pass; all empty V2 packages compile independently.
 - **Stop boundary:** removing the new workspace files restores the prior project without changing V1 behavior.
 
-## E02 — Domain entities and orthogonal state transitions
+## E02 — Domain identities, hierarchy, and primitive transition kernel
 
-- **Goal:** Implement pure domain types and legal transitions for Portfolio, Initiative, Epic, Delivery Unit, Task Attempt, and attention/health projections.
-- **Deliverables:** entity schemas; transition tables; derived display status.
-- **Task outline:** define IDs/entities; define state dimensions; implement transition functions; implement display projection; add transition matrix tests.
-- **Non-goals:** no database, RPC, Beads, or GitHub.
+- **Goal:** Deliver one pure backend-neutral vocabulary for branded identities, immutable revisioned envelopes, hierarchy ownership, canonical ordering, and generic primitive transition results.
+- **Result:** `Portfolio → Initiative → Epic → DeliveryUnit → Task` parent/repository invariants; distinct `TaskAttemptId`, `StepAttemptId`, `RoleRunId`, and `LaunchPermitId`; caller-supplied scalar refs/timestamps; `DomainTransitionRecord`; typed expected-revision rejection; and a single-dimension conformance helper exposed through `@pi-workflow/v2-domain`.
+- **Scope:** identity/reference types, immutable envelopes, canonical ordering, hierarchy validators, generic transition result/rejection/record contracts, deterministic zero-side-effect exports/tests.
+- **Non-goals:** no Portfolio/Product lifecycle, ApprovalAttempt record/lifecycle, ChangeRequest record/lifecycle, supersession, TaskAttempt record/lifecycle, ordered plan/preflight, Readiness, projections, Attention/Blocker, Scheduling, Engineering, Task lifecycle, Delivery, Release, Outcome, closure, display, persistence, RPC, Beads, Git, GitHub, Runtime, Worker, Scheduler, Lease, Permission, adapter, or third-party backend selection. E02 exposes only the shared identity seams named by its closed scalar contract, including `ApprovalAttemptId`, `ChangeRequestId`, `TaskAttemptId`, `StepAttemptId`, `RoleRunId`, and `LaunchPermitId`; the owning later Epics consume those seams and own the corresponding records and lifecycles.
 - **Dependencies:** E01.
-- **Unlocks:** E03, E04, E12, E15, E22.
-- **Active time:** `2h`.
+- **Unlocks:** E10, E20, E70, E73, E76, E77, E79 (route notes only; `Dependencies` remains authoritative).
+- **Active time:** `1.5-2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** illegal jumps fail closed; one state dimension cannot silently rewrite another; display precedence is fully tested.
-- **Stop boundary:** pure package can be reverted without migration.
+- **Acceptance:** all D01, D02, D09, D16, and D21 E02 obligations are covered by continuous AC-001–AC-012 in the E02 PRD; D03, D05, and D07 remain explicit downstream constraints rather than E02 implementation claims; no deferred lifecycle family or projection is exported.
+- **Stop boundary:** pure package and deterministic tests can be reverted without migration or external cleanup.
 
 ## E03 — Versioned Command/Query/Event schemas
 
@@ -115,7 +130,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** command, query, event, aggregate, protocol-version, principal, and human-presence-grant schemas.
 - **Task outline:** define envelopes; add TypeBox/JSON Schema; define server-derived principal scopes; define one-time approval grants; define compatibility rules; test malformed, stale, and forged-human messages.
 - **Non-goals:** no transport and no command handlers.
-- **Dependencies:** E02.
+- **Dependencies:** E83.
 - **Unlocks:** E04, E05, E11, E15.
 - **Active time:** `1.5h`.
 - **Delivery Units:** 1.
@@ -129,7 +144,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** database factory; WAL setup; schema versioning; migration lock; pre-migration backup.
 - **Task outline:** select driver; initialize pragmas; implement migrations; add schema validation; test interrupted migration.
 - **Non-goals:** no domain commands or external adapters.
-- **Dependencies:** E01, E02.
+- **Dependencies:** E01, E68.
 - **Unlocks:** E05, E06, E09, E10.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -210,15 +225,15 @@ This walking skeleton must exist before the project invests in every broker and 
 ## E10 — Step Ledger and generic recovery scanner
 
 - **Goal:** Persist every side-effecting step and classify incomplete work for adopt, retry, supersede, or manual recovery.
-- **Deliverables:** Step state machine; immutable Attempt records; input hashes; incomplete-step scanner; recovery report.
-- **Task outline:** define states; persist prepared input; mark observed/validated; implement scanner; inject interrupted steps.
+- **Deliverables:** Step state machine; immutable `StepAttemptRecord` records (one causal record per durable Step execution attempt); input hashes; incomplete-step scanner; recovery report.
+- **Task outline:** consume E02 `StepAttemptId`; define Step states and `StepAttemptRecord`; persist prepared input; mark observed/validated; implement scanner; inject interrupted steps. E10 never creates a TaskAttempt or RoleRun.
 - **Non-goals:** no GitHub-specific or Dev-specific recovery logic.
-- **Dependencies:** E05, E07, E08.
+- **Dependencies:** E02, E05, E07, E08.
 - **Unlocks:** E11, E16, E20, E31.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** interrupted effects never appear completed; Attempts cannot be overwritten; recovery decisions are evented.
+- **Acceptance:** interrupted effects never appear completed; `StepAttemptRecord` records cannot be overwritten; recovery decisions are evented.
 - **Stop boundary:** generic ledger can be removed without external effects.
 
 ## E11 — First local walking skeleton
@@ -269,7 +284,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** deterministic scheduler; global/repo capacity; dependency/conflict graph; Active Engineering Time and hard-stop policy.
 - **Task outline:** eligibility computation; scoring; capacity accounting; aging; budget checkpoint stop; scenario tests.
 - **Non-goals:** no real repository Worker launch beyond test adapter.
-- **Dependencies:** E02, E08, E13, E58.
+- **Dependencies:** E08, E13, E58, E71.
 - **Unlocks:** E21, E24, E32.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -283,7 +298,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** repository registry; remote normalization; bare mirror; stable governance checkout; fetch lease.
 - **Task outline:** derive repository ID; clone/fetch mirror; establish governance checkout; resolve base SHA; validate relocation.
 - **Non-goals:** no Delivery Unit branch/worktree.
-- **Dependencies:** E06, E08, E12.
+- **Dependencies:** E06, E08, E12, E69.
 - **Unlocks:** E16, E17, E19.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -339,7 +354,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** resolver; source hashes; model/tool capability probe; migration request; Emergency Deny.
 - **Task outline:** define layers; merge/validate; hash snapshot; capability probe; migration/deny tests.
 - **Non-goals:** no verification executor or release adapter implementation.
-- **Dependencies:** E02, E03, E07, E15.
+- **Dependencies:** E03, E07, E15, E67.
 - **Unlocks:** E20, E21, E22, E27.
 - **Active time:** `1.5h`.
 - **Delivery Units:** 1.
@@ -350,15 +365,15 @@ This walking skeleton must exist before the project invests in every broker and 
 ## E20 — Launch Permits and role-specific subagent tools
 
 - **Goal:** Let the Lead drive approved roles only through a shared immutable one-time Launch Permit core, initially exposing Dev/Reviewer tools.
-- **Deliverables:** generic Attempt/Permit issue-consume core; `run_dev_attempt`; `run_task_review`; `run_final_review`; audit validation.
-- **Task outline:** define permit schema; implement daemon issue; implement Worker execution adapter; validate resolved model/tools; prevent recursive spawn.
+- **Deliverables:** RoleRun/LaunchPermit issue-consume core; `run_dev_role`; `run_task_review`; `run_final_review`; audit validation.
+- **Task outline:** consume E02 `RoleRunId`/`LaunchPermitId`; define `RoleRunRecord`/`LaunchPermit` schema and lifecycles; implement daemon issue; implement Worker execution adapter; validate resolved model/tools; prevent recursive spawn.
 - **Non-goals:** no production sandbox and no GitHub.
-- **Dependencies:** E09, E10, E19.
+- **Dependencies:** E02, E09, E10, E19, E67, E78, E79.
 - **Unlocks:** E21, E23.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** permit cannot be reused; generic subagent is unavailable; writer and model drift fail closed.
+- **Acceptance:** one `LaunchPermitId` authorizes exactly one `RoleRunRecord`; permits cannot be reused; generic subagent is unavailable; writer and model drift fail closed.
 - **Stop boundary:** role runs operate only on fixtures until sandbox is complete.
 
 ## E21 — Sandbox backend capability spike
@@ -381,7 +396,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** Sandbox interface/backend; prepare/exec/cancel/destroy; env/network/resource policy; process cleanup.
 - **Task outline:** prepare and destroy sandbox; mount Unit only; clear secrets; apply limits; enforce cancellation; test network and host-path isolation.
 - **Non-goals:** no Dev file-tool API and no layered Verification Profiles.
-- **Dependencies:** E16, E17, E19, E21.
+- **Dependencies:** E16, E17, E19, E21, E67.
 - **Unlocks:** E23, E31.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -423,7 +438,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** Markdown source; structured JSON schema; sanitized HTML; manifest; draft/approved watermark.
 - **Task outline:** define schemas; implement renderer; sanitize/CSP; hash bundle; test deterministic rebuild and unsafe HTML.
 - **Non-goals:** no GitHub Pages publication.
-- **Dependencies:** E02, E07.
+- **Dependencies:** E07.
 - **Unlocks:** E26, E33.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -437,7 +452,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** preview command; human approval command; pending governance Saga; session checkpoint; approved manifest binding.
 - **Task outline:** generate preview; display/open HTML; submit approval; write Beads marker; confirm projection; block mismatched draft.
 - **Non-goals:** no GitHub Docs publication.
-- **Dependencies:** E13, E18, E24, E25, E41, E47, E58.
+- **Dependencies:** E13, E18, E24, E25, E41, E47, E58, E70, E73, E74.
 - **Unlocks:** first formal V2 approved Epic flow.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -490,7 +505,7 @@ This walking skeleton must exist before the project invests in every broker and 
 ## E30 — Pull request review-feedback ingestion
 
 - **Goal:** Convert review comments and check failures into idempotent classified repair or decision events.
-- **Deliverables:** review/thread cursor; feedback classification; repair Attempt request; product/security escalation.
+- **Deliverables:** review/thread cursor; feedback classification; one repair `RoleRunRecord` request per governed repair action; product/security escalation.
 - **Task outline:** consume new threads; classify code/product/security/non-blocking feedback; dedupe by external ID; request repair or Inbox decision; preserve human resolution authority.
 - **Non-goals:** no external commit adoption, force-push handling, merge queue, or auto-merge.
 - **Dependencies:** E20, E28, E29.
@@ -507,7 +522,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** integration fixture; full audit chain; recovery checkpoint; report of active Product Session responsiveness.
 - **Task outline:** approve fixture PRD; schedule; execute task; review/fix; publish PR; inject feedback; merge and run Epic Gate.
 - **Non-goals:** no Docs Pages, Dashboard, release, observation, or V1 cutover.
-- **Dependencies:** E14, E20, E22, E23, E26, E29, E30, E45, E48, E49, E54, E57.
+- **Dependencies:** E14, E20, E22, E23, E26, E29, E30, E45, E48, E49, E54, E57, E72, E82, E83.
 - **Unlocks:** proves core delivery before UX and release completion.
 - **Active time:** `2h` plus external wait.
 - **Delivery Units:** 1.
@@ -563,7 +578,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** adapter contracts; registry; Manual adapter; GitHub Actions adapter; release operation Saga and lease.
 - **Task outline:** define API; validate adapter policy; implement manual path; implement GitHub Actions path; inject timeout/unknown.
 - **Non-goals:** no metric observation or vendor-specific feature flags beyond contract stubs.
-- **Dependencies:** E05, E08, E19, E28.
+- **Dependencies:** E05, E08, E19, E28, E80.
 - **Unlocks:** E36, E39.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -577,7 +592,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** Observation Adapter contract; manual acceptance; deterministic threshold evaluator; rollback Saga; Critical escalation.
 - **Task outline:** define metric samples; implement evaluator; implement manual adapter; implement rollback authorization; test failed rollback.
 - **Non-goals:** no broad vendor integration catalog.
-- **Dependencies:** E07, E35.
+- **Dependencies:** E07, E35, E81.
 - **Unlocks:** E39.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
@@ -664,7 +679,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Active time:** `1.5h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** commit binds Job/Unit/Task/Attempt/PRD; unknown or out-of-scope diff fails; duplicate operation adopts existing commit.
+- **Acceptance:** commit binds Job/Unit/Task/`TaskAttemptId`/PRD; unknown or out-of-scope diff fails; duplicate operation adopts existing commit.
 - **Stop boundary:** fixture branch only.
 
 ## E43 — Worktree cleanup and orphan recovery
@@ -814,9 +829,9 @@ This walking skeleton must exist before the project invests in every broker and 
 
 - **Goal:** Turn an approved Delivery Plan into Repository Beads Units/Tasks and close them only after commit, review, and verification evidence.
 - **Deliverables:** plan manifest; feature/task/dependency creation; claim; pass/fail/reopen; Unit completion reconciliation.
-- **Task outline:** validate plan; create feature/tasks; add `blocks`; claim with baseline; bind Attempt evidence; close/reopen; reconcile Unit completion.
+- **Task outline:** validate plan; create feature/tasks; add `blocks`; claim with baseline; bind the causal `TaskAttemptId` evidence; close/reopen; reconcile Unit completion.
 - **Non-goals:** no PR publish or product approval.
-- **Dependencies:** E12, E13, E20, E42, E45.
+- **Dependencies:** E12, E13, E20, E42, E45, E78, E79.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
@@ -829,7 +844,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** pause/cancel commands; scheduling/merge/release stops; impact collector; Termination Plan bundle; decision application.
 - **Task outline:** freeze new work; inspect Units/PRs/releases/dependencies; render options; obtain human decision; execute only approved disposition.
 - **Non-goals:** no automatic destructive revert or data compensation engine.
-- **Dependencies:** E13, E14, E43, E48, E35, E51.
+- **Dependencies:** E13, E14, E43, E48, E35, E51, E71, E72, E78, E80, E82.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
@@ -855,7 +870,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** `diagnose_ci_failure`; `analyze_merge_conflict`; `request_change`; `request_publish`.
 - **Task outline:** define contracts; issue read-only permits; route CI/conflict evidence; submit governed change intent; submit publish intent; test illegal direct effects.
 - **Non-goals:** no generic subagent or GitHub mutation tool.
-- **Dependencies:** E20, E28, E29, E30, E45.
+- **Dependencies:** E20, E28, E29, E30, E45, E67, E72, E75, E78, E79.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
@@ -868,7 +883,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Deliverables:** semantic-invariant evaluator; quantitative budget/risk score; read-only Lead feasibility review; exception record; readiness artifact.
 - **Task outline:** validate single result/acceptance/rollback; calculate size/risk budget; run repository feasibility permit; combine evidence; persist decision and exception.
 - **Non-goals:** no implementation task split or scheduler allocation.
-- **Dependencies:** E02, E12, E19, E25, E59.
+- **Dependencies:** E12, E19, E25, E59, E70.
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
@@ -885,7 +900,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Active time:** `2h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** analyzer cannot mutate code/Beads/GitHub; execution uses E20's immutable Attempt and one-time Permit with current fencing token, expiry, Worker generation, fixed input/output, and recovery audit; result binds exact PRD/base/policy.
+- **Acceptance:** analyzer cannot mutate code/Beads/GitHub; each analysis uses exactly one E20 `RoleRunRecord` and one-time `LaunchPermit` with current fencing token, expiry, Worker generation, fixed input/output, and recovery audit; result binds exact PRD/base/policy.
 - **Stop boundary:** analysis is advisory evidence consumed only by E58.
 
 ## E60 — Daemon, SQLite, command, Lease, and Step fault family
@@ -970,7 +985,7 @@ This walking skeleton must exist before the project invests in every broker and 
 
 - **Goal:** Prove that every cutover interruption leaves exactly one authoritative Runtime generation.
 - **Deliverables:** migration-stage fault injector; V1/V2 guard assertions; rollback/recovery report.
-- **Task outline:** interrupt freeze; interrupt export; fail generation write/readback; restart after marker; attempt dual mutation; recover prior/new authority.
+- **Task outline:** interrupt freeze; interrupt export; fail generation write/readback; restart after marker; attempted dual mutation; recover prior/new authority.
 - **Non-goals:** no ordinary Beads approval or GitHub delivery faults.
 - **Dependencies:** E38.
 - **Active time:** `2h`.
@@ -979,11 +994,245 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Acceptance:** no fault permits dual mutation; incomplete migration preserves prior authority; completed marker blocks V1.
 - **Stop boundary:** migration fixtures only.
 
+## E67 — Permission Backend qualification
+
+- **Goal:** Qualify a bounded in-session PermissionBackend PEP using S1/S1.1 evidence and formal contract, integrator, provenance, operator-ceiling, and fault gates.
+- **Deliverables:** versioned PermissionBackend SPI mapping; immutable operator-ceiling tests; session overlay precedence tests (`deny > ask > allow`, including MCP candidates); hard-deny terminal tests; provenance/artifact manifest; fault and drift report; accepted qualification record or explicit rejection.
+- **Task outline:** pin candidate implementation(s); run S1 source/boundary review; run S1.1 dynamic probes for allow/ask/deny, missing backend, version drift, replay, cancellation, and malformed decisions; integrate through Runtime-issued requests; hash logs/results; verify no authority escape; record adopt/adapt/reference/reject outcome.
+- **Non-goals:** no sandbox implementation; no project/session/yolo widening of the operator ceiling; no approval, Beads, Git, GitHub, credential, evidence, or scheduler authority; no claim that a source review is a passing qualification.
+- **Dependencies:** E03, E06, E07, E09, E10, E12.
+- **Active time:** `2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+- **Acceptance:** only a pinned, reproducible candidate with complete contract, integrator, provenance, and fault evidence may be marked `QUALIFIED`; missing backend, unsupported capability, provenance mismatch, or version drift fails closed; hard deny is terminal; an unqualified candidate is disabled rather than silently replaced.
+- **Stop boundary:** qualification fixtures and in-session PEP only; it cannot authorize repository process isolation or external effects.
+
+## E68 — Native SQLite versus durable backend spike
+
+- **Goal:** Compare native SQLite WAL plus the V2 Step Ledger with Temporal, Restate, DBOS TypeScript (`dbos-transact-ts`, PostgreSQL-backed), and Hatchet durable execution patterns behind `DurableExecutionBackend`.
+- **Deliverables:** capability and authority comparison; recovery/idempotency/fencing probes; cost and operational notes; accepted durable-backend decision record or documented native-only result.
+- **Task outline:** pin candidate sources; run S1 source review; run S1.1 restart, timer, cancellation, duplicate-effect, unknown-effect, and schema/version probes; compare artifact/hash and operational evidence; recommend native, adapt, or reject. No provider is presumed selected.
+- **Non-goals:** no replacement of SQLite, no production migration, no PostgreSQL dependency adopted by implication, no external engine owning domain transitions, Beads, GitHub, approval, or evidence authority.
+- **Dependencies:** E01.
+- **Active time:** `2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+- **Acceptance:** comparison covers the RFC's Step Ledger, fencing, authority-aware Saga, and artifact hash invariants; missing or non-reproducible evidence is `BLOCKED`; research findings do not become implementation dependencies without an accepted ADR.
+- **Stop boundary:** isolated benchmark/fault fixtures only; native SQLite remains the baseline pending a separate decision.
+
+## E69 — Native worktree versus Gas Town workspace backend spike
+
+- **Goal:** Compare the native managed mirror/worktree boundary with a narrowly adapted Gas Town workspace backend without weakening path jail, one-writer, branch, cleanup, or Git Broker authority.
+- **Deliverables:** native-versus-adapter comparison; workspace SPI mapping; path/lease/dirty-state fault probes; accepted workspace decision record or a documented native-only result.
+- **Task outline:** pin candidate source; run S1 source review; run S1.1 workspace probes; inject stale lease, symlink/path escape, dirty cleanup, crash, and duplicate preparation cases; record artifact manifests and SHA-256 hashes; recommend native, adapt, or reject.
+- **Non-goals:** no Gas Town adoption by default; no scheduler, Beads, GitHub, approval, sandbox, or evidence authority delegation; no production workspace migration.
+- **Dependencies:** E01.
+- **Active time:** `2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+- **Acceptance:** the selected option preserves the V2 WorkspaceBackend contract and authority boundaries; missing provenance or fault evidence is `BLOCKED`; a third-party workspace is never treated as a sandbox.
+- **Stop boundary:** research fixtures only; native worktree remains the implementation baseline until an accepted ADR selects otherwise.
 ---
+
+## E70 — Readiness and governance evidence
+
+- **Goal:** Own immutable `ReadinessAssessment` and governance evidence used to qualify exact candidates without mutating Product authority.
+- **Result:** applicability, disposition, freshness/staleness, source revisions, and eligibility evidence inputs with fail-closed qualification.
+- **Scope:** Readiness records and evidence references; exact-candidate qualification; freshness/applicability rules; evidence-only projections.
+- **Non-goals:** no Product/Approval, ChangeRequest, supersession, plan/preflight, Attention/Blocker, queue, Allocation, Scheduling, Engineering, Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, or external authority.
+- **Dependencies:** E02.
+- **Unlocks:** E71, E74, E77 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** readiness evidence is immutable, exact-candidate, applicable/fresh, and fails closed; no downstream mutation authority exists.
+- **Stop boundary:** evidence package reverts without changing Product or external systems.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E71 — Scheduling and Allocation
+
+- **Goal:** Own eligibility-to-queue and Allocation decisions after governance qualification.
+- **Result:** deterministic eligibility, queue disposition, capacity/budget inputs, and immutable `Allocation` facts with no Engineering authority.
+- **Scope:** scheduling policy, queue transitions, capacity/conflict accounting, Allocation and lease-facing facts.
+- **Non-goals:** no Readiness record ownership, Product/Approval, ChangeRequest, supersession, plan/preflight, Attention/Blocker, Engineering, Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, Worker launch, or third-party scheduler authority.
+- **Dependencies:** E70, E74, E77.
+- **Unlocks:** E14, E78 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** eligibility, queue, and Allocation remain separate and consume qualified evidence; no Engineering state is changed.
+- **Stop boundary:** scheduling package reverts without leases, Worker launch, or external cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E72 — Delivery facets
+
+- **Goal:** Own provider-neutral Delivery facets and integration facts independently from Engineering, Release, and Outcome.
+- **Result:** candidate, review, checks, mergeability, and integration facets with deterministic evidence and no provider authority delegation.
+- **Scope:** Delivery facet identities, transitions, projections, and provider-observation references.
+- **Non-goals:** no Product/Approval, ChangeRequest, supersession, plan/preflight, Readiness, Attention/Blocker, Scheduling/Allocation, Engineering/Task/TaskAttempt, Release, Outcome, closure, display, persistence, GitHub mutation, or external provider authority.
+- **Dependencies:** E78, E79.
+- **Unlocks:** E31, E80, E81 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** Delivery facets are independent and provider observations cannot become provider authority.
+- **Stop boundary:** Delivery package reverts without release or provider compensation.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E73 — Ordered plans and preflight
+
+- **Goal:** Own explicit cross-dimension ordered transition plans and pure preflight without executing effects.
+- **Result:** dependency-ordered, revision-bound plan schema with structural and speculative validation, stop-on-failure and compensation/reconciliation declarations.
+- **Scope:** plan identity, steps, dependencies, authority classification, preconditions, failure policy, pure preflight, and no-effect diagnostics.
+- **Non-goals:** no primitive kernel replacement, Product/Approval, ChangeRequest, supersession, Readiness, Attention/Blocker, Scheduling, Engineering, Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, Runtime Saga, authorization, or external effect.
+- **Dependencies:** E02.
+- **Unlocks:** E74, E75, E82 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** preflight validates structure/revisions/speculative domain steps and produces no effect or authorization.
+- **Stop boundary:** plan package reverts without persisted plan execution or external cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E74 — Product lifecycle and Approval
+
+- **Goal:** Own Portfolio/Product lifecycle and immutable initial `ApprovalAttempt` governance while consuming Readiness qualification.
+- **Result:** Product transition matrices, frozen approval submissions, and approval decisions that never schedule or execute work.
+- **Scope:** Portfolio administrative lifecycle; Initiative/Epic Product lifecycle; immutable ApprovalAttempt records; applicable Readiness handoff; approval history.
+- **Non-goals:** no E02 kernel replacement, ChangeRequest, supersession, plan execution, Scheduling/Allocation, Attention/Blocker, Engineering/Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, or external grant authority.
+- **Dependencies:** E70, E73, E76.
+- **Unlocks:** E26, E71, E75 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** Product/Approval matrices preserve frozen history; approval never queues, allocates, or activates work.
+- **Stop boundary:** Product/Approval package reverts without scheduling or external grant cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E75 — ChangeRequest lifecycle
+
+- **Goal:** Own the full governed lifecycle of changes to an approved Product baseline.
+- **Result:** legal ChangeRequest transition matrix with baseline preservation and explicit application handoff.
+- **Scope:** ChangeRequest records using the E02-owned `ChangeRequestId` seam; draft/proposed/awaiting-approval/approved/applying/applied and terminal rejection/withdrawal/supersession/application-failed edges; approved→applying and applying→applied plan primitives.
+- **Non-goals:** no Product/Approval authority, supersession relation ownership, E02 kernel replacement, plan engine, Readiness, Attention/Blocker, Scheduling, Engineering, Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, or same-store atomic commit.
+- **Dependencies:** E73, E74, E76.
+- **Unlocks:** E82 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** all legal ChangeRequest edges preserve the approved baseline until applied and have no implicit multi-aggregate primitive.
+- **Stop boundary:** ChangeRequest package reverts without changing the approved baseline or external systems.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E76 — Supersession
+
+- **Goal:** Own explicit predecessor/successor relations without automatic authority or evidence inheritance.
+- **Result:** acyclic, kind-compatible supersession records and dimension-local terminal transitions.
+- **Scope:** supersession relation, legal edges, terminal states, successor compatibility, chain validation, and non-inheritance contract.
+- **Non-goals:** no Product lifecycle implementation, ApprovalAttempt, ChangeRequest, plan/preflight, Readiness, Attention/Blocker, Scheduling, Engineering, Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, or authority transfer.
+- **Dependencies:** E02.
+- **Unlocks:** E74, E75, E78 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** supersession is explicit, compatible, acyclic, terminal, and transfers no authority/evidence.
+- **Stop boundary:** supersession package reverts without rewriting predecessor or successor authority.
+- **Active time:** `1.5h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E77 — Attention and Blocker
+
+- **Goal:** Own structured blocker facts and Attention signals as separate immutable governance dimensions.
+- **Result:** dimension-local `BlockerFact`, `AttentionSignal`, and deterministic severity projection consumed without direct lifecycle mutation.
+- **Scope:** signal/fact identities, legal transitions, severity derivation, applicability, source revisions, and operation-specific blocker references.
+- **Non-goals:** no Readiness, Product/Approval, ChangeRequest, supersession, plan/preflight, Scheduling/Allocation, Engineering/Task/TaskAttempt, Delivery, Release, Outcome, closure, display, persistence, or direct mutation of other dimensions.
+- **Dependencies:** E02.
+- **Unlocks:** E71, E78 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** Attention and Blocker are distinct immutable dimensions with deterministic source revisions.
+- **Stop boundary:** signal package reverts without mutating scheduling or Engineering.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E78 — Engineering and Task lifecycle
+
+- **Goal:** Own Engineering control and Task lifecycle after scheduling, including explicit Task acceptance boundaries.
+- **Result:** independent Engineering and Task matrices with `paused` authority, dimension-local blocked projections, and no automatic Task acceptance from TaskAttempt success.
+- **Scope:** Engineering control; Task lifecycle; candidate/review/acceptance boundaries; Task ownership use; TaskAttempt references consumed from E79.
+- **Non-goals:** no Product/Approval, ChangeRequest, supersession, plan/preflight, Readiness, Attention/Blocker authority, Scheduling/Allocation authority, TaskAttempt record/lifecycle, Delivery, Release, Outcome, closure, display, persistence, Worker orchestration, or provider authority.
+- **Dependencies:** E71, E76, E77, E79.
+- **Unlocks:** E20, E31, E54, E55, E57, E72 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** Engineering and Task transitions are independent; TaskAttempt success never auto-accepts Task.
+- **Stop boundary:** Engineering/Task package reverts without Worker, Beads, or external cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E79 — TaskAttempt record and lifecycle
+
+- **Goal:** Own the pure domain `TaskAttempt` record and lifecycle while preserving Task acceptance as a separate transition.
+- **Result:** immutable TaskAttempt records keyed by `TaskAttemptId`, with explicit result/evidence and no generic attempt identity.
+- **Scope:** TaskAttempt record, legal transitions, evidence binding, retry/history semantics, and consumption of the immutable E02 `TaskAttemptOwnerRef`; E79 does not redefine the TaskAttempt-to-Task identity relation.
+- **Non-goals:** no generic `AttemptId`, StepAttemptRecord Runtime ownership, RoleRunRecord/LaunchPermit Runtime ownership, Product/Approval, ChangeRequest, supersession, plan/preflight, Readiness, Attention/Blocker, Scheduling/Allocation, Engineering/Task authority, Delivery, Release, Outcome, closure, display, persistence, Worker execution, or automatic Task acceptance.
+- **Dependencies:** E02.
+- **Unlocks:** E20, E54, E57, E72, E78 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** TaskAttempt records are immutable and never substituted for StepAttemptRecord or RoleRunRecord.
+- **Stop boundary:** TaskAttempt package reverts without Runtime execution or external cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E80 — Release
+
+- **Goal:** Own Release disposition separately from immutable provider-confirmed Release operations.
+- **Result:** provider-neutral Release lifecycle, `ReleaseOperation` records, confirmation/unknown/reconciliation semantics, and no outcome authority.
+- **Scope:** Release identity, disposition, operation records, rollback intent/status references, and provider confirmation boundaries.
+- **Non-goals:** no Product/Approval, ChangeRequest, supersession, plan/preflight, Readiness, Attention/Blocker, Scheduling, Engineering/Task/TaskAttempt, Delivery facet ownership, Outcome, closure, display, persistence, adapter implementation, or provider authority.
+- **Dependencies:** E72.
+- **Unlocks:** E81, E82 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** Release disposition, operation, confirmation, and unknown/reconciliation remain separate from Outcome.
+- **Stop boundary:** Release package reverts without provider rollback or external compensation.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E81 — Outcome
+
+- **Goal:** Own outcome requirements, observation runs, and outcome assessments after Delivery and Release facts.
+- **Result:** deterministic observation/evaluation records that preserve raw observations and cannot rewrite Delivery or Release authority.
+- **Scope:** outcome requirements, `ObservationRun`, raw observations, `OutcomeAssessment`, thresholds, and terminal evaluation semantics.
+- **Non-goals:** no Product/Approval, ChangeRequest, supersession, plan/preflight, Readiness, Attention/Blocker, Scheduling, Engineering/Task/TaskAttempt, Delivery, Release authority, closure, display, persistence, observation provider authority, or rollback execution.
+- **Dependencies:** E72, E80.
+- **Unlocks:** E82 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** raw observations remain immutable and assessments cannot rewrite Delivery or Release.
+- **Stop boundary:** Outcome package reverts without observation-provider cleanup.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E82 — Closure projection
+
+- **Goal:** Own complete fail-closed closure composition across all applicable domain families.
+- **Result:** versioned closure facets and projection that reports satisfied/unsatisfied requirements, unresolved effects, active plans, and source revisions without a writable universal close state.
+- **Scope:** closure policy, required facets, unresolved effects, active plan/change references, successor disposition, and deterministic closure projection.
+- **Non-goals:** no lifecycle authority in Product, Approval, ChangeRequest, supersession, Readiness, Attention/Blocker, Scheduling, Engineering, Task/TaskAttempt, Delivery, Release, or Outcome; no plan execution, persistence, display presentation, or external authority.
+- **Dependencies:** E70, E71, E72, E73, E74, E75, E76, E77, E78, E79, E80, E81.
+- **Unlocks:** E83, E31, E55 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** closure fails closed on missing facets/unresolved effects and has no writable universal close state.
+- **Stop boundary:** closure projection reverts without deleting authoritative facts.
+- **Active time:** `1.5-2h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
+
+## E83 — Display projection
+
+- **Goal:** Own structured deterministic display projections over raw authoritative facts.
+- **Result:** lossless primary/badge/reason/source-version output with no mutation authority and a direct handoff to protocol consumers.
+- **Scope:** projection version, primary label, phase, badges, reasons, blocker/attention references, source revisions, stable precedence, and raw-fact preservation.
+- **Non-goals:** no Product or domain-family lifecycle, closure authority, plan/preflight, persistence, UI mutation, display-side effects, or third-party authority.
+- **Dependencies:** E82.
+- **Unlocks:** E03, E31 (route notes only; `Dependencies` remains authoritative).
+- **Acceptance:** display preserves all raw facts, reasons, blockers, and source revisions and has no mutation authority.
+- **Stop boundary:** display package reverts without altering domain authority or UI state.
+- **Active time:** `1.5h`.
+- **Delivery Units:** 1.
+- **Verification Profile:** `strict`.
 
 ## 5. Dependency Graph Validation
 
-The authoritative graph is the `Dependencies` field of E01–E66. Handwritten linear critical paths and parallel groups have been removed because they can drift from the formal graph.
+The authoritative graph is the `Dependencies` field of E01–E83. Handwritten linear critical paths and parallel groups have been removed because they can drift from the formal graph.
 
 Before this map is converted into Beads implementation work, a deterministic graph generator must:
 
@@ -998,14 +1247,17 @@ Before this map is converted into Beads implementation work, a deterministic gra
 
 ---
 
-## 7. Charter Outcome Traceability
+## 6. Charter Outcome Traceability
 
 | Charter outcome | Owning Epics |
 |---|---|
 | Product session remains free during BUILD | E06, E09, E11, E18, E24, E31, E40 |
 | Durable daemon and recoverable workers | E04–E11, E39 |
-| Bounded Epic readiness and capacity | E02, E13, E14, E58, E59 |
-| Single Unit writer and managed worktree | E08, E15–E17, E42–E44 |
+| Bounded Epic readiness and capacity | E02, E13, E14, E58, E59, E67, E70, E71, E73, E74, E77 |
+| Permission policy enforcement and operator ceiling | E19, E20, E22, E57, E67 |
+| Durable execution qualification and authority boundary | E04, E05, E10, E39, E60, E68 |
+| Workspace backend qualification and native worktree boundary | E08, E15–E17, E42–E44, E62, E69 |
+| Single Unit writer and managed worktree | E08, E15–E17, E42–E44, E69 |
 | Lead-driven role subagents under Runtime authority | E09, E19, E20, E31, E57 |
 | Beads governance and Task/Unit lifecycle | E12, E13, E26, E38, E47, E54 |
 | Governed verification strength | E21–E23, E45 |
@@ -1016,24 +1268,40 @@ Before this map is converted into Beads implementation work, a deterministic gra
 | Sensitive credentials and artifacts | E46, E56 |
 | V1/V2 no-double-write migration | E37–E40 |
 | Failure recovery without duplicate effects | E10, E17, E29–E31, E39, E53, E40 |
+| Third-party reuse and qualification gates | E67–E69, [Reuse Survey](./THIRD_PARTY_REUSE_SURVEY.md) |
 
 ---
 
-## 8. RFC Coverage Traceability
+## 7. RFC Coverage Traceability
 
 | RFC area | Primary Epics |
 |---|---|
-| Domain and states | E02 |
+| Domain identities, hierarchy, and primitive transition kernel | E02 |
+| Readiness and governance evidence | E70 |
+| Scheduling and Allocation | E71 |
+| Delivery facets | E72 |
+| Plans and preflight | E73 |
+| Product lifecycle and Approval | E74 |
+| ChangeRequest | E75 |
+| Supersession | E76 |
+| Attention and Blocker | E77 |
+| Engineering and Task lifecycle | E78 |
+| TaskAttempt | E79 |
+| Release | E80 |
+| Outcome | E81 |
+| Closure projection | E82 |
+| Display projection | E83 |
 | Protocol and trusted principals | E03, E06, E41, E50 |
-| SQLite/event/outbox | E04, E05 |
+| SQLite/event/outbox | E04, E05, E68 |
 | Lease/fencing | E08 |
-| Step recovery | E10, E39, E53, E60–E66 |
-| Pi SDK Worker and role tools | E09, E20, E57 |
-| Policy, readiness, and budget | E14, E19, E58 |
+| Step recovery | E10, E39, E53, E60–E66, E68 |
+| Durable execution and `DurableExecutionBackend` SPI | E04, E10, E39, E60, E68 |
+| Pi SDK Worker and role tools | E09, E20, E57, E67 |
+| Policy, readiness, and budget | E14, E19, E58, E67 |
 | Sessions | E18, E24 |
 | Beads governance and task lifecycle | E12, E13, E47, E54 |
-| Mirror/worktree/Git | E15–E17, E42, E43 |
-| Sandbox and jailed Dev tools | E21, E22, E44 |
+| Mirror/worktree/Git and `WorkspaceBackend` SPI | E15–E17, E42, E43, E62, E69 |
+| Sandbox and jailed Dev tools | E21, E22, E44, E67 |
 | Verification | E23, E45 |
 | GitHub | E27–E31, E46, E48, E49 |
 | Document/Docs | E25, E26, E32 |
@@ -1045,7 +1313,7 @@ Before this map is converted into Beads implementation work, a deterministic gra
 
 ---
 
-## 9. Pre-implementation Readiness Checklist
+## 8. Pre-implementation Readiness Checklist
 
 Before converting an entry in this map into executable Beads tasks, confirm:
 

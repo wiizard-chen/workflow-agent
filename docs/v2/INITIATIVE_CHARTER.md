@@ -79,7 +79,7 @@ Human Portfolio Governor
          ├─ Epic Product Session + approved PRD
          ├─ logical Engineering Lead
          └─ Delivery Unit
-            ├─ Tasks and Attempts
+            ├─ Tasks and TaskAttempts
             ├─ Branch and managed Worktree
             └─ GitHub Pull Request
 ```
@@ -132,24 +132,24 @@ A physical Lead session may be replaced after failure, context saturation, provi
 
 ### 4.4 Role-specific subagents
 
-Dev, Reviewer, Final Reviewer, CI Diagnoser, Scout, and related roles are bounded team members. Their session and run identifiers belong to the audit layer and are grouped under Delivery Units, Tasks, and Attempts. They are not top-level business objects that the user must manage.
+Dev, Reviewer, Final Reviewer, CI Diagnoser, Scout, and related roles are bounded team members. Their session and RoleRun identifiers belong to the audit layer and are grouped under Delivery Units, Tasks, and TaskAttempts. They are not top-level business objects that the user must manage.
 
 Only the Engineering Lead may request role execution. Ordinary subagents cannot recursively spawn agents.
 
 ### 4.5 Workflow Runtime
 
-The Workflow Runtime is infrastructure, not a product decision-maker. It owns:
+The Workflow Runtime is infrastructure, not a product decision-maker. The bounded Domain epics own transition semantics and the resulting authoritative Product, Approval, Readiness, Scheduling, Engineering, Delivery, Release, Outcome, closure, and display facts. The Runtime owns only the mechanics that execute and enforce those contracts:
 
-- state transitions;
+- authenticated transition execution, serialization, and expected-revision enforcement;
 - permissions;
 - leases and fencing;
-- scheduling;
+- scheduler execution and capacity enforcement;
 - durable steps and recovery;
-- evidence validation;
+- evidence schema, integrity, applicability-input, and freshness validation;
 - effect brokering;
 - external-system reconciliation.
 
-The Runtime may reject an unsafe or illegal Lead request. It may not invent or approve product scope.
+The Runtime may reject an unsafe, stale, or illegal request and may persist or transport an owner-produced fact. It may not define Domain transition semantics, invent or approve product scope, make an approval decision, or originate an evidence-acceptance or evidence-disposition fact.
 
 ---
 
@@ -210,9 +210,9 @@ one Delivery Unit = one branch = one managed worktree = one GitHub PR
 
 Most bounded Epics should have one Delivery Unit. A second sequential Unit is allowed when it is necessary for safe staged integration. Needing many Units is a decomposition failure.
 
-### 5.8 Task and Attempt
+### 5.8 Task and TaskAttempt
 
-A Task is an internal implementation unit. An Attempt is an immutable execution and review round for a Task. Failed attempts are retained; they are never overwritten to look successful.
+A Task is an internal implementation unit. A TaskAttempt is an immutable execution and review round for a Task. Failed TaskAttempts are retained; they are never overwritten to look successful. Runtime StepAttemptRecords and RoleRunRecords/LaunchPermits are separate immutable execution records and cannot be substituted for TaskAttempts; there is no generic Attempt or `AttemptId` model.
 
 ---
 
@@ -435,7 +435,7 @@ GitHub Pages is a presentation and distribution layer, not the only source of tr
 ### 12.1 In scope
 
 - user-level, single-machine persistent control plane;
-- Portfolio, Initiative, bounded Epic, Delivery Unit, and Task/Attempt model;
+- Portfolio, Initiative, bounded Epic, Delivery Unit, Task, and distinct TaskAttempt/StepAttemptRecord/RoleRunRecord/LaunchPermit models;
 - independent Engineering Lead workers;
 - managed repository mirrors and worktrees;
 - Beads governance integration;
