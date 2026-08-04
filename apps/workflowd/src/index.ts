@@ -1,2 +1,100 @@
-// This scaffold is intentionally inert; daemon behavior belongs to a later V2 task.
-export {};
+export { openRuntimeDatabase } from "./persistence/factory.js";
+export { openCommandJournal } from "./journal/index.js";
+export { createWorkflowClient, createWorkflowDaemon } from "./transport/index.js";
+export { openArtifactStore } from "./artifacts/index.js";
+export { openLeaseStore } from "./leases/index.js";
+export { openStepLedger } from "./steps/index.js";
+export { LEASE_RESOURCE_KINDS } from "./leases/index.js";
+export type {
+  HeartbeatController,
+  HeartbeatStatus,
+  LeaseCredentials,
+  LeaseInspection,
+  LeaseOpenResult,
+  LeaseOptions,
+  LeaseProof,
+  LeaseRecord,
+  LeaseRejection,
+  LeaseRejectionCode,
+  LeaseRequest,
+  LeaseResourceKind,
+  LeaseResult,
+  LeaseStatus,
+  LeaseStore,
+} from "./leases/index.js";
+export type {
+  ArtifactMetadata,
+  ArtifactOpenResult,
+  ArtifactRecord,
+  ArtifactRedactionMetadata,
+  ArtifactRedactionStatus,
+  ArtifactRejection,
+  ArtifactRejectionCode,
+  ArtifactResult,
+  ArtifactRetentionClass,
+  ArtifactScan,
+  ArtifactStore,
+  ArtifactStoreOptions,
+} from "./artifacts/index.js";
+export type {
+  ConnectionMaterial,
+  DaemonStatus,
+  HandshakeResult,
+  HealthResult,
+  TransportRejection,
+  TransportRejectionCode,
+  WorkflowClient,
+  WorkflowClientOptions,
+  WorkflowDaemon,
+  WorkflowDaemonOptions,
+  WorkflowResult,
+} from "./transport/index.js";
+export type {
+  CommandCommitInput,
+  CommandCommitValue,
+  CommandJournal,
+  JournalEvent,
+  JournalInspection,
+  JournalOptions,
+  JournalRejection,
+  JournalResult,
+  OutboxAckInput,
+  OutboxClaim,
+  OutboxLeaseInput,
+  OutboxRecord,
+  OutboxRetryInput,
+  PendingEvent,
+  ProjectionWrite,
+} from "./journal/index.js";
+export type {
+  RecoveryAction,
+  RecoveryCase,
+  RecoveryReport,
+  StepAdoptInput,
+  StepAttemptRecord,
+  StepEffect,
+  StepLedger,
+  StepLedgerOptions,
+  StepOpenResult,
+  StepPlanInput,
+  StepPrepareInput,
+  StepRecord,
+  StepRejection,
+  StepRejectionCode,
+  StepResult,
+  StepRetryInput,
+  StepSchemaStatus,
+  StepState,
+  StepTransitionInput,
+  StepValidation,
+} from "./steps/index.js";
+export type {
+  RuntimeDatabase,
+  RuntimeDatabaseOptions,
+  RuntimeMigration,
+  RuntimeOpenMode,
+  RuntimeOpenResult,
+  RuntimePersistenceRejection,
+  RuntimePersistenceRejectionCode,
+  RuntimeSchemaStatus,
+} from "./persistence/types.js";

@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex,nofollow">
+<meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;; frame-ancestors &#39;none&#39;; style-src &#39;unsafe-inline&#39;">
+<title>E04 PRD — pending human confirmation</title>
+<style>body{margin:0;background:#f7f7f8;color:#171717;font:15px/1.55 ui-monospace,monospace}main{max-width:1100px;margin:auto;padding:32px}header{background:#374151;color:#fff;padding:16px 20px;border-radius:10px;margin-bottom:20px}pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #d1d5db;border-radius:10px;padding:24px}</style>
+</head><body><main>
+<header><strong>E04 PRD CANDIDATE — PENDING HUMAN CONFIRMATION</strong><br>Bundle Markdown SHA-256: c15704363f888c1276ad0133c1f7e401ffa5007f39903076bb5bcddec8fd0b83<br>Renderer: pi-workflow-e04-bootstrap-safe-preformatted-html</header>
+<pre># V2 E04 — SQLite WAL store and migration bootstrap
+
+| Field | Value |
+|---|---|
+| Initiative | `workflow-agent-c2b` |
+| Epic | `workflow-agent-c2b.8` |
+| Map ID | `E04` |
+| Document version | `draft-v1` |
+| Product status | **DRAFT** |
+| Approval status | **NOT APPROVED** |
+| Engineering eligibility | **INELIGIBLE** |
+| Primary repository | `workflow-agent` |
+| Primary workspace | `@pi-workflow/workflowd` |
+| Primary implementation area | `apps/workflowd/src/persistence` |
+| Delivery Units | 1 |
+| Target Active Engineering Time | `2h` |
+| Maximum implementation tasks | 5 |
+| Verification Profile | `strict` |
+| Approval manifest | Not created |
+| Authoritative approval hash | Not assigned |
+
+&gt; This is a documentation-only draft. It authorizes no task creation, implementation,
+&gt; branch/worktree creation, commit, push, pull request, migration of a user database,
+&gt; or external effect. Engineering requires explicit approval of an exact immutable
+&gt; Document Bundle and successful Beads write/readback.
+
+## 1. Related authority and dependency boundary
+
+This PRD is subordinate to:
+
+- [Initiative Charter](../../INITIATIVE_CHARTER.md)
+- [Architecture RFC](../../ARCHITECTURE_RFC.md)
+- [Initial Epic Map](../../INITIAL_EPIC_MAP.md#e04--sqlite-wal-store-and-migration-bootstrap)
+- [E01 Workspace and Package Boundaries PRD](../E01/PRD.md)
+- [E68 Native SQLite versus durable backend spike](../E68/PRD.md)
+
+The Initial Epic Map is authoritative for scheduling dependencies. E04 currently
+depends on **E01 and E68**. E01 supplies the workspace/package boundary. E68
+qualifies the bounded DurableExecutionBackend boundary before Runtime
+persistence is implemented; it does not select or replace the SQLite driver.
+Native SQLite WAL remains the RFC baseline (ADR-002). A different persistence
+driver requires a separate approved ADR and a qualified SPI preserving every
+E04 invariant. E02 and E03 remain architectural neighbors, but E04 does not
+import Domain facts or protocol handlers.
+
+E04 stores Runtime metadata only. E05 later adds command journal, event log, and
+outbox tables and binds those tables to E03 envelopes; E04 must not anticipate or
+duplicate those contracts.
+
+## 2. Background and problem
+
+The V2 architecture requires a single local `workflowd` authority backed by
+transactional SQLite WAL. At present `apps/workflowd` is an inert scaffold and
+the repository contains no Runtime database, migration runner, schema guard,
+or recovery backup. Starting later Epics without this boundary would create
+several unsafe possibilities:
+
+- two daemon processes could migrate or mutate one database concurrently;
+- a database from a newer build could be opened as if it were writable;
+- a failed migration could leave a partially changed schema with no recovery;
+- a copied database file could omit WAL frames and silently lose committed data;
+- a corrupt or tampered schema could be accepted by later command handlers;
+- test code could accidentally use the operator&#39;s real `~/.pi/workflow` state;
+- E05 could mix persistence mechanics with command, event, or domain authority.
+
+E04 establishes the narrow persistence bootstrap that later Runtime Epics can
+use without giving the database ownership of Domain transitions or external
+authority.
+
+## 3. Goal and bounded result
+
+E04 delivers one independently verifiable, local-only Runtime persistence
+boundary that can:
+
+1. open or create an explicitly supplied SQLite database path;
+2. configure and verify WAL durability settings;
+3. validate an immutable, ordered migration manifest;
+4. serialize migration through a database-backed lock;
+5. create a consistent pre-migration backup before any schema change;
+6. apply migrations transactionally and validate the resulting schema;
+7. fail closed on unknown, corrupt, or failed schema state; and
+8. expose diagnostics/read-only inspection without exposing a mutation bypass.
+
+The result is a reusable internal `workflowd` persistence module. It is not a
+daemon, RPC server, command dispatcher, event store, artifact store, or domain
+aggregate implementation.
+
+## 4. Recommended implementation decisions
+
+These recommendations make the MVP concrete while preserving the open ADR
+boundary in the Architecture RFC.
+
+### 4.1 Driver
+
+Use Node&#39;s built-in `node:sqlite` `DatabaseSync` on the supported Node 22+
+runtime, behind a small internal adapter. The adapter must verify availability
+at startup and fail closed when the runtime does not provide the required API.
+No native addon, PostgreSQL server, ORM, or durable-execution service is added
+by implication. E68&#39;s durable-execution comparison cannot replace SQLite or
+change E04&#39;s driver authority; any future driver replacement requires a
+separate approved ADR and a qualified persistence SPI that preserves this
+contract.
+
+The synchronous API is limited to short bootstrap and transaction operations;
+later command handlers must not run long work on the event loop. E04 does not
+define the asynchronous command-processing API.
+
+### 4.2 Explicit paths and permissions
+
+The factory accepts an absolute `databasePath` and an explicit `runtimeRoot`;
+it does not read `HOME`, environment variables, cwd, or user configuration.
+The application may resolve the documented default
+`~/.pi/workflow/runtime/workflow.db` before calling the factory.
+
+The factory creates the runtime root, backup directory, and database with modes
+`0700`, `0700`, and `0600` respectively on POSIX hosts, verifies the current
+UID owns every newly created component, and rejects broader group/other bits on
+existing components. `backupDirectory` must resolve below `runtimeRoot`; every
+parent component is checked with no-follow semantics. A symlink, non-directory
+root, parent escape, database replacement between validation and open, or
+unsafe WAL/SHM sidecar fails closed. Windows uses the platform ACL adapter and
+must not claim POSIX mode evidence. Tests use temporary roots only.
+
+### 4.3 SQLite pragmas
+
+Every writable connection must set and read back the applicable values; an
+explicitly opened read-only diagnostic connection may only read them back. Both
+paths use one deterministic bootstrap:
+
+```text
+journal_mode = WAL
+synchronous = 2
+foreign_keys = ON
+busy_timeout = 5000
+```
+
+`journal_mode` must be read back as `wal`; `synchronous` is read back as the
+SQLite integer level `2` (`FULL`), `foreign_keys` as `1`, and `busy_timeout` as
+exactly `5000` milliseconds. A driver that cannot provide these values or WAL
+is not an E04 implementation. Backup connections use an independent
+read-only/query-only source connection and never enable mutation pragmas; their
+only output is the destination created by `VACUUM INTO`. These settings are
+policy defaults, not protocol fields or Domain facts.
+
+### 4.4 Migration manifest
+
+Migrations are an explicit immutable array supplied to the factory. A migration
+has only data and SQL statements:
+
+```ts
+type RuntimeMigration = Readonly&lt;{
+  readonly version: number;
+  readonly id: string;
+  readonly statements: readonly string[];
+}&gt;;
+```
+
+The public result/error types may use different names, but the observable
+contract is exact:
+
+- versions are positive safe integers and strictly contiguous from `1`;
+- IDs are non-empty strings and unique;
+- statements are non-empty strings and are preserved in order;
+- duplicate versions or IDs, gaps, empty SQL, and malformed values reject
+  before opening a writable connection. Migration arrays must already be in
+  ascending version order; object-key insertion order is canonicalized, but
+  array order is never silently sorted.
+- a canonical manifest and SHA-256 digest are derived from the validated
+  migration data; callers cannot supply a replacement digest;
+- migration SQL is not discovered dynamically from a directory or package;
+- statements reject `ATTACH`, `PRAGMA`, extension loading, and transaction
+  control (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `END`);
+- any referenced or created table/object outside the E04 bootstrap allowlist
+  (`workflow_schema_meta` and `workflow_migration_history`) rejects before
+  mutation; later Epics must register a reviewed migration owner/allowlist
+  extension rather than passing unknown tables through E04;
+- migration functions, extension loading, arbitrary callbacks, and network
+  operations are outside the production contract.
+
+E04&#39;s approved bootstrap manifest contains only the two metadata tables below.
+Later Epics own their table definitions and register migrations through a new,
+reviewed manifest extension; an E04 factory rejects statements that create
+unknown non-bootstrap tables or claim a version outside the registered owner
+set. E04 never executes E05/domain SQL merely because a caller supplied it.
+
+### 4.5 Bootstrap schema
+
+The first migration creates exactly the metadata required to guard the store:
+
+```text
+workflow_schema_meta
+  singleton_id       INTEGER PRIMARY KEY CHECK (singleton_id = 1)
+  schema_version     INTEGER NOT NULL
+  manifest_sha256    TEXT NOT NULL
+
+workflow_migration_history
+  version            INTEGER PRIMARY KEY
+  migration_id       TEXT NOT NULL UNIQUE
+  migration_sha256   TEXT NOT NULL
+```
+
+`PRAGMA user_version`, `workflow_schema_meta.schema_version`, and the highest
+`workflow_migration_history.version` must agree. E04 must not create command,
+query, event, projection, lease, step, artifact, Beads, GitHub, or Domain
+tables. A schema inspector compares table names, columns, constraints, and the
+manifest digest against the known migration set and approved table/object
+allowlist in deterministic order.
+
+### 4.6 Migration lock and transaction
+
+Migration startup first performs a read-only schema preflight. It then acquires
+SQLite&#39;s write reservation with `BEGIN IMMEDIATE`, re-reads schema metadata
+under that lock to close the TOCTOU window, creates the pre-migration backup,
+runs ordered migrations, validates the resulting schema, and commits. The lock
+is held from the second schema read through validation and commit. A second
+process must wait according to the bounded busy timeout or return a typed
+`migration_locked` diagnostic; it must never run a second migration concurrently.
+
+The backup read uses a separate SQLite connection opened read-only/query-only
+while the write reservation is held. This permits a consistent `VACUUM INTO`
+copy of the last committed database without copying a database file while WAL
+frames are outstanding or allowing the backup source connection to mutate.
+Every read-write open, including a current-schema open that needs no migration,
+holds the lock long enough to revalidate metadata before returning a writable
+handle; read-only diagnostics never acquire the write lock. The migration
+transaction is committed only after every statement and schema check succeeds.
+Any error rolls back all DDL/DML and leaves the previous schema authoritative.
+
+### 4.7 Pre-migration backup
+
+Before applying a migration to an existing initialized database, E04 creates
+one atomic backup below the configured backup directory. The backup is produced
+by SQLite (`VACUUM INTO` or an equivalent driver-native consistent backup), not
+by copying only the main `.db` file. Its identity includes source schema
+version, source manifest digest, source schema digest, and target manifest
+digest; reuse requires all four values and a successful read-only schema check.
+The source schema digest is the SHA-256 of the inspector&#39;s canonical ordered
+table/column/constraint metadata plus the committed migration-history bytes;
+it is not a raw main-file hash and is recomputed before backup reuse.
+The backup directory is `0700`, the temporary and final backup files are
+`0600`, and both source and destination paths are rechecked with no-follow
+identity/inode checks immediately before rename. It is written to a temporary
+file, file-synced, validated by reopening read-only/query-only, atomically
+renamed without replacement, and directory-synced after rename. A path,
+permission, inode, or fsync failure returns `backup_failed` and migration does
+not proceed. A new zero-byte database has no prior schema and therefore needs
+no pre-migration backup, but still receives the transactional bootstrap
+migration.
+
+An existing backup with the same source version, source manifest/schema digests,
+and target digest is reused only after its integrity and schema checks pass. A
+conflicting file fails closed; interrupted temporary files are never
+authoritative and may be removed only after a no-follow identity check.
+
+## 5. Users and success outcomes
+
+### US-01 — Runtime maintainer
+
+As a Runtime maintainer, I want startup to reject a database from a newer or
+unknown schema so that a downgrade cannot silently mutate or corrupt state.
+
+### US-02 — Daemon operator
+
+As a daemon operator, I want the first migration to leave a recoverable backup
+so that a failed upgrade has a known last-good database.
+
+### US-03 — Later Runtime Epic
+
+As a later Runtime Epic, I want a narrow factory and schema guard so that E05,
+leases, Steps, sessions, and artifacts can add their own migrations without
+reimplementing WAL or lock semantics.
+
+### US-04 — Diagnostic client
+
+As a diagnostic client, I want to inspect schema status in read-only mode when
+normal mutation is blocked, without obtaining a write-capable handle.
+
+### US-05 — Test operator
+
+As a test operator, I want all database state under a temporary explicit root
+so that E04 tests cannot read or alter the user&#39;s real Runtime database.
+
+After E04, a clean temporary database can be opened, migrated, closed, and
+reopened; a current database has verified WAL settings; an older database can
+be upgraded once with a valid backup; and every unsupported or failed path
+returns a typed failure without starting Runtime mutation.
+
+## 6. Frozen API boundary
+
+The exact TypeScript names may be finalized during task split, but the public
+`@pi-workflow/workflowd` entrypoint must expose only the following E04 concepts:
+
+```ts
+type RuntimeOpenMode = &quot;read-only&quot; | &quot;read-write&quot;;
+
+type RuntimeDatabaseOptions = Readonly&lt;{
+  readonly databasePath: string;
+  readonly runtimeRoot: string;
+  readonly backupDirectory?: string;
+  readonly mode?: RuntimeOpenMode;
+  readonly migrations?: readonly RuntimeMigration[];
+}&gt;;
+
+type RuntimeSchemaStatus = Readonly&lt;{
+  readonly mode: RuntimeOpenMode;
+  readonly currentVersion: number;
+  readonly targetVersion: number | null;
+  readonly manifestSha256: string | null;
+  readonly journalMode: &quot;wal&quot; | &quot;unknown&quot;;
+  readonly synchronous: 2 | &quot;unknown&quot;;
+  readonly foreignKeys: 1 | &quot;unknown&quot;;
+  readonly busyTimeout: 5000 | &quot;unknown&quot;;
+  readonly writable: boolean;
+}&gt;;
+
+type RuntimeDatabase = Readonly&lt;{
+  readonly status: RuntimeSchemaStatus;
+  readonly close: () =&gt; void;
+  readonly inspect: () =&gt; RuntimeSchemaStatus;
+}&gt;;
+
+type RuntimeOpenResult&lt;T = RuntimeDatabase&gt; =
+  | Readonly&lt;{ readonly ok: true; readonly value: T }&gt;
+  | Readonly&lt;{ readonly ok: false; readonly rejection: RuntimePersistenceRejection }&gt;;
+```
+
+Read-only diagnostics may omit `migrations`; they never create directories,
+write pragmas, acquire a migration lock, or mutate schema. When no target
+manifest is supplied, `targetVersion` and `manifestSha256` are `null`; any
+observed non-compliant pragma is reported as `&quot;unknown&quot;` and never repaired.
+A writable open must provide the validated approved manifest. The implementation
+may expose an internal transaction/statement capability to E05 through the same `workflowd`
+workspace, but it must not expose an arbitrary
+SQL executor through the public package entrypoint. Every success and rejection
+is recursively frozen and independent of caller objects. No result may expose
+the live `DatabaseSync` object or a path outside the explicitly supplied root.
+
+The rejection vocabulary must distinguish at least:
+
+```text
+invalid_options
+invalid_path
+permission_denied
+driver_unavailable
+invalid_migration_manifest
+schema_corrupt
+schema_unknown
+migration_locked
+backup_failed
+migration_failed
+read_only
+```
+
+The exact rejection fields must include a stable code and a safe diagnostic
+field; they must not include SQL secrets, environment values, or arbitrary
+exception objects. Unknown future schema and failed migration are distinct:
+the former is an unsupported-version diagnostic, while the latter proves that
+the last committed schema remains the only writable state.
+
+## 7. Functional requirements
+
+### FR-001 — Explicit factory
+
+Writable opening requires an absolute database path, runtime root, and
+validated migration manifest. Read-only diagnostics may open with an explicit
+database path and no target manifest to report unknown/corrupt state. No
+implicit global singleton or environment lookup is permitted.
+
+### FR-002 — Secure path preparation
+
+The factory creates only its configured directories, enforces `0700`/`0600`
+permissions (including WAL/SHM sidecars and backup temp/final files), rejects
+symlink, hardlink, path-escape, owner, and validation-to-open replacement
+attacks, and never touches Beads, Git, the user&#39;s checkout, or the V1
+`.workflow` directory.
+
+### FR-003 — WAL verification
+
+Writable and read-only opens read back WAL mode and reject a non-WAL database.
+Writable opens set and verify `synchronous=2`, `foreign_keys=1`, and
+`busy_timeout=5000`; read-only diagnostics only read back those values and do
+not repair them. All four values are observable through diagnostics.
+
+### FR-004 — Ordered migration validation
+
+The migration manifest is validated before mutation. Object keys are
+canonicalized, migration arrays must already be ascending by version, and the
+manifest is hashed from canonical bytes; duplicates, gaps, malformed SQL,
+forbidden `ATTACH`/`PRAGMA`/transaction-control statements, unknown tables, or
+checksum drift reject before mutation.
+
+### FR-005 — Schema version guard
+
+The factory compares `PRAGMA user_version`, metadata, migration history, and
+the target manifest. A database newer than the supported target, an incomplete
+history, or a mismatched digest cannot open writable.
+
+### FR-006 — Serialized migration
+
+Only one process may migrate a database at a time. Lock acquisition, backup,
+migration, schema validation, and commit form one crash-safe sequence.
+
+### FR-007 — Consistent backup
+
+Every existing database that changes schema obtains a validated backup before
+the first migration statement. The backup is atomic, digest-addressed, and
+reopenable without the source process.
+
+### FR-008 — Transactional rollback
+
+A failed or interrupted migration rolls back uncommitted DDL/DML. Reopening
+the database reports the previous version and permits retry only after the
+failure has been classified; it never reports a partially committed target.
+
+### FR-009 — Read-only diagnostics
+
+Unknown, corrupt, or failed state can be inspected read-only. A diagnostic
+handle may omit migrations and cannot create directories, write pragmas,
+acquire a migration lock, execute schema changes, or provide a mutation
+transaction.
+
+### FR-010 — Bootstrap-only schema
+
+E04 creates only metadata tables and does not own command/event/outbox,
+aggregate, lease, Step, artifact, Product, or Domain tables.
+
+### FR-011 — No hidden authority
+
+The module has no Beads/Git/GitHub/network/Pi SDK/process/clock authority and
+does not dispatch E03 protocol messages. It only persists and validates its
+own Runtime schema metadata.
+
+### FR-012 — Clean lifecycle
+
+Opening, migration, inspection, and close are deterministic and idempotent for
+the same input path and manifest. Reopening a current database performs no
+second migration or backup.
+
+## 8. Non-functional and security requirements
+
+- **Fail closed:** missing driver, unknown schema, malformed metadata, failed
+  backup, lock timeout, or permission drift blocks write mode.
+- **No silent downgrade:** E04 never drops tables, rewinds `user_version`,
+  rewrites migration history, or auto-selects another driver.
+- **Atomicity:** no observer may see a partially applied migration after a
+  crash; SQLite recovery must leave either the prior committed schema or the
+  fully validated target.
+- **Determinism:** migration digest, backup naming, diagnostics, and schema
+  inspection order do not depend on locale, timezone, cwd, process ID, or
+  object insertion order.
+- **Isolation:** import has no database, directory, timer, subprocess, or
+  network side effect; only an explicit factory call may create state.
+- **Secrets:** exception and diagnostic text must not include credentials,
+  environment dumps, or arbitrary SQL values.
+- **Portability:** the supported Node 22 runtime must either provide the
+  required built-in driver or return a typed `driver_unavailable` rejection.
+
+## 9. Explicit non-goals
+
+E04 does not implement:
+
+- E03 message validation, schema registry, principal context, or dispatch;
+- E05 command journal, event log, durable outbox, idempotency, or aggregate
+  version handling;
+- E06 Unix socket, JSON-RPC framing, typed client, or daemon lifecycle;
+- E07 artifacts, content hashing of user output, retention, or redaction;
+- E08 leases, heartbeats, fencing, or scheduler capacity;
+- E09 Pi SDK, Worker, Lead sessions, or role execution;
+- E10 Steps, StepAttempt records, recovery classification, or reconciliation;
+- Product/Approval, Readiness, Task, Delivery, Release, Outcome, closure, or
+  display domain facts;
+- Beads, Git, GitHub, release providers, network calls, or external durable
+  execution backends;
+- user-service installation, automatic `~/.pi` initialization, or V1 migration;
+- dynamic SQL/migration discovery, arbitrary extension loading, or a general
+  SQL query API;
+- migration of an existing user database in this PRD&#39;s tests.
+
+## 10. Acceptance criteria
+
+### AC-001 — Fresh database and permissions
+
+Opening a fresh explicit temporary root creates only the configured runtime,
+backup, database, and SQLite sidecar paths with the approved modes; no path
+escapes the root. Importing the module alone creates none of them.
+
+### AC-002 — WAL and pragma contract
+
+The writable database reports `journal_mode=wal`, `synchronous=2` (`FULL`),
+`foreign_keys=1`, and `busy_timeout=5000`. Read-only diagnostics only read back
+these values and never write pragmas. A fixture that cannot stay in WAL mode
+fails closed.
+
+### AC-003 — Bootstrap schema exactness
+
+After migration, `PRAGMA user_version`, `workflow_schema_meta`, and
+`workflow_migration_history` agree with the manifest. No E05 or later Runtime
+table is created.
+
+### AC-004 — Deterministic manifest
+
+Equivalent migration objects differing only in object-key insertion order
+produce the same canonical manifest and digest. Migration array order is
+significant and must already be ascending; a permuted/unsorted array rejects,
+not silently sorts. Duplicate, gap, malformed, forbidden SQL, unknown table,
+or changed migration input rejects before any database mutation.
+
+### AC-005 — Idempotent reopen
+
+Closing and reopening a current database with the exact manifest does not apply
+a second migration, create a second backup, or alter the metadata bytes.
+
+### AC-006 — Upgrade backup
+
+Opening a prior-version fixture with a newer valid manifest creates one
+reopenable, digest-addressed pre-migration backup whose identity binds source
+version, source manifest digest, source schema digest, and target manifest
+digest. It contains the complete last committed state, including any
+WAL-committed rows; file/dir fsync, `0600`/`0700` permissions, no-follow race
+checks, and a conflicting backup all fail closed.
+
+### AC-007 — Migration lock
+
+Two processes attempting migration serialize. The loser waits only within the
+bounded policy or returns `migration_locked`; it never applies statements or
+reports success before the winner commits.
+
+### AC-008 — Failure rollback
+
+An invalid statement, injected interruption, process termination before commit,
+or schema validation failure leaves the previous committed version intact.
+The next open can inspect the failure, retry safely, and does not see a partial
+target schema.
+
+### AC-009 — Unknown and corrupt schema
+
+A database with a future `user_version`, mismatched metadata/history, missing
+required table/column/constraint, non-WAL mode, or invalid manifest is denied
+write mode and remains inspectable read-only without a migration list. No
+automatic repair, pragma write, or downgrade occurs.
+
+### AC-010 — Read-only guard
+
+A read-only handle can report schema status without a migration list but cannot
+create directories, write pragmas, execute migration, acquire a write lock, or
+obtain a write transaction, even when the caller supplies a migration list.
+
+### AC-011 — Path and permission attacks
+
+Tests cover root/database/backup symlink and hardlink, parent escape,
+non-directory root, wrong-owner and world/group-readable permissions,
+pre-existing WAL/shm path conflicts, and database replacement between
+validation and open. All fail closed without touching an outside path.
+
+### AC-012 — Crash-safe backup and cleanup
+
+Interrupted temp backup files are ignored or safely cleaned on the next open;
+the final backup is either absent with no migration committed or complete and
+validated. No stale temp file is treated as an authoritative backup.
+
+### AC-013 — Boundary and side effects
+
+The app source imports only declared allowed dependencies and Node standard
+library modules; it does not import testkit, another app, V1 extensions, or
+external adapters. Fresh-process import has no observable filesystem,
+database, network, timer, or child-process effect.
+
+### AC-014 — Public contract
+
+The package declaration and runtime export tests prove the exact approved E04
+types/values, recursively readonly results, no arbitrary SQL handle, no deep
+package subpath, and deterministic rejection vocabulary.
+
+### AC-015 — Existing V2 gates
+
+`npm --workspace=@pi-workflow/workflowd run test`,
+`npm run typecheck:v2`, `npm run validate:v2-boundaries`, and the repository&#39;s
+approved strict verification command pass without weakening E01, E02, or E03
+tests. V1 tests remain green.
+
+## 11. Minimal task split
+
+Exactly five implementation tasks fit the two-hour bounded Epic:
+
+1. **Factory, path policy, and native driver adapter** — explicit options,
+   secure directory/file preparation, Node `node:sqlite` availability check,
+   connection close and no-side-effect import.
+2. **Migration manifest and schema inspector** — canonical manifest/hash,
+   contiguous version validation, metadata/history tables, `user_version`
+   consistency, and typed diagnostics.
+3. **WAL and migration lock** — pragma setup/readback, `BEGIN IMMEDIATE`,
+   bounded lock behavior, and deterministic migration transaction.
+4. **Pre-migration backup and recovery** — consistent `VACUUM INTO`/driver
+   backup, temp/sync/rename, backup validation, rollback and interruption
+   fixtures.
+5. **Contract and attack matrix** — declaration/runtime export tests, read-only
+   guard, schema/path/permission/proxy/process attacks, boundary validation,
+   and aggregate quality-gate evidence.
+
+Tasks 2–4 depend on task 1; task 5 depends on all four. No task creates E05
+tables or a daemon command handler.
+
+## 12. Verification contract
+
+The exact command strings become authoritative only in the approved Document
+Bundle. The draft recommends this deterministic gate on Node 22+:
+
+```text
+npm --workspace=@pi-workflow/workflowd run test
+npm run typecheck:v2
+npm run validate:v2-boundaries
+git diff --check
+```
+
+The E04 test command must use `node --test` through the existing workspace
+script and isolated temporary directories. No test may use the user&#39;s default
+`~/.pi`/Runtime database or a network service. Fault tests may spawn short-lived
+child processes only from test-owned temporary directories and must clean up
+all database, WAL, SHM, lock, backup-temp, and fixture files.
+
+Required evidence includes:
+
+- exact migration manifest and canonical digest;
+- SQLite version/driver capability and normalized pragma readback
+  (`journal_mode=wal`, `synchronous=2`, `foreign_keys=1`,
+  `busy_timeout=5000`) for writable and read-only connections;
+- schema inspection before and after each migration;
+- backup path, source version/manifest/schema digests, target digest, file and
+  directory fsync results, permissions/race checks, and read-only reopen result;
+- lock contention and crash/rollback results;
+- path/permission attack matrix;
+- public declaration/export and dependency-boundary results;
+- full command output and exit status for every frozen verification command.
+
+## 13. Rollback and stop boundary
+
+E04 can be reverted before later Runtime tables are introduced. A test database
+and its backups are deleted with the test fixture; no user database is touched.
+If implementation reveals a requirement for command handlers, protocol
+dispatch, leases, external persistence, or a second workspace, stop and revise
+the PRD or split a new Epic. Do not expand E04 silently.
+
+Any migration failure leaves the prior committed schema and a validated backup
+when one was required. Recovery is an explicit diagnostic outcome; E04 never
+auto-repairs, downgrades, drops data, or claims that an unknown external effect
+completed.
+
+## 14. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| `node:sqlite` remains experimental on Node 22 | Keep a narrow adapter; pin/test the supported Node range; missing capability blocks rather than silently switching drivers. |
+| WAL frames are omitted by a file copy | Use a SQLite-consistent backup (`VACUUM INTO` or native equivalent) and reopen/hash the result. |
+| A stale lock file blocks startup forever | Use SQLite `BEGIN IMMEDIATE`/busy timeout as the authority; do not use an unbounded sidecar lock. |
+| DDL is only partly applied | Run all migration statements and schema checks in one transaction and inject process/statement faults. |
+| Future schema is opened by an older binary | Compare `user_version`, metadata, and manifest; expose read-only diagnostics only. |
+| Later Epics couple to private SQL tables | Export only the narrow factory/status contract; E05 and later migrations must be separately owned and versioned. |
+| Synchronous driver blocks `workflowd` | Limit E04 to short bootstrap transactions; long handlers and process work remain outside E04. |
+| Tests touch operator state | Require absolute test-owned paths and fail if default/home paths are used. |
+
+## 15. User approval checklist
+
+- [ ] I approve E04&#39;s bounded result and `@pi-workflow/workflowd` implementation boundary.
+- [ ] I approve native SQLite as the MVP baseline behind a replaceable adapter;
+      E68 qualification is required by the dependency graph for the bounded
+      durable-execution boundary but does not replace or select this driver.
+- [ ] I approve `BEGIN IMMEDIATE` as the migration lock and SQLite-consistent
+      pre-migration backup requirement.
+- [ ] I approve the bootstrap metadata-only schema and explicit E05 handoff.
+- [ ] I approve fail-closed unknown/corrupt schema behavior and read-only diagnostics.
+- [ ] I approve the five-task split and strict verification profile.
+- [ ] I approve the final immutable Document Bundle manifest and Verification Contract.
+
+| Approval manifest | Pending |
+|---|---|
+| Bundle hash | Pending |
+| Verification Contract hash | Pending |
+</pre>
+</main></body></html>

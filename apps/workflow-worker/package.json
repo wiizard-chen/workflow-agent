@@ -15,6 +15,7 @@
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.81.0",
     "@pi-workflow/v2-domain": "file:../../packages/v2-domain",
     "@pi-workflow/v2-protocol": "file:../../packages/v2-protocol"
   }

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "bundleType": "approved-document-bundle",
+  "generatedBy": "docs/v2/epics/E09/generate-bundle.mjs",
+  "files": {
+    "approved-prd.md": "e626eeea63a0194e87b11778355ca46dbd49a3c8c05193ed121238fd96ca1f25",
+    "approved-prd.html": "b563ab729a27efaf0e85d68d82c7ec8cea8faced445a6e0851fa5203b99a4ed8",
+    "document.json": "c3029f809098df15da0ebb8378c7dbf61f53f4b63fddbda32179c91447435d8b"
+  },
+  "documentSha256": "c3029f809098df15da0ebb8378c7dbf61f53f4b63fddbda32179c91447435d8b",
+  "sourcePrdSha256": "e626eeea63a0194e87b11778355ca46dbd49a3c8c05193ed121238fd96ca1f25"
+}

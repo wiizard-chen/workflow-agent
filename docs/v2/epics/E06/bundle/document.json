@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "initiative": "workflow-agent-c2b",
+    "epic": "workflow-agent-c2b.11",
+    "mapId": "E06",
+    "title": "Unix-socket daemon and typed client",
+    "version": "draft-v1",
+    "productStatus": "draft-recommended-mvp",
+    "approvalStatus": "pending-exact-manifest-confirmation",
+    "engineeringEligibility": "ineligible-until-bundle-readback",
+    "deliveryUnits": 1,
+    "maximumTasks": 5,
+    "verificationProfile": "strict"
+  },
+  "sourcePrdSha256": "e7b69c8be9c8dd767e148e475570e276e482348015be7ab36323f50e78c312ba",
+  "sectionHashes": {
+    "1-authority-and-dependency-boundary": "f5d5c01236285f1f9878dddb16ba638e8f9f5e685f4300d4ba4ccc9291b66de6",
+    "2-problem-and-bounded-result": "29037e26c168a68630bd2484a09188da13892cfc759fcc4c9561a362836457a1",
+    "3-1-unix-socket-and-path-policy": "d6038c1d2a57ab81dbfd73551c04ad58ad6aed857b8e6c18c11450c654dd2acc",
+    "3-2-framing-and-bounds": "5592d9ea33a4577d3afbf80679467efd6f224b2ab6702f87c606bed8ffb306a9",
+    "3-3-handshake-and-compatibility": "09c11b34d74d73beb9118baca6cbf27a2dfae07c3b59fd05b3517bde59da78e6",
+    "3-4-methods-and-event-cursor": "bba40ff1620fe520788f4e12d44c8834d57f06fbbe948a27e55ce182de1702c8",
+    "3-5-serialization-and-failure-model": "f7d4f9521283f6dbbc84e6ce785be62effa0177a0290691bbaced5f391ea6e8f",
+    "3-recommended-implementation-decisions": "780c4b66803e8122868002a36cb564e041365b79aac24b0aecded72814c85594",
+    "4-frozen-public-boundary": "399d15ae7ca49f298268606a00c3746146e660a42fdd2f1112d4481b94791dd3",
+    "5-acceptance-criteria": "3c109aad4121dbe5a57cd9e0bb21691fce368384e12946220517c54e831df040",
+    "6-attack-and-fault-matrix": "103cfaf91c501a8c4364a77036b5087275526a7329856bbacdf111fefdc9c906",
+    "7-non-goals-and-stop-boundary": "285617883a82fea32244c9695b1f4b851290fae52fcefdf9dcb4274e637a8fab",
+    "8-implementation-tasks": "980817d3b913a9892dd99e8634213e80a3dfeccd8db74ba351e0535057fc0712",
+    "9-verification-profile": "5707932a476ecf12137887958cf6a7427426abd7f3e240b3f84082ceea666785",
+    "v2-e06-unix-socket-daemon-and-typed-client": "d904fee8adb69155e00b3c18191dc06fe3f3eadad029531dfde3e56ac8df0302"
+  },
+  "dependencies": [
+    "E03",
+    "E05"
+  ],
+  "scope": {
+    "package": "@pi-workflow/workflowd",
+    "implementationArea": "apps/workflowd/src/transport",
+    "included": [
+      "0600 Unix socket lifecycle",
+      "length-prefixed JSON-RPC framing",
+      "version handshake",
+      "health and event replay",
+      "trusted-principal command bridge",
+      "typed reconnecting client"
+    ],
+    "excluded": [
+      "authentication issuance",
+      "workers",
+      "scheduler",
+      "business UI",
+      "TCP/HTTP",
+      "external effects"
+    ]
+  },
+  "verification": {
+    "profile": "strict",
+    "commands": [
+      "npm --workspace=@pi-workflow/workflowd run test",
+      "npm test",
+      "npm run typecheck",
+      "npm run validate:v2-boundaries",
+      "node docs/v2/epics/E06/generate-bundle.mjs --check",
+      "git diff --check"
+    ]
+  }
+}

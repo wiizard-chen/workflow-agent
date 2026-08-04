@@ -50,7 +50,8 @@ Foundation lane *(illustrative only; the `Dependencies` fields below are authori
       E70 + E74 + E77 → E71 Scheduling/Allocation
       E71 + E76 + E77 + E79 → E78 Engineering/Task
       E78 + E79 → E72 Delivery → E80 Release → E81 Outcome
-      E70–E81 → E82 closure → E83 display → Protocol → Store → Daemon → Artifact → Lease
+      E70–E81 → E82 closure → E83 display → domain-specific protocol catalogs
+  E02 → E03 bootstrap Protocol → Store → Daemon → Artifact → Lease → E11
 
 Walking-skeleton lane
   Pi Worker → Git workspace → Local vertical slice
@@ -126,17 +127,17 @@ This walking skeleton must exist before the project invests in every broker and 
 
 ## E03 — Versioned Command/Query/Event schemas
 
-- **Goal:** Create the shared runtime-validated protocol contracts used by daemon, workers, Pi client, and Dashboard.
-- **Deliverables:** command, query, event, aggregate, protocol-version, principal, and human-presence-grant schemas.
-- **Task outline:** define envelopes; add TypeBox/JSON Schema; define server-derived principal scopes; define one-time approval grants; define compatibility rules; test malformed, stale, and forged-human messages.
-- **Non-goals:** no transport and no command handlers.
-- **Dependencies:** E83.
+- **Goal:** Create the stable runtime-validated protocol substrate needed by the first local walking skeleton, while allowing later Domain owners to register family-specific payload catalogs without changing the substrate.
+- **Deliverables:** protocol version and compatibility rules; generic Command/Query/Event envelopes; schema-registry extension seam; server-derived principal context; opaque human-presence-grant reference; and the minimal synthetic E11 command/query/event catalog.
+- **Task outline:** define substrate envelopes and protocol identities; add TypeBox/JSON Schema runtime validation; define the registry and compatibility rules; bind trusted principal context outside client payloads; add the synthetic E11 catalog; test malformed, stale, unknown-version, unknown-schema, and forged-human messages.
+- **Non-goals:** no transport, command handlers, grant issuance/consumption lifecycle, family-specific Product/Approval/Task/Delivery/closure/display semantics, or imports from E70–E83.
+- **Dependencies:** E02.
 - **Unlocks:** E04, E05, E11, E15.
 - **Active time:** `1.5h`.
 - **Delivery Units:** 1.
 - **Verification Profile:** `strict`.
-- **Acceptance:** missing command ID, authenticated principal context, expected version, or invalid payload is rejected; a client-supplied `actor.type=human` is never trusted.
-- **Stop boundary:** protocol package is isolated from V1.
+- **Acceptance:** missing message identity, schema identity, protocol version, authenticated principal context, expected aggregate revision where required, or invalid payload is rejected; a client-supplied `actor.type=human` is never trusted; the synthetic E11 catalog runs without importing later Domain families; later family catalogs can be registered without changing envelope bytes or transferring Domain authority to the protocol package.
+- **Stop boundary:** the protocol package is isolated from V1 and contains only the generic substrate plus removable synthetic E11 catalog; removing a later family catalog never changes the substrate or another family's authority.
 
 ## E04 — SQLite WAL store and migration bootstrap
 
@@ -1223,7 +1224,7 @@ This walking skeleton must exist before the project invests in every broker and 
 - **Scope:** projection version, primary label, phase, badges, reasons, blocker/attention references, source revisions, stable precedence, and raw-fact preservation.
 - **Non-goals:** no Product or domain-family lifecycle, closure authority, plan/preflight, persistence, UI mutation, display-side effects, or third-party authority.
 - **Dependencies:** E82.
-- **Unlocks:** E03, E31 (route notes only; `Dependencies` remains authoritative).
+- **Unlocks:** E31 and registration of the display-projection protocol catalog (route notes only; `Dependencies` remains authoritative).
 - **Acceptance:** display preserves all raw facts, reasons, blockers, and source revisions and has no mutation authority.
 - **Stop boundary:** display package reverts without altering domain authority or UI state.
 - **Active time:** `1.5h`.

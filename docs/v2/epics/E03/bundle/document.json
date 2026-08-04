@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "initiative": "workflow-agent-c2b",
+    "epic": "workflow-agent-c2b.7",
+    "mapId": "E03",
+    "title": "Versioned Command/Query/Event schemas",
+    "version": "draft-v1",
+    "productStatus": "approved-for-mvp-implementation",
+    "approvalStatus": "pending-human-confirmation",
+    "engineeringEligibility": "pending-exact-manifest-confirmation",
+    "deliveryUnits": 1,
+    "verificationProfile": "strict"
+  },
+  "sourcePrdSha256": "bd98fded7c98c993a6f56cf9aea42236e084172245150f521b509b6ae59f2c65",
+  "sectionHashes": {
+    "1-problem-and-outcome": "17a7afe01010fcdc769c829dbd1bf4cfcaf36454f2fc4ef4504a0dbe3cca23a4",
+    "2-frozen-product-decisions": "2be22853341e32b88707b0a3b75d6849b26314c938845956534100c5366d3ae3",
+    "3-public-contract": "6d30839c47b9e96bf27cc8e6317f57ab16e0d6f35e222b23d14fa9677bb75af0",
+    "4-synthetic-e11-catalog": "a1f603c25c60d135f7262e132bafa1f609b06409be20144e2aaeb8b791513806",
+    "5-acceptance-criteria": "9ec251fd8ef3640d855008b736a7c5bc3f6f3212c622c6fb357ac403084e478d",
+    "6-out-of-scope": "b1ed19e1f19915508c2a26bdfd8f311bbe220816c6fb1c4ad6dae9be63183603",
+    "7-reversion-boundary": "a54151ed45713ea4989d34456c21a3a2c24f8f3e88f3672b665d3b12b2b01718",
+    "v2-e03-versioned-command-query-event-schemas": "8e1fe961e2c7127569d18ad5b2ffded827b6cefef5eb2d5058f7d0e3b55c626a"
+  },
+  "scope": {
+    "package": "@pi-workflow/v2-protocol",
+    "included": [
+      "generic command/query/event envelopes",
+      "exact protocol and schema tuple validation",
+      "immutable runtime schema registry and canonical manifest hash",
+      "server-derived principal context and verified grant binding",
+      "synthetic E11 catalog"
+    ],
+    "excluded": [
+      "transport and daemon",
+      "authentication and grant issuance/consumption",
+      "persistence, handlers, workers, Beads, GitHub, and Dashboard",
+      "E70-E83 domain-family authority"
+    ]
+  },
+  "verification": {
+    "profile": "strict",
+    "commands": [
+      "npm --workspace=@pi-workflow/v2-protocol run test",
+      "npm run typecheck:v2",
+      "npm run test:v2",
+      "node scripts/validate-v2-boundaries.mjs",
+      "git diff --check"
+    ]
+  }
+}

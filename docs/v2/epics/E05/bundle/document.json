@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "initiative": "workflow-agent-c2b",
+    "epic": "workflow-agent-c2b.10",
+    "mapId": "E05",
+    "title": "Command journal, event log, and durable outbox",
+    "version": "draft-v1",
+    "productStatus": "draft-recommended-mvp",
+    "approvalStatus": "pending-exact-manifest-confirmation",
+    "engineeringEligibility": "ineligible-until-bundle-readback",
+    "deliveryUnits": 1,
+    "maximumTasks": 5,
+    "verificationProfile": "strict"
+  },
+  "sourcePrdSha256": "3b8439694f75853085a06291695b3f3dfd21f66479a5b5c5819c2b200161b71b",
+  "sectionHashes": {
+    "1-authority-and-dependency-boundary": "1e474f3db8487efca7dda0be0978841cb27c89a40d5835ae259b0ed0c2b1da40",
+    "2-problem-and-bounded-result": "8abc5120244d75723ab7738c906705ebe012a335571e8f1cca22846463dce6fc",
+    "3-1-one-e04-database-and-a-reviewed-extension": "46691802e97f82cfd1bbd2cb5759188139942bfbc8df2cc54ecbe7c075f9fbd1",
+    "3-2-canonical-command-identity": "614035b6f0aa78c6df408f0ccc1471e1e1ce08214e011052a5468195a1889b5f",
+    "3-3-revisions-and-append-only-events": "467458d9fffc45a5791c8b16f48bccab5689caf404057f26b73717f113966bde",
+    "3-4-opaque-projections": "f65c28a9cc0e021a7fbecc3f80ce43203ab782907cb1fbd6211ccc9f23ede79f",
+    "3-5-durable-outbox-and-leases": "ba48dea7c99c1afc01773bc74ca376138230efcc5a6c082b88d729c937cb2669",
+    "3-frozen-implementation-decisions": "049049195f6aa957c63fc73ebee3108be2e3a2b9e77f99a3bd7d0c14e68694ee",
+    "4-public-contract": "5a168e11303d03640d3e0c1f4fe259a09f85352e7d79112d2018864034a9fd9c",
+    "5-transaction-and-recovery-contract": "df3ff172e2316c18867f4088eaa663c0b29f292b189318ca4aeb76070b6fb670",
+    "6-1-required-attack-fault-matrix": "a2694fd29515a2466ef8ce7f700639e052d6e9651be23106fb36b5b9569f1c61",
+    "6-acceptance-criteria-and-attack-matrix": "95dc2c22c40fc16198f11a6321d19f267a38bafb063a67e8584af7524c1b3036",
+    "7-explicit-non-goals-and-stop-boundary": "2cee37f20b1120d128a41283ee3e346dd46bffd49ac0f0ddc2e884e80b1ae8c5",
+    "8-task-split-and-verification": "1468a9837d65cb6c6725b698c4e2a11cff417b592955651ed5f78296734d2ac4",
+    "v2-e05-command-journal-event-log-and-durable-outbox": "6862a416f97efc43d889ee36735d16451fb8cffd6547f084c093310674a56a50"
+  },
+  "dependencies": [
+    "E03",
+    "E04"
+  ],
+  "scope": {
+    "package": "@pi-workflow/workflowd",
+    "implementationArea": "apps/workflowd/src/persistence",
+    "included": [
+      "command journal",
+      "aggregate revision heads",
+      "append-only events",
+      "opaque projections",
+      "durable outbox lease/ack/retry"
+    ],
+    "excluded": [
+      "transport",
+      "external dispatch",
+      "Domain lifecycle authority",
+      "Beads/Git/GitHub",
+      "general leases and workers"
+    ]
+  },
+  "verification": {
+    "profile": "strict",
+    "commands": [
+      "npm --workspace=@pi-workflow/workflowd run test",
+      "npm run test:v1",
+      "npm run typecheck",
+      "npm run validate:v2-boundaries",
+      "node docs/v2/epics/E05/generate-bundle.mjs --check",
+      "git diff --check"
+    ]
+  },
+  "schemaExtension": {
+    "source": "../schema-extension.json",
+    "sha256": "18646cbbd4e08d988fb1fbf0de68906b1e343a51ae3c957bc19a3c3d04beb22c",
+    "migrationManifestSha256": "66862e19847069f334c48fdc4f9d010ebe301ced9f7f5b009bc4a917e983c0dd",
+    "schemaDigest": "393d25e429005c41d9619d1c8582744a79b3419e5b123967dbe21bdb8d6448ba"
+  }
+}

@@ -317,6 +317,10 @@ Release intent, execution, status lookup, and optional compensation are recorded
 
 ## 10. Command, Query, and Event Protocol
 
+E03 starts after E02 and owns only the transport-neutral protocol substrate: stable versioned envelopes, runtime schema validation, compatibility rules, server-derived principal context, opaque human-presence-grant references, and the synthetic catalog required by E11. It does not wait for E83 and does not import or redefine E70–E83 facts, transitions, or projections.
+
+Each later Domain owner publishes its own versioned payload catalog through the E03 registry seam after that Domain contract exists. The dependency direction is from composition code and family catalogs into the protocol substrate; the protocol substrate never imports a family package. E83 therefore unlocks registration of display-projection payloads, not creation of the protocol substrate. A catalog may be added or removed without changing envelope bytes, compatibility semantics, or another Domain family's authority.
+
 ### 10.1 Transport
 
 - Unix domain socket: `~/.pi/workflow/runtime/workflowd.sock`.
@@ -1135,4 +1139,4 @@ The product goals and organizational boundaries that this RFC implements are def
 
 Third-party candidates, evidence classes, and adoption boundaries are recorded in [Third-Party Reuse Survey](./THIRD_PARTY_REUSE_SURVEY.md). The corresponding qualification gates are E67–E69 in the [Initial Epic Map](./INITIAL_EPIC_MAP.md).
 
-The exact 15 bounded domain epics and their authority boundaries are defined in Section 11 and [Initial Epic Map](./INITIAL_EPIC_MAP.md): E02 and E70–E83. Protocol/runtime consumers begin at E03 only after E83; the map `Dependencies` field is the sole scheduling authority. Third-party backends remain bounded implementations behind V2-owned SPIs and never own authority.
+The exact 15 bounded domain epics and their authority boundaries are defined in Section 11 and [Initial Epic Map](./INITIAL_EPIC_MAP.md): E02 and E70–E83. The generic protocol substrate begins at E03 after E02 so the E11 walking skeleton can run; payload catalogs that consume E70–E83 contracts begin only after their owning Domain Epic, with E83 specifically unlocking the display-projection catalog. The map `Dependencies` field is the sole scheduling authority. Third-party backends remain bounded implementations behind V2-owned SPIs and never own authority.

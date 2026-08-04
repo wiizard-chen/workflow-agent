@@ -1,0 +1,186 @@
+# V2 E09 — Pi SDK Engineering Lead worker host
+
+| Field | Value |
+|---|---|
+| Initiative | workflow-agent-c2b |
+| Epic | workflow-agent-voi |
+| Map ID | E09 |
+| Document version | draft-v1 |
+| Product status | DRAFT RECOMMENDED MVP |
+| Approval status | PENDING EXACT MANIFEST CONFIRMATION |
+| Engineering eligibility | INELIGIBLE UNTIL BUNDLE READBACK |
+| Primary workspace | @pi-workflow/workflow-worker |
+| Primary implementation area | apps/workflow-worker/src |
+| Delivery Units | 1 |
+| Maximum implementation tasks | 5 |
+| Verification Profile | strict |
+
+> E09 hosts one bounded Engineering Lead session. It proves that a worker can
+> be started, resumed, handed off, and stopped under a current lease without
+> importing repository extensions or exposing mutation tools. It is a local
+> process boundary and typed library seam; it does not grant business or
+> repository authority.
+
+## 1. Authority and dependency boundary
+
+E09 is subordinate to the Initiative Charter, Architecture RFC, Initial Epic
+Map, E06 transport contract, and E08 lease/fencing contract. E08 remains the
+authority for lease records, fencing tokens, and heartbeat results. The worker
+consumes a narrow injected `LeaseAuthority` structural port so the application
+workspace does not import workflowd or native SQLite; E01's V2 boundary rule
+forbids application-to-application dependencies. A later daemon/transport
+adapter may bind E08 to this port without changing the worker package.
+
+Pi SDK is used only through the pinned `@earendil-works/pi-coding-agent`
+package. The worker constructs a literal ResourceLoader and in-memory settings
+manager. It never loads repository V1 extensions, global or project `.pi`
+resources, package-manager sources, or arbitrary providers.
+
+## 2. Problem and bounded result
+
+A durable Runtime needs an independent Lead worker that can outlive a client
+turn while remaining fenced and recoverable. E09 delivers:
+
+1. an explicit `idle → starting → running → aborting → exited` host lifecycle;
+2. a real Pi SDK Lead-session factory with durable `SessionManager` JSONL files;
+3. a strict empty-tool ResourceLoader and a diagnostic-only prompt boundary;
+4. lease acquisition, guard-before-prompt, heartbeat observation, idempotent
+   abort, bounded SDK cleanup, and stable process exit codes;
+5. generation persistence, restart/resume readback, and handoff lineage with a
+   SHA-256 snapshot reference; and
+6. an embeddable process runner handling SIGINT/SIGTERM or AbortSignal without
+   calling `process.exit` before cleanup.
+
+The MVP keeps the lease port injected. E11 or a later transport epic owns
+daemon launch/IPC and supplies the concrete E08 bridge.
+
+## 3. Recommended implementation decisions
+
+### 3.1 Host state and lease identity
+
+Every host has a stable worker ID, an explicit `(resourceKind, resourceId,
+ownerId)` lease request, and a generation number. The acquired record is copied
+into a frozen credential snapshot. A host cannot start without a current lease;
+resume guards persisted credentials before constructing a session; handoff
+revokes old credentials and acquires a strictly newer fencing token.
+
+### 3.2 Controlled Pi SDK binding
+
+The adapter uses `SessionManager.create/open` below a dedicated runtime root and
+a literal ResourceLoader whose extension, skill, prompt, theme, and agent-file
+collections are empty. `SettingsManager.inMemory()` prevents project/global
+settings reads. `ModelRuntime` uses a runtime-local auth path, `modelsPath =
+null`, and `allowModelNetwork = false`; callers may inject a pre-qualified
+model/runtime. `createAgentSession` receives both `tools: []` and
+`noTools: "all"`.
+
+### 3.3 Resource and prompt boundary
+
+The resource list is an immutable allowlist of runtime identifiers with the
+single `diagnostic-read` capability. Resource IDs reject path syntax, NULs,
+accessors, unsafe proxies, symbols, and duplicates. Diagnostic prompts are a
+UX filter in addition to the hard SDK empty-tool ceiling; mutation-intent
+keywords are rejected before adapter invocation. The lease is guarded
+immediately before and after every prompt.
+
+### 3.4 Heartbeat, abort, and process lifecycle
+
+The worker wraps the E08 heartbeat controller and polls its typed failure state.
+Any expiry, revoke, fencing, store, or malformed result enters one idempotent
+abort path: mark `aborting`, stop heartbeat/monitor timers, bounded-abort and
+dispose the Lead session, persist a secret-free terminal record, then expose
+`exited`. The process runner maps a clean stop to code `0`, missing lease to
+`78`, and other failures to `1`; it never calls `process.exit` internally.
+
+### 3.5 Durable generation and handoff
+
+State is an atomically written, mode-restricted JSON record under the runtime
+root. It contains worker/session identity, resource IDs, credentials, state,
+timestamps, predecessor generation, and a SHA-256 handoff snapshot reference.
+State and session paths reject lexical escapes and symlinks. Unknown fields,
+corrupt JSON, invalid credentials, and stale lease bindings fail closed.
+
+## 4. Frozen public boundary
+
+The worker entrypoint exposes only typed host/factory/runner facades, immutable
+records, and the narrow `LeaseAuthority` port. It exposes no native Pi
+`AgentSession`, ResourceLoader, SQLite/SQL, timer handle, child-process handle,
+filesystem callback, shell/write/subagent tool, or workflowd import.
+
+The concrete E08 bridge is outside this package. Tests use a structurally
+compatible in-memory authority and verify the same guard, heartbeat, revoke,
+and fencing contract.
+
+## 5. Acceptance criteria
+
+- AC-001 Import safety: importing the worker has no filesystem, socket, model,
+  extension, or process side effect.
+- AC-002 Typed lifecycle: start without a lease rejects; valid start reaches
+  `running`; explicit abort and close are idempotent and reach `exited`.
+- AC-003 Controlled SDK: the real adapter creates a persistent Pi session with
+  empty extensions/resources/tools and does not execute repository `.pi`
+  extensions or read project/global settings.
+- AC-004 Diagnostic ceiling: only allowlisted descriptors are visible;
+  malformed/hostile resources and mutation-intent prompts are rejected before
+  adapter invocation; no repository mutation is possible through the SDK.
+- AC-005 Lease/fencing: start and resume require current credentials; guard is
+  checked before and after a prompt; heartbeat loss aborts once, disposes the
+  session, persists a terminal diagnostic, and is observed by the runner.
+- AC-006 Persistence: generation/session/lease metadata survives close/reopen;
+  corrupt, oversized, symlinked, outside-root, or unknown-field state fails
+  closed without partial replacement.
+- AC-007 Handoff: old session is disposed, old credentials are revoked, a fresh
+  generation/token is acquired, and a deterministic 64-character snapshot hash
+  plus predecessor generation is persisted.
+- AC-008 Process boundary: signals and AbortSignal drain the host without
+  premature process exit; missing lease maps to `78`, failures to `1`, clean
+  stop to `0`; internal host exit is observed.
+- AC-009 Evidence: worker tests, workflowd regression tests, full repository
+  tests/typecheck, boundary validation, deterministic Bundle check, and diff
+  check all pass.
+
+## 6. Attack and fault matrix
+
+| ID | Fault/attack | Expected invariant |
+|---|---|---|
+| AM-01 | repository/global `.pi` extension writes a marker | custom loader never imports it |
+| AM-02 | resource accessor, proxy, symbol, duplicate, path escape | reject before session creation |
+| AM-03 | shell/write/Git/Beads/subagent prompt injection | typed rejection; adapter not called |
+| AM-04 | expired, revoked, replaced, or mismatched lease | guard/heartbeat fails closed |
+| AM-05 | lease lost during a prompt | one abort/dispose path; no stale success |
+| AM-06 | heartbeat/monitor/close race | no post-close beat or leaked monitor |
+| AM-07 | corrupt/oversized/unknown/symlinked state | resume rejects without outside-root I/O |
+| AM-08 | adapter abort/dispose hangs | bounded timeout diagnostic |
+| AM-09 | handoff/restart with stale generation | fresh fencing token and lineage required |
+| AM-10 | process signal or internal host exit | runner resolves with correct code |
+
+## 7. Non-goals and stop boundary
+
+E09 does not run Dev/Reviewer roles, launch permits, schedule work, mutate
+code/repositories, call shell/Git/GitHub/Beads, provide sandboxing, perform
+network/provider discovery, own business authority, or implement daemon IPC.
+The diagnostic prompt is the only Lead action. The full Runtime bridge and the
+first synthetic job belong to E11.
+
+## 8. Implementation tasks
+
+| Beads task | Deliverable |
+|---|---|
+| workflow-agent-voi.1 | Typed worker lifecycle and Pi Lead adapter seam |
+| workflow-agent-voi.2 | Allowlisted ResourceLoader and diagnostic boundary |
+| workflow-agent-voi.3 | LeaseAuthority/heartbeat/abort integration |
+| workflow-agent-voi.4 | Generation/session persistence and handoff |
+| workflow-agent-voi.5 | Tests, deterministic Bundle, Manifest, and evidence |
+
+## 9. Verification commands
+
+```text
+npm --workspace=@pi-workflow/workflow-worker run test
+npm --workspace=@pi-workflow/workflow-worker run typecheck
+npm --workspace=@pi-workflow/workflowd run test
+npm test
+npm run typecheck
+npm run validate:v2-boundaries
+node docs/v2/epics/E09/generate-bundle.mjs --check
+git diff --check
+```

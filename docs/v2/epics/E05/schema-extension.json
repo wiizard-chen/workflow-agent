@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "extensionId": "e05-command-journal-v1",
+  "migrationVersion": 2,
+  "migrationId": "e05.command-journal.2",
+  "limits": {
+    "maxBatchItems": 128,
+    "maxCanonicalJsonBytes": 1048576,
+    "maxJsonDepth": 64,
+    "maxIdentifierBytes": 256
+  },
+  "tables": [
+    {
+      "name": "workflow_aggregate_head",
+      "createSql": "CREATE TABLE workflow_aggregate_head (aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision >= 0), updated_event_id TEXT REFERENCES workflow_event_log(event_id), PRIMARY KEY (aggregate_type, aggregate_id))",
+      "columns": [
+        {"name":"aggregate_type","type":"TEXT","notnull":1,"pk":1},
+        {"name":"aggregate_id","type":"TEXT","notnull":1,"pk":2},
+        {"name":"revision","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"updated_event_id","type":"TEXT","notnull":0,"pk":0}
+      ],
+      "indexes": [{"unique":true,"columns":["aggregate_type","aggregate_id"],"origin":"pk"}],
+      "foreignKeys": [{"from":["updated_event_id"],"table":"workflow_event_log","to":["event_id"]}]
+    },
+    {
+      "name": "workflow_command_journal",
+      "createSql": "CREATE TABLE workflow_command_journal (command_id TEXT NOT NULL PRIMARY KEY, command_hash TEXT NOT NULL, input_json TEXT NOT NULL, result_json TEXT NOT NULL, result_hash TEXT NOT NULL, outcome TEXT NOT NULL CHECK (outcome IN ('committed', 'rejected')), aggregate_type TEXT, aggregate_id TEXT, revision INTEGER NOT NULL CHECK (revision >= 0), event_ids_json TEXT NOT NULL, outbox_ids_json TEXT NOT NULL, principal_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL)",
+      "columns": [
+        {"name":"command_id","type":"TEXT","notnull":1,"pk":1},
+        {"name":"command_hash","type":"TEXT","notnull":1,"pk":0},
+        {"name":"input_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"result_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"result_hash","type":"TEXT","notnull":1,"pk":0},
+        {"name":"outcome","type":"TEXT","notnull":1,"pk":0},
+        {"name":"aggregate_type","type":"TEXT","notnull":0,"pk":0},
+        {"name":"aggregate_id","type":"TEXT","notnull":0,"pk":0},
+        {"name":"revision","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"event_ids_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"outbox_ids_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"principal_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"created_at_ms","type":"INTEGER","notnull":1,"pk":0}
+      ],
+      "indexes": [{"unique":true,"columns":["command_id"],"origin":"pk"}]
+    },
+    {
+      "name": "workflow_event_log",
+      "createSql": "CREATE TABLE workflow_event_log (event_id TEXT NOT NULL UNIQUE, aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, aggregate_sequence INTEGER NOT NULL CHECK (aggregate_sequence > 0), global_cursor INTEGER NOT NULL UNIQUE, schema_id TEXT NOT NULL, schema_version INTEGER NOT NULL, payload_json TEXT NOT NULL, principal_json TEXT NOT NULL, correlation_id TEXT NOT NULL, causation_id TEXT NOT NULL REFERENCES workflow_command_journal(command_id), occurred_at TEXT NOT NULL, PRIMARY KEY (aggregate_type, aggregate_id, aggregate_sequence))",
+      "columns": [
+        {"name":"event_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"aggregate_type","type":"TEXT","notnull":1,"pk":1},
+        {"name":"aggregate_id","type":"TEXT","notnull":1,"pk":2},
+        {"name":"aggregate_sequence","type":"INTEGER","notnull":1,"pk":3},
+        {"name":"global_cursor","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"schema_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"schema_version","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"payload_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"principal_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"correlation_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"causation_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"occurred_at","type":"TEXT","notnull":1,"pk":0}
+      ],
+      "indexes": [
+        {"unique":true,"columns":["event_id"],"origin":"u"},
+        {"unique":true,"columns":["aggregate_type","aggregate_id","aggregate_sequence"],"origin":"pk"},
+        {"unique":true,"columns":["global_cursor"],"origin":"u"}
+      ],
+      "foreignKeys": [{"from":["causation_id"],"table":"workflow_command_journal","to":["command_id"]}]
+    },
+    {
+      "name": "workflow_outbox",
+      "createSql": "CREATE TABLE workflow_outbox (outbox_id TEXT NOT NULL PRIMARY KEY, event_id TEXT NOT NULL REFERENCES workflow_event_log(event_id), intent_kind TEXT NOT NULL, operation_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'leased', 'acked')), available_at_ms INTEGER NOT NULL, attempt INTEGER NOT NULL CHECK (attempt >= 0), owner TEXT, generation INTEGER, lease_until_ms INTEGER, ack_hash TEXT, ack_json TEXT, last_error TEXT)",
+      "columns": [
+        {"name":"outbox_id","type":"TEXT","notnull":1,"pk":1},
+        {"name":"event_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"intent_kind","type":"TEXT","notnull":1,"pk":0},
+        {"name":"operation_key","type":"TEXT","notnull":1,"pk":0},
+        {"name":"payload_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"payload_hash","type":"TEXT","notnull":1,"pk":0},
+        {"name":"status","type":"TEXT","notnull":1,"pk":0},
+        {"name":"available_at_ms","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"attempt","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"owner","type":"TEXT","notnull":0,"pk":0},
+        {"name":"generation","type":"INTEGER","notnull":0,"pk":0},
+        {"name":"lease_until_ms","type":"INTEGER","notnull":0,"pk":0},
+        {"name":"ack_hash","type":"TEXT","notnull":0,"pk":0},
+        {"name":"ack_json","type":"TEXT","notnull":0,"pk":0},
+        {"name":"last_error","type":"TEXT","notnull":0,"pk":0}
+      ],
+      "indexes": [
+        {"unique":true,"columns":["outbox_id"],"origin":"pk"},
+        {"unique":true,"columns":["operation_key"],"origin":"u"}
+      ],
+      "foreignKeys": [{"from":["event_id"],"table":"workflow_event_log","to":["event_id"]}]
+    },
+    {
+      "name": "workflow_projection_state",
+      "createSql": "CREATE TABLE workflow_projection_state (projection_name TEXT NOT NULL, projection_key TEXT NOT NULL, source_event_id TEXT NOT NULL REFERENCES workflow_event_log(event_id), source_aggregate_revision INTEGER NOT NULL CHECK (source_aggregate_revision > 0), value_json TEXT NOT NULL, value_hash TEXT NOT NULL, PRIMARY KEY (projection_name, projection_key))",
+      "columns": [
+        {"name":"projection_name","type":"TEXT","notnull":1,"pk":1},
+        {"name":"projection_key","type":"TEXT","notnull":1,"pk":2},
+        {"name":"source_event_id","type":"TEXT","notnull":1,"pk":0},
+        {"name":"source_aggregate_revision","type":"INTEGER","notnull":1,"pk":0},
+        {"name":"value_json","type":"TEXT","notnull":1,"pk":0},
+        {"name":"value_hash","type":"TEXT","notnull":1,"pk":0}
+      ],
+      "indexes": [{"unique":true,"columns":["projection_name","projection_key"],"origin":"pk"}],
+      "foreignKeys": [{"from":["source_event_id"],"table":"workflow_event_log","to":["event_id"]}]
+    }
+  ],
+  "triggers": []
+}

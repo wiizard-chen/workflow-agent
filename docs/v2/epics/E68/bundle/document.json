@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "documentType": "bounded-qualification-epic-prd",
+  "metadata": {
+    "initiative": "workflow-agent-c2b",
+    "epic": "workflow-agent-c2b.9",
+    "mapId": "E68",
+    "title": "Native SQLite versus durable backend qualification",
+    "version": "draft-v1",
+    "productStatus": "draft",
+    "approvalStatus": "pending-human-confirmation",
+    "engineeringEligibility": "pending-exact-manifest-confirmation",
+    "deliveryUnits": 1,
+    "verificationProfile": "strict"
+  },
+  "sourcePrdSha256": "a2867b64313ce70a324de2726424a9611995c6f85d0342653ce7bae113152a09",
+  "sectionHashes": {
+    "1-authority-and-dependency-boundary": "9b47155246be36c67950e1a794b4a4c9be03fc3faf6af26d6beaaf99ed0eb264",
+    "10-acceptance-criteria": "445caebf30daa2635411d3fabb9adab51165a489be8c343dd8184a2cfcef68b2",
+    "11-minimal-task-split": "530cf44361404913c75e472d1b6ea7821142de642f55c42ab0871893e9e9cabe",
+    "12-verification-contract": "c0b099479f57cd268c713fd55b468575bf4bf5a5e64f4d92694e685bd8f07320",
+    "13-rollback-and-stop-boundary": "541e3b5233fbfc89e8e3cd6dee1490f57cbcf75c668d4cbafeda17179981182d",
+    "14-risks-and-mitigations": "a0dab7e4f5e9827bcb753bc0c71235e5b54c0c58480a2abf126f0a6a592618bc",
+    "15-user-approval-checklist": "3ba1add0a0b7484c5df6187ccd85011294cf5237fa1ce056430348d9947e2d94",
+    "2-problem-statement": "b4f72964ead010a459f7578b8da35c1a54545b9ca08e80388ada3a36ee0b5085",
+    "3-goal-and-bounded-result": "54594274dd0c06cb25242c9fe2146d76f533089862684ef31fd4fd8bc0ff58a2",
+    "4-1-baseline": "e4d41c434f2e1cd7c10be2426dec8e247affcb0a878730fa75620ddcd25bee61",
+    "4-2-candidate-set": "24d7e73c1cca5ac1989f89bdd9f39ec5743f0bdb408c2482dbf2499a9a153710",
+    "4-3-spi-and-authority-contract": "cef34a849e0db483764d4466625e17cc33bf166c13613f393495e869d312bd64",
+    "4-4-evidence-and-provenance": "993c6030549a9ff364d4cedb917f9b8699dda7b16f994b2f3e4298360fcce0d1",
+    "4-5-disposition-policy": "efbadcae06ce1b8fd90d3fe2d26622f97b8c2a961d9d058cf26fa04d00a76a11",
+    "4-recommended-qualification-decisions": "26048b31c672fca55d8391fd1d71e15382553380d8ecb287fc91188ba2b45717",
+    "5-users-and-success-outcomes": "b62c2812b0d584be3fd188fdf44eb1a7d3eb9aa5c918f11783ff110df57ad6b0",
+    "6-frozen-evidence-boundary": "8282ae11ebdfca200fcc57840ff8a73d9f622c98e43495e68379228d7ab2ee39",
+    "7-functional-requirements": "b8e8c08d5b77d19819bb6c2e6cbe545e2789db61dfd3410d3f0168d4e692a96b",
+    "8-non-functional-and-security-requirements": "40da47f107370819bc7980b4db7a15b755731f3f3c0504e07092d22a1a69462c",
+    "9-explicit-non-goals": "6a8937c14ab1b5079ac97243a022225d5e0daf98736c2a47f19e6a5b53fc4612",
+    "ac-001-exact-candidate-and-baseline-manifest": "681a897a7275fa17a5075655c9ff7ac7b3056e24a2e72a035efb34eff6c270b3",
+    "ac-002-contract-gate": "79c2421779e532d074437c1c3d4f2ae5670ab3a5a766ab7cb33376a98829708e",
+    "ac-003-recovery-and-fault-matrix": "9971429c6df708a931ce6e8fd3390a20469bb7220a76749f874d0634dcb3ef8d",
+    "ac-004-idempotency-and-artifact-integrity": "c0d7f81bace944dc7e0ed526aaccdabee6b3456bf097445edc334c6128842bb6",
+    "ac-005-isolation-gate": "8ffe3492a1cd2bcce9d3d6e9d870c897ca39c673f4d583bb1b7e137d097a0a67",
+    "ac-006-provenance-gate": "f25cda7d8e8cb7f5d7eca40c1e5f7af840d1a65a5c60a15a060b78530e15b167",
+    "ac-007-decision-posture": "d668ca7b849c9f4ce9a83377593fc5b6acdbce7b65de29200e453f6a80f3de29",
+    "ac-008-native-fallback": "f7ad53c14e1a9df079770d6a48526eb864a9d2a184c8fb3aa3543877d161227c",
+    "ac-009-deterministic-bundle": "6c4e3c12eee64c256334b6a00d2b3700a0da716a9930a992d1019eaeea87d20a",
+    "ac-010-side-effect-boundary": "db74e9bb916e305e2b0919602dbe5d04ad22f4a39690eff002b45581b19e2c85",
+    "ac-011-existing-v2-gates": "2975f75de5aeceea87cf8c170669ea5206469ddbfea9e4483149112d68a9a818",
+    "fr-001-closed-candidate-manifest": "78c82309b9482680130c42550e2a7363176cfb3adc94c482d7756405ff270506",
+    "fr-002-versioned-spi-mapping": "5fd2dc0ec160a3a58411bd4622e7af3293006ef5106fd4ba506a76629e737f1f",
+    "fr-003-native-baseline-parity": "0688e3421244beca1aaa79dbbd13fde63099f0ff3bfd9b4009815fb32f126478",
+    "fr-004-recovery-matrix": "e4b243afcce81f95755e25296a601a871254a8485970cd6665046c39e04ba3cd",
+    "fr-005-idempotency-and-fencing": "d4142a3a30f00bf4ac6653d42f6e5eb5677f2c786916160dfde66fe05e61c2ea",
+    "fr-006-authority-isolation": "ca7bfb0e8c0a73fc733662e4d8b4b539e25e26d806e793b69b0bfa0efacebf66",
+    "fr-007-provenance-and-artifact-identity": "0d1eefe865f039fd5e3370c999df5b805b1f2a6d5bc709215f4e6853a6044a24",
+    "fr-008-fail-closed-unavailable-candidates": "b05de2b795ad4b1929871c43d1730bef60d2821a6596c09495b9dc77d091a369",
+    "fr-009-deterministic-comparison": "31433139f4f03eb327d497a7392a34917c2889acc229df4f9673cda5fc7dc8c9",
+    "fr-010-no-implementation-side-effects": "f3fe05c3ae71d3aa3b62b652a21dbec5a6d805e7fea8cc10c3cdfbc1579b64a5",
+    "us-01-runtime-architect": "4a36ba943662760de44b5eed31aaaf72dd1f2ded7b54f17b5edf65f7bfcba8ab",
+    "us-02-fault-test-author": "c320b2bfd58895c549ea9270c07d96a63f989259676665f2153be0c576ac31c5",
+    "us-03-governance-reviewer": "a1050eaad796c6e74111d39a55af3fa6d54c2d249e7c9017a5ee3c9964abdc8a",
+    "us-04-e04-maintainer": "f24d1be05c56e421b4f032619b49e3397dc0de9d8ed7b3e351f637e8a2840e6c",
+    "v2-e68-native-sqlite-versus-durable-backend-qualification": "0082d33a8c7c4b88fef6b893c5263749180e2b2bf8433e7610f7e1612bf51681"
+  },
+  "dependencies": [
+    "E01"
+  ],
+  "scope": {
+    "baseline": "native SQLite WAL plus V2 Step Ledger",
+    "candidates": [
+      "temporal",
+      "restate",
+      "dbos-transact-ts",
+      "hatchet"
+    ],
+    "dispositionSet": [
+      "QUALIFIED",
+      "ADAPT",
+      "REFERENCE",
+      "REJECTED",
+      "BLOCKED"
+    ],
+    "productionCodeChanges": false
+  },
+  "verification": {
+    "profile": "strict",
+    "commands": [
+      "node docs/v2/epics/E68/generate-bundle.mjs --check",
+      "npm run typecheck:v2",
+      "node scripts/validate-v2-boundaries.mjs",
+      "git diff --check"
+    ]
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "documentType": "bounded-epic-prd",
+  "metadata": {
+    "initiative": "workflow-agent-c2b",
+    "epic": "workflow-agent-c2b.12",
+    "mapId": "E07",
+    "title": "Content-addressed Artifact Store",
+    "version": "draft-v1",
+    "productStatus": "draft-recommended-mvp",
+    "approvalStatus": "pending-exact-manifest-confirmation",
+    "engineeringEligibility": "ineligible-until-bundle-readback",
+    "deliveryUnits": 1,
+    "maximumTasks": 5,
+    "verificationProfile": "strict"
+  },
+  "sourcePrdSha256": "5900df892c656a28929fded252ed43c98556c5119acb5de5e998733e7013932d",
+  "sectionHashes": {
+    "1-authority-and-dependency-boundary": "05b6c3cabb0ddb8c105b0381703a714a18820adae57c3cfcd91fecd3e8921d49",
+    "2-problem-and-bounded-result": "a884bee8eb1d83c166962eae0fd84a47ea1e375633bdaeb91de7e4bbcfd51f5f",
+    "3-1-root-and-path-policy": "80a1cfdd99d4df9b31025cac5725f3c33768db304d14018e234a068bf3398deb",
+    "3-2-identity-atomicity-and-immutability": "b3055d3ec753c7490b1cf3e8535ce3b6d0805fc7da13430da6ac6bb97924f877",
+    "3-3-registration-metadata-and-redaction-boundary": "c3971434c752daced0482b39f0b5e9cfda526d301c8cfbcde56b56d0e9e23321",
+    "3-4-registry-and-integrity-scanner": "f64ef86372ac7e938c99d39c7717ffcd95f6abcb88fc5379d37199b5425301d9",
+    "3-recommended-implementation-decisions": "780c4b66803e8122868002a36cb564e041365b79aac24b0aecded72814c85594",
+    "4-frozen-public-boundary": "280ce0f696238750ce29e6b612c85a0625a16e2277fabae58ad6b39432987236",
+    "5-acceptance-criteria": "d4468b561141e7ff9edbf1379bc6821682792745b1dfb9ead649e3cda9d9832c",
+    "6-attack-and-fault-matrix": "32d2aebc94086f7a9b93ad5aea6a9c407e73a0ca2e5d13991e0c3639ad21d8ff",
+    "7-non-goals-and-stop-boundary": "a5427c7fb43543cf8940cceed43eb7fdbc459d0e0fe8eb5121164244dc91b1e1",
+    "8-implementation-tasks": "f8f10a03e22566b847fcbdd45529e50a15b6df47f05a42a60c6d852f20d833d6",
+    "9-verification-profile": "248ff659360a1c5d4239dcda0f2397799b12b646ae6656b87139ab43d5bb6c8c",
+    "v2-e07-content-addressed-artifact-store": "7a5de88388c1176fa3c64452bfc8e47d870f1ccf8158ef5086e25b79c1e17ff6"
+  },
+  "dependencies": [
+    "E04"
+  ],
+  "scope": {
+    "package": "@pi-workflow/workflowd",
+    "implementationArea": "apps/workflowd/src/artifacts",
+    "included": [
+      "atomic 0600 content writes",
+      "SHA-256 object identity",
+      "SQLite registration metadata",
+      "typed read/verify/manifest",
+      "deterministic orphan and corruption scan",
+      "redaction metadata boundary"
+    ],
+    "excluded": [
+      "redaction processing",
+      "retention deletion",
+      "secret scanning",
+      "remote upload",
+      "Docs publication",
+      "external effects"
+    ]
+  },
+  "verification": {
+    "profile": "strict",
+    "commands": [
+      "npm --workspace=@pi-workflow/workflowd run test",
+      "npm test",
+      "npm run typecheck",
+      "npm run validate:v2-boundaries",
+      "node docs/v2/epics/E07/generate-bundle.mjs --check",
+      "git diff --check"
+    ]
+  }
+}
