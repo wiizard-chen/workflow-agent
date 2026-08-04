@@ -202,8 +202,21 @@ test("fresh-process import and all five values produce zero observable effects",
     import https from "node:https";
     import net from "node:net";
     import { isDeepStrictEqual } from "node:util";
+    // Node lazily creates its internal Undici dispatcher on the first fetch
+    // access. Materialize that runtime-owned symbol before taking the
+    // descriptor baseline and exclude it from the contract snapshot.
+    void globalThis.fetch;
+    function globalDescriptorsWithoutLazyRuntimeState() {
+      const descriptors = Object.getOwnPropertyDescriptors(globalThis);
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (typeof key === "symbol" && String(key).includes("undici.globalDispatcher")) {
+          delete descriptors[key];
+        }
+      }
+      return descriptors;
+    }
     const originalKeys = Reflect.ownKeys(globalThis);
-    const originalDescriptors = Object.getOwnPropertyDescriptors(globalThis);
+    const originalDescriptors = globalDescriptorsWithoutLazyRuntimeState();
     const originalEnvironment = Object.fromEntries(Object.entries(process.env));
     const originalCwd = process.cwd();
     const originalEvents = process.eventNames();
@@ -225,7 +238,9 @@ test("fresh-process import and all five values produce zero observable effects",
       restore.push(() => Object.defineProperty(object, key, descriptor));
     }
     const trap = (name, value) => (..._args) => { events.push(name); return value; };
-    for (const key of ["readFileSync", "writeFileSync", "appendFileSync", "mkdirSync", "rmSync", "unlinkSync", "renameSync", "openSync", "createReadStream", "createWriteStream"]) patch(fs, key, trap("fs." + key));
+    // Leave openSync available to Node's ESM loader; it is runtime plumbing,
+    // not an observable effect of the readiness module itself.
+    for (const key of ["readFileSync", "writeFileSync", "appendFileSync", "mkdirSync", "rmSync", "unlinkSync", "renameSync", "createReadStream", "createWriteStream"]) patch(fs, key, trap("fs." + key));
     for (const key of ["writeFile", "appendFile", "mkdir", "rm", "unlink", "rename", "open"]) patch(fs.promises, key, trap("fs.promises." + key, Promise.resolve()));
     for (const key of ["spawn", "spawnSync", "exec", "execSync", "fork"]) patch(childProcess, key, trap("child_process." + key));
     for (const [object, prefix, keys] of [[http, "http", ["request", "get", "createServer"]], [https, "https", ["request", "get", "createServer"]], [net, "net", ["connect", "createConnection", "createServer"]], [dgram, "dgram", ["createSocket"]]]) for (const key of keys) patch(object, key, trap(prefix + "." + key));
@@ -286,9 +301,16 @@ test("fresh-process import and all five values produce zero observable effects",
     } finally {
       for (const undo of restore.reverse()) undo();
       const eventNames = process.eventNames();
+      const afterDescriptors = globalDescriptorsWithoutLazyRuntimeState();
+      const descriptorKeys = new Set([
+        ...Reflect.ownKeys(originalDescriptors),
+        ...Reflect.ownKeys(afterDescriptors),
+      ]);
+      const descriptorDiffs = [...descriptorKeys].filter((key) =>
+        !isDeepStrictEqual(originalDescriptors[key], afterDescriptors[key]));
       restoration = {
         keys: isDeepStrictEqual(Reflect.ownKeys(globalThis), originalKeys),
-        descriptors: isDeepStrictEqual(Object.getOwnPropertyDescriptors(globalThis), originalDescriptors),
+        descriptors: descriptorDiffs.length === 0,
         environment: isDeepStrictEqual(Object.fromEntries(Object.entries(process.env)), originalEnvironment),
         cwd: process.cwd() === originalCwd,
         events: isDeepStrictEqual(eventNames, originalEvents),

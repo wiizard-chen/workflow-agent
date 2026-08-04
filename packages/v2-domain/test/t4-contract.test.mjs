@@ -451,8 +451,21 @@ test("fresh-process import and every public helper produce zero observable effec
 
     const moduleSource = fs.readFileSync(new URL(${JSON.stringify(moduleUrl)}), "utf8");
     const instrumentedModuleUrl = "data:text/javascript;base64," + Buffer.from(moduleSource).toString("base64");
+    // Node lazily creates its internal Undici dispatcher on the first fetch
+    // access. Materialize that runtime-owned symbol before taking the
+    // descriptor baseline; the fetch trap below still detects module calls.
+    void globalThis.fetch;
+    function globalDescriptorsWithoutLazyRuntimeState() {
+      const descriptors = Object.getOwnPropertyDescriptors(globalThis);
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (typeof key === "symbol" && String(key).includes("undici.globalDispatcher")) {
+          delete descriptors[key];
+        }
+      }
+      return descriptors;
+    }
     const originalGlobalKeys = Reflect.ownKeys(globalThis);
-    const originalGlobalDescriptors = Object.getOwnPropertyDescriptors(globalThis);
+    const originalGlobalDescriptors = globalDescriptorsWithoutLazyRuntimeState();
     const originalEnvironment = Object.fromEntries(Object.entries(process.env));
     const originalCwd = process.cwd();
     const originalEventNames = process.eventNames();
@@ -552,12 +565,20 @@ test("fresh-process import and every public helper produce zero observable effec
     } finally {
       for (const undo of restore.reverse()) undo();
       const restoredEventNames = process.eventNames();
+      const globalDescriptorDiffs = [];
+      const afterGlobalDescriptors = globalDescriptorsWithoutLazyRuntimeState();
+      const descriptorKeys = new Set([
+        ...Reflect.ownKeys(originalGlobalDescriptors),
+        ...Reflect.ownKeys(afterGlobalDescriptors),
+      ]);
+      for (const key of descriptorKeys) {
+        if (!isDeepStrictEqual(originalGlobalDescriptors[key], afterGlobalDescriptors[key])) {
+          globalDescriptorDiffs.push(String(key));
+        }
+      }
       restoration = {
         globalKeys: isDeepStrictEqual(Reflect.ownKeys(globalThis), originalGlobalKeys),
-        globalDescriptors: isDeepStrictEqual(
-          Object.getOwnPropertyDescriptors(globalThis),
-          originalGlobalDescriptors,
-        ),
+        globalDescriptors: globalDescriptorDiffs.length === 0,
         environment: isDeepStrictEqual(
           Object.fromEntries(Object.entries(process.env)),
           originalEnvironment,
